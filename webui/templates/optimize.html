@@ -1,0 +1,150 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% extends "base.html" %}
+{% block title %}Optimize · {{ device_name }}{% endblock %}
+{% block content %}
+<div style="max-width:920px;margin:0 auto;">
+  <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:4px;flex-wrap:wrap;">
+    <h1 style="font-size:20px;margin:0;">Optimize
+      <span class="dash">·</span>
+      <span style="">{{ device_name }}</span></h1>
+    <span class="dash" style="font-size:12px;">in-place config hygiene - same-vendor, reversible</span>
+    <span style="flex:1;"></span>
+    <a href="/devices" class="btn ghost sm">&larr; Devices</a>
+  </div>
+  <p class="dash" style="margin:0 0 18px;font-size:13px;line-height:1.5;">
+    Gateshift finds objects <b>nothing references</b> (safe to delete), you curate, and it deletes the
+    selected ones - on PAN-OS the <b>candidate</b> config (commit/revert on the box); on CheckPoint
+    staged in a Mgmt session you <b>Publish or Discard</b> here; on FortiGate deleted <b>LIVE</b> (a
+    full-config backup is taken first - FortiOS has no candidate/undo). Each apply re-validates so a
+    still-referenced object can never be deleted.
+  </p>
+
+  <div id="warnings" style="margin-bottom:14px;"></div>
+  <div id="loading" class="dash">Analyzing…</div>
+
+  <div id="result" style="display:none;">
+    <div id="empty" class="dash" style="display:none;padding:16px;border:1px solid var(--line);border-radius:0;background:var(--bg1);">
+      [OK] Nothing to clean up - no unused objects found.</div>
+    <div id="unused-wrap" style="display:none;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:10px;">
+        <b id="unused-count"></b>
+        <label class="dash" style="font-size:12px;cursor:pointer;">
+          <input type="checkbox" id="sel-all" onchange="optToggleAll(this)"> select all</label>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
+          <th style="width:34px;padding:6px 4px;"></th><th style="padding:6px 4px;">Name</th>
+          <th style="padding:6px 4px;">Type</th></tr></thead>
+        <tbody id="unused-body"></tbody>
+      </table>
+      <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <button class="btn danger sm" id="apply-btn" onclick="optApply()">Delete selected</button>
+        <span id="apply-status" class="dash" style="font-size:12px;"></span>
+      </div>
+    </div>
+
+    <!-- CheckPoint: staged deletes held on a Mgmt session, pending publish/discard -->
+    <div id="pending-wrap" style="display:none;margin-top:16px;padding:14px;border:1px solid var(--green);border-radius:0;background:var(--bg1);">
+      <b>Staged on a CheckPoint session - not live yet</b>
+      <div id="pending-list" class="dash" style="font-size:12px;margin:8px 0;line-height:1.5;"></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <button class="btn primary sm" onclick="optResolve('publish')">Publish (commit)</button>
+        <button class="btn ghost sm" onclick="optResolve('discard')">Discard (revert)</button>
+        <span id="pending-status" class="dash" style="font-size:12px;"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const OPT_DEV = {{ device_id }};
+const OPT_PLATFORM = {{ platform | tojson }};
+function optEsc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function optToggleAll(cb){document.querySelectorAll('.opt-sel').forEach(x=>x.checked=cb.checked);}
+async function optAnalyze(){
+  document.getElementById('loading').style.display='';
+  document.getElementById('result').style.display='none';
+  document.getElementById('pending-wrap').style.display='none';
+  let d;
+  try { d = await (await fetch(`/optimize/${OPT_DEV}/analyze`,{method:'POST'})).json(); }
+  catch(e){ document.getElementById('loading').textContent='Analyze failed: '+e; return; }
+  document.getElementById('loading').style.display='none';
+  document.getElementById('result').style.display='';
+  document.getElementById('warnings').innerHTML = (d.warnings||[]).map(x=>
+    `<div style="padding:8px 12px;border:1px solid var(--line);border-radius:0;background:var(--bg1);margin-bottom:6px;">(!) ${optEsc(x)}</div>`).join('');
+  const unused = d.unused||[];
+  document.getElementById('empty').style.display = unused.length ? 'none':'';
+  document.getElementById('unused-wrap').style.display = unused.length ? '':'none';
+  if(!unused.length) return;
+  document.getElementById('unused-count').textContent = `${unused.length} unused object${unused.length>1?'s':''}`;
+  document.getElementById('sel-all').checked=false;
+  document.getElementById('apply-btn').textContent =
+    OPT_PLATFORM==='checkpoint' ? 'Stage delete of selected'
+    : OPT_PLATFORM==='fortigate' ? 'Delete selected (LIVE)'
+    : 'Delete selected on candidate';
+  document.getElementById('unused-body').innerHTML = unused.map(u=>
+    `<tr style="border-bottom:1px solid var(--line);"><td style="padding:6px 4px;"><input type="checkbox" class="opt-sel" data-name="${optEsc(u.name)}" data-type="${optEsc(u.obj_type)}"></td>`+
+    `<td style="padding:6px 4px;">${optEsc(u.name)}</td>`+
+    `<td class="dash" style="padding:6px 4px;">${optEsc(u.obj_type)}</td></tr>`).join('');
+}
+async function optApply(){
+  const sel=[...document.querySelectorAll('.opt-sel:checked')].map(x=>({name:x.dataset.name,obj_type:x.dataset.type}));
+  if(!sel.length){ (window.showToast||alert)('Nothing selected'); return; }
+  const isCP = OPT_PLATFORM==='checkpoint', isFG = OPT_PLATFORM==='fortigate';
+  const q = isCP
+    ? `Stage delete of ${sel.length} object(s) on a CheckPoint session?\nNothing goes live until you Publish.`
+    : isFG
+    ? `Delete ${sel.length} object(s) LIVE on the FortiGate?\nFortiOS has no candidate/undo - a full-config backup is taken first (downloadable). Proceed?`
+    : `Delete ${sel.length} object(s) on the CANDIDATE config?\n(reversible - commit or revert on the box)`;
+  if(!confirm(q)) return;
+  const st=document.getElementById('apply-status'); st.textContent = isCP?'Staging…':isFG?'Backing up + deleting…':'Applying…';
+  let d;
+  try { d = await (await fetch(`/optimize/${OPT_DEV}/apply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({deletions:sel})})).json(); }
+  catch(e){ st.textContent='Apply failed: '+e; return; }
+  if(d.error){ st.textContent='Apply failed: '+d.error; return; }
+  const refused=(d.refused||[]).length;
+  if(d.mode==='session'){
+    const staged=(d.staged||[]);
+    if(!staged.length){ st.textContent = 'Nothing staged'+(refused?` (${refused} refused, still referenced)`:''); return; }
+    st.textContent='';
+    document.getElementById('unused-wrap').style.display='none';
+    document.getElementById('pending-list').innerHTML =
+      `<b>${staged.length}</b> staged for deletion: ` + staged.map(s=>optEsc(s.name)).join(', ') +
+      (refused?` · ${refused} refused (still referenced)`:'');
+    document.getElementById('pending-status').textContent='';
+    document.getElementById('pending-wrap').style.display='';
+  } else if(d.mode==='live'){
+    const del=(d.deleted||[]).length, errs=(d.errors||[]).length;
+    const msg=`Deleted ${del} object(s) LIVE on the FortiGate${refused?`, ${refused} refused`:''}${errs?`, ${errs} failed`:''}. A full-config backup was taken.`;
+    if(window.showToast) showToast(msg, del?'success':'info', 9000);
+    let html='[OK] '+optEsc(msg);
+    if(d.backup_available) html += ` - <a href="/optimize/${OPT_DEV}/backup" style="color:var(--green);text-decoration:underline;">download pre-delete backup</a>`;
+    st.innerHTML = html;
+    setTimeout(optAnalyze, 1200);
+  } else {
+    const applied=(d.applied||[]).length;
+    const msg=`Deleted ${applied} on candidate${refused?`, ${refused} refused (still referenced)`:''}. Review + commit/revert on the box.`;
+    if(window.showToast) showToast(msg,'success',8000);
+    st.textContent = '[OK] '+msg;
+    setTimeout(optAnalyze, 600);
+  }
+}
+async function optResolve(action){   // 'publish' | 'discard' (CheckPoint)
+  const ps=document.getElementById('pending-status'); ps.textContent = action==='publish'?'Publishing…':'Discarding…';
+  let d;
+  try { d = await (await fetch(`/optimize/${OPT_DEV}/${action}`,{method:'POST'})).json(); }
+  catch(e){ ps.textContent=action+' failed: '+e; return; }
+  if(d.error){ ps.textContent=action+' failed: '+d.error; return; }
+  if(action==='publish' && d.ok===false){ ps.textContent='Publish failed - see the box; session left staged.'; return; }
+  const names=(d.published||d.discarded||[]);
+  const msg = action==='publish'
+    ? `Published - ${names.length} object(s) deleted on the box.`
+    : `Discarded - nothing changed.`;
+  if(window.showToast) showToast(msg, action==='publish'?'success':'info', 7000);
+  document.getElementById('pending-wrap').style.display='none';
+  setTimeout(optAnalyze, 600);
+}
+optAnalyze();
+</script>
+{% endblock %}

@@ -1,0 +1,15 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# Progress indicator - `step` is 1, 2 or 3. Mirrors the prototype
+   .steps row: each .step contains its trailing .conn (so .step.done
+   .conn picks up the green tint). #}
+<div class="steps" style="padding:0 0 16px;">
+  {% for i, label in [(1, 'Mgmt-Server'), (2, 'Policy'), (3, 'Gateway')] %}
+    {% set state = 'done' if step > i else ('active' if step == i else 'pending') %}
+    <div class="step{% if state != 'pending' %} {{ state }}{% endif %}">
+      <span class="b">{% if state == 'done' %}[OK]{% else %}{{ i }}{% endif %}</span>
+      <span class="sl">{{ label }}</span>
+      {% if i < 3 %}<span class="conn"></span>{% endif %}
+    </div>
+  {% endfor %}
+</div>

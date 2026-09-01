@@ -1,0 +1,435 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# ── NAT-rules list fragment - unified Editor + Enrichment template ──
+   Re-renderable via GET /nat-rules/list-fragment?mode={editor|enrichment}.
+   Mode picks the rendered flavour:
+
+     editor  (Ruleset > NAT)
+       - Identity columns + State-toggle + Delete + inline Add-Row
+       - Bulk panel: State (enable/disable) + Delete-selection
+       - Editable Name + Description (click-to-edit)
+
+     enrichment  (Enrichment > NAT)
+       - Extra columns: Src/Dst Zone in Original + Trans-Type + Trans Zone
+                        + Trans IP slots in Translated block
+       - Read-only Name + Description (identity edit goes through editor)
+       - Bulk panel: schema-driven vendor properties (pa_* / cp_* / forti_*)
+
+   Wrapper IDs are mode-parameterised so both flavours can coexist in the
+   DOM (Editor in #main-nat, Enrichment in #main-nat-enrichment) without
+   ID-collision - JS-handlers resolve the active container via the
+   data-mode attribute.
+
+   Zones live in Enrichment, not Ruleset - vendor-specific concept that
+   maps differently per platform (PA Security-Zones · Forti srcintf ·
+   ASA nameif · CP none). The Forti target shows the same NAT-rulebase
+   since identity is agnostic; the driver reverse-maps to policy.nat=enable
+   on push. #}
+
+{% set _is_enrichment = (mode == 'enrichment') %}
+{% set fields = (nat_schema or {}).get('fields') or [] %}
+
+<div id="nat-section-fragment-{{ mode }}"
+     data-mode="{{ mode }}"
+     data-source-device-id="{{ source_device_id or '' }}"
+     data-source-device-host="{{ source_device_host or '' }}"
+     data-target-id="{{ target_id or '' }}"
+     data-target-platform="{{ target_platform or '' }}">
+
+  {% if _is_enrichment and not nat_rules %}
+  <div class="empty" style="padding:16px;border:1px solid var(--line);border-radius:0;text-align:left;font-style:italic;">
+    No NAT rules for this device. Add them in Ruleset &gt; NAT or re-import from the source.
+  </div>
+  {% else %}
+
+  {% if _is_enrichment %}
+    {# ── Bulk-Apply panel - schema-driven vendor properties. Always
+         visible above the table. Apply stays disabled while no row
+         is selected. ── #}
+    {% if fields %}
+    <div id="nat-enr-bulk-panel"
+         style="margin-bottom:12px;padding:12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <span style="font-size:12px;color:var(--tx);font-weight:500;">
+          Vendor properties
+          <span class="mut">- apply to
+            <span id="nat-enr-bulk-count" style="color:var(--blue);">0</span> selected
+            rule<span id="nat-enr-bulk-plural">s</span></span>
+        </span>
+        <button type="button" onclick="natEnrClearSelection()" class="btn ghost sm">Clear selection</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
+        {% for f in fields %}
+        <div style="display:flex;flex-direction:column;">
+          <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">{{ f.label }}</label>
+          {% if f.type == 'bool' %}
+          <select data-natenr-field="{{ f.key }}" data-natenr-type="bool" class="inp" style="font-size:12px;padding:6px 10px;">
+            <option value="">(no change)</option>
+            <option value="true">on</option>
+            <option value="false">off</option>
+          </select>
+          {% elif f.type == 'enum' %}
+          <select data-natenr-field="{{ f.key }}" data-natenr-type="enum" class="inp" style="font-size:12px;padding:6px 10px;">
+            <option value="">(no change)</option>
+            {% for opt in f.options or [] %}
+            <option value="{{ opt }}">{{ opt }}</option>
+            {% endfor %}
+          </select>
+          {% elif f.type == 'catalog' %}
+          {% set items = (nat_catalogs.get(f.catalog_kind) or []) %}
+          <select data-natenr-field="{{ f.key }}" data-natenr-type="catalog" class="inp" style="font-size:12px;padding:6px 10px;">
+            <option value="">(no change)</option>
+            <option value="__clear__">- clear -</option>
+            {% for it in items %}
+            <option value="{{ it.name }}">{{ it.name }}</option>
+            {% endfor %}
+          </select>
+          {% if not items %}
+          <span style="color:var(--amber);font-size:10px;margin-top:2px;">No catalog - refresh target snapshot</span>
+          {% endif %}
+          {% else %}
+          <input type="text" data-natenr-field="{{ f.key }}" data-natenr-type="string" placeholder="(no change)"
+                 class="inp" style="font-size:12px;padding:6px 10px;width:160px;">
+          {% endif %}
+        </div>
+        {% endfor %}
+        <button type="button" onclick="natEnrBulkApply()" id="nat-enr-bulk-apply-btn" disabled class="btn primary sm">Apply to selection</button>
+        <span id="nat-enr-bulk-status" class="mut" style="font-size:11.5px;"></span>
+      </div>
+    </div>
+    {% else %}
+    <div class="dash" style="margin-bottom:12px;padding:8px 12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);font-size:10px;font-style:italic;">
+      No vendor properties defined for target platform <code style="color:var(--tx);">{{ target_platform or '-' }}</code>.
+    </div>
+    {% endif %}
+  {% endif %}
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+    <span style="font-size:12px;color:var(--tx);font-weight:500;">
+      NAT{% if not _is_enrichment %} Rules{% else %}-Rules{% endif %}
+      <span class="mut">({{ nat_rules | length }})</span>
+    </span>
+    {% if not _is_enrichment %}
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button type="button" onclick="natShowAddRow()" class="btn primary sm"
+              {% if not source_device_id %}disabled title="No source device selected"{% endif %}>
+        + Add NAT-rule
+      </button>
+    </div>
+    {% endif %}
+  </div>
+
+  {# Editor: 13 columns (4 leading + 3 Orig + 3 Trans + 3 trailing).
+     Enrichment: 17 columns (4 leading + 5 Orig + 7 Trans + 1 trailing). #}
+  <div class="twrap" style="margin:0;max-height:640px;">
+    <table class="rules-tbl">
+      <thead>
+        {# Top header row - Original/Translated group labels. #}
+        <tr>
+          <th colspan="4"></th>
+          <th colspan="{% if _is_enrichment %}5{% else %}3{% endif %}" style="border-left:1px solid var(--line);">Original</th>
+          <th colspan="{% if _is_enrichment %}7{% else %}3{% endif %}" style="border-left:1px solid var(--line);">Translated</th>
+          <th colspan="{% if _is_enrichment %}1{% else %}3{% endif %}" style="border-left:1px solid var(--line);"></th>
+        </tr>
+        <tr>
+          <th class="sel-col" style="width:32px;">
+            <input type="checkbox" id="nat-sel-all-{{ mode }}"
+                   onchange="natSelectAll(this.checked, '{{ mode }}')"
+                   style="cursor:pointer;accent-color:var(--green);" aria-label="Select all NAT-rules">
+          </th>
+          <th class="num" style="width:32px;">#</th>
+          <th>Name</th>
+          <th style="width:64px;">Type</th>
+          {% if _is_enrichment %}
+          {# Zone columns are target-dependent: PA NAT needs from/to zones,
+             Forti feeds srcintf/dstintf - Check Point NAT has no zone
+             columns at all (original/translated + position only), so the
+             dropdowns would be dead UI there (asa2cp review 2026-09-01). #}
+          {% set _nat_zones_relevant = target_platform in ('panw', 'fortigate') %}
+          {% if _nat_zones_relevant %}<th style="border-left:1px solid var(--line);">Source Zone</th>{% endif %}
+          <th {% if not _nat_zones_relevant %}style="border-left:1px solid var(--line);"{% endif %}>Source IP</th>
+          {% if _nat_zones_relevant %}<th>Destination Zone</th>{% endif %}
+          <th>Destination IP</th>
+          <th>Port(s)</th>
+          <th style="border-left:1px solid var(--line);">Source Trans Type</th>
+          {% if _nat_zones_relevant %}<th>Source Zone</th>{% endif %}
+          <th>Source IP</th>
+          <th>Destination Trans Type</th>
+          {% if _nat_zones_relevant %}<th>Destination Zone</th>{% endif %}
+          <th>Destination IP</th>
+          <th>Port(s)</th>
+          <th style="border-left:1px solid var(--line);">Description</th>
+          {% else %}
+          <th style="border-left:1px solid var(--line);">Source</th>
+          <th>Destination</th>
+          <th>Port(s)</th>
+          <th style="border-left:1px solid var(--line);">Source</th>
+          <th>Destination</th>
+          <th>Port(s)</th>
+          <th style="border-left:1px solid var(--line);">Description</th>
+          <th style="text-align:center;width:64px;">State</th>
+          <th style="text-align:center;width:32px;"></th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody id="nat-list-tbody-{{ mode }}">
+        {% if not nat_rules and not _is_enrichment %}
+        <tr>
+          <td colspan="13" class="empty" style="text-align:center;padding:16px;font-style:italic;">
+            No NAT rules for this device yet - use <strong style="color:var(--tx);">+ Add NAT-rule</strong> to create one,
+            or re-import from the source.
+          </td>
+        </tr>
+        {% endif %}
+        {% for n in nat_rules %}
+        <tr data-nat-id="{{ n.id }}"{% if not _is_enrichment %} data-nat-name="{{ n.name }}"{% endif %}
+            {% if n.disabled %} style="opacity:0.5;"{% endif %}>
+          <td>
+            <input type="checkbox" class="nat-row-sel"
+                   style="cursor:pointer;accent-color:var(--green);"
+                   data-nid="{{ n.id }}" onchange="natRowToggle({{ n.id }}, this.checked, '{{ mode }}')"
+                   aria-label="Select {{ n.name }}">
+          </td>
+          <td class="idx num">{{ n.position }}</td>
+          <td style="color:var(--tx);">
+            {% if _is_enrichment %}
+              {{ n.name }}
+            {% else %}
+              <span class="nat-name"
+                    style="cursor:text;color:var(--tx);"
+                    data-nat-id="{{ n.id }}"
+                    data-original-name="{{ n.name }}"
+                    onclick="natStartRename(this)"
+                    onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx)';"
+                    title="Click to rename">{{ n.name }}</span>
+            {% endif %}
+            {% if (n.properties or {}).get('synthesized') %}
+            <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:10px;text-transform:uppercase;vertical-align:middle;"
+                  title="Synthesized from a Fortinet security policy (policy.nat=enable) - not an explicit NAT-rulebase entry">
+              from policy
+            </span>
+            {% endif %}
+          </td>
+          <td>
+            {% if n.nat_type == 'snat' %}
+              <span class="chip dmz">SNAT</span>
+            {% elif n.nat_type == 'dnat' %}
+              <span class="chip wan">DNAT</span>
+            {% else %}
+              <span class="chip any">{{ n.nat_type | upper }}</span>
+            {% endif %}
+          </td>
+
+          {% if _is_enrichment %}
+            {# Original group - 5 cols: Source Zone · Source IP ·
+               Destination Zone · Destination IP · Port(s). Negate pills
+               inline into Source/Destination/Port cells; target-aware
+               (Drift '(!)' when target doesn't carry the aspect). #}
+            {# src/dst zone - editable per-rule overlay (single-select: PA
+               allows exactly one from/to zone on a NAT rule). Writes
+               fw_nat_rule_overrides via PATCH /nat-rules; '' clears back
+               to the imported zones. Replaces the retired zone-level
+               External-flag workflow. #}
+            {% if _nat_zones_relevant %}
+            <td style="border-left:1px solid var(--line);">
+              {% set _sz = (n.src_zones[0] if n.src_zones else '') %}
+              <select onchange="natZoneSet({{ n.id }}, 'src_zone', this.value)" class="inp"
+                      style="font-size:11px;padding:2px 4px;max-width:120px;color:var(--tx2);">
+                <option value="">-</option>
+                {% for zn in (zone_names or []) %}
+                <option value="{{ zn }}" {% if zn == _sz %}selected{% endif %}>{{ zn }}</option>
+                {% endfor %}
+                {% if _sz and _sz not in (zone_names or []) %}<option value="{{ _sz }}" selected>{{ _sz }}</option>{% endif %}
+              </select>
+            </td>
+            {% endif %}
+            <td style="{% if not _nat_zones_relevant %}border-left:1px solid var(--line);{% endif %}color:var(--tx2);{% if n.negate_source %}background:var(--red-fill);{% endif %}">
+              <div style="display:flex;align-items:center;gap:4px;">
+                {{ nat_negate_btn(n.id, 'source', n.negate_source, n.negate_override_source, target_platform) | safe }}
+                <span>{{ n.orig_src | join(', ') if n.orig_src else 'any' }}</span>
+              </div>
+            </td>
+            {% if _nat_zones_relevant %}
+            <td>
+              {% set _dz = (n.dst_zones[0] if n.dst_zones else '') %}
+              <select onchange="natZoneSet({{ n.id }}, 'dst_zone', this.value)" class="inp"
+                      style="font-size:11px;padding:2px 4px;max-width:120px;color:var(--tx2);">
+                <option value="">-</option>
+                {% for zn in (zone_names or []) %}
+                <option value="{{ zn }}" {% if zn == _dz %}selected{% endif %}>{{ zn }}</option>
+                {% endfor %}
+                {% if _dz and _dz not in (zone_names or []) %}<option value="{{ _dz }}" selected>{{ _dz }}</option>{% endif %}
+              </select>
+            </td>
+            {% endif %}
+            <td style="color:var(--tx2);{% if n.negate_destination %}background:var(--red-fill);{% endif %}">
+              <div style="display:flex;align-items:center;gap:4px;">
+                {{ nat_negate_btn(n.id, 'destination', n.negate_destination, n.negate_override_source, target_platform) | safe }}
+                <span>{{ n.orig_dst | join(', ') if n.orig_dst else 'any' }}</span>
+              </div>
+            </td>
+            <td style="color:var(--tx2);{% if n.negate_service %}background:var(--red-fill);{% endif %}">
+              <div style="display:flex;align-items:center;gap:4px;">
+                {{ nat_negate_btn(n.id, 'service', n.negate_service, n.negate_override_source, target_platform) | safe }}
+                <span>{{ n.orig_service | join(', ') if n.orig_service else 'any' }}</span>
+              </div>
+            </td>
+
+            {# Translated group - 7 cols: Src Type · Src Zone · Src IP ·
+               Dst Type · Dst Zone · Dst IP · Port(s). Translated zone
+               slots are placeholders (NAT datamodel has no translated
+               zone). Trans Types fall back to the imported trans_src_type
+               column / a derived value when no property override is set. #}
+            {% set _props = (n.properties or {}) %}
+            {% set _src_type = _props.get('pa_src_translation_type') or n.trans_src_type or 'none' %}
+            {% set _dst_type = _props.get('pa_dst_translation_type')
+                                or ('static-ip' if n.trans_dst else 'none') %}
+            <td style="color:var(--tx2);border-left:1px solid var(--line);">{{ _src_type }}</td>
+            {% if _nat_zones_relevant %}<td style="color:var(--tx2);">-</td>{% endif %}
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'snat' and n.trans_src %}
+                {{ n.trans_src.replace('|', ' / ') }}
+              {% else %}-{% endif %}
+            </td>
+            <td style="color:var(--tx2);">{{ _dst_type }}</td>
+            {% if _nat_zones_relevant %}<td style="color:var(--tx2);">-</td>{% endif %}
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'dnat' and n.trans_dst %}{{ n.trans_dst }}{% else %}-{% endif %}
+            </td>
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'dnat' and n.trans_dst_port %}{{ n.trans_dst_port }}{% else %}-{% endif %}
+            </td>
+
+            <td class="mut" style="border-left:1px solid var(--line);">{{ n.description or '-' }}</td>
+          {% else %}
+            {# Original group - 3 cols. Zones moved to Enrichment > NAT.
+               Negate pills target-aware; inlined into the cell. #}
+            <td style="color:var(--tx2);border-left:1px solid var(--line);{% if n.negate_source %}background:var(--red-fill);{% endif %}">
+              <div style="display:flex;align-items:center;gap:4px;">
+                {{ nat_negate_btn(n.id, 'source', n.negate_source, n.negate_override_source, target_platform) | safe }}
+                <span>{{ n.orig_src | join(', ') if n.orig_src else 'any' }}</span>
+              </div>
+            </td>
+            <td style="color:var(--tx2);{% if n.negate_destination %}background:var(--red-fill);{% endif %}">
+              <div style="display:flex;align-items:center;gap:4px;">
+                {{ nat_negate_btn(n.id, 'destination', n.negate_destination, n.negate_override_source, target_platform) | safe }}
+                <span>{{ n.orig_dst | join(', ') if n.orig_dst else 'any' }}</span>
+              </div>
+            </td>
+            <td style="color:var(--tx2);{% if n.negate_service %}background:var(--red-fill);{% endif %}">
+              <div style="display:flex;align-items:center;gap:4px;">
+                {{ nat_negate_btn(n.id, 'service', n.negate_service, n.negate_override_source, target_platform) | safe }}
+                <span>{{ n.orig_service | join(', ') if n.orig_service else 'any' }}</span>
+              </div>
+            </td>
+
+            {# Translated group - 3 cols. Src is meaningful for SNAT; Dst
+               and Port for DNAT. Other slots get an em-dash. #}
+            <td style="color:var(--tx2);border-left:1px solid var(--line);">
+              {% if n.nat_type == 'snat' and n.trans_src %}
+                {{ n.trans_src.replace('|', ' / ') }}{% if n.trans_src_type %}<span class="dash"> ({{ n.trans_src_type }})</span>{% endif %}
+              {% else %}-{% endif %}
+            </td>
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'dnat' and n.trans_dst %}{{ n.trans_dst }}{% else %}-{% endif %}
+            </td>
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'dnat' and n.trans_dst_port %}{{ n.trans_dst_port }}{% else %}-{% endif %}
+            </td>
+
+            <td class="mut" style="border-left:1px solid var(--line);">
+              <span class="nat-desc"
+                    style="cursor:text;color:var(--tx2);"
+                    data-nat-id="{{ n.id }}"
+                    data-original-desc="{{ n.description or '' }}"
+                    onclick="natStartEditDesc(this)"
+                    onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx2)';"
+                    title="Click to edit description">{{ n.description or '-' }}</span>
+            </td>
+            <td style="text-align:center;">
+              <button type="button" onclick="natToggleDisabled({{ n.id }}, {{ 'true' if n.disabled else 'false' }})"
+                      class="chip {% if n.disabled %}any{% else %}trust{% endif %}"
+                      style="cursor:pointer;border-style:solid;font-size:11px;">
+                {% if n.disabled %}disabled{% else %}active{% endif %}
+              </button>
+            </td>
+            <td style="text-align:center;">
+              <button type="button" onclick="natDelete({{ n.id }}, '{{ n.name | e }}')"
+                      style="background:none;border:none;color:var(--tx3);cursor:pointer;"
+                      onmouseover="this.style.color='var(--red)';" onmouseout="this.style.color='var(--tx3)';"
+                      title="Delete NAT-rule">&times;</button>
+            </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+
+        {% if not _is_enrichment %}
+        {# Inline Add row - hidden until '+ Add NAT-rule' clicked. Spans the
+           13-column layout: 4 leading, 6-wide hint cell bridging Original+
+           Translated, description input, 2-wide buttons cell across State +
+           Delete. #}
+        <tr id="nat-add-row" class="hidden" style="background:var(--bg2);">
+          <td></td>
+          <td></td>
+          <td>
+            <input type="text" id="nat-add-name" placeholder="rule-name"
+                   class="inp" style="font-size:12px;padding:5px 8px;width:160px;"
+                   oninput="natAddValidate()" onkeydown="if(event.key==='Enter')natSubmitAdd();if(event.key==='Escape')natHideAddRow()">
+          </td>
+          <td>
+            <select id="nat-add-type" class="inp" style="font-size:12px;padding:5px 8px;">
+              <option value="snat">SNAT</option>
+              <option value="dnat">DNAT</option>
+              <option value="static">static</option>
+            </select>
+          </td>
+          <td colspan="6">
+            <span class="dash" style="font-size:10px;font-style:italic;">
+              Orig/trans IPs &amp; ports: edit after add (or re-import for hash-stable rules)
+            </span>
+          </td>
+          <td>
+            <input type="text" id="nat-add-desc" placeholder="description (optional)"
+                   class="inp" style="font-size:12px;padding:5px 8px;width:100%;">
+          </td>
+          <td colspan="2" style="text-align:center;">
+            <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end;">
+              <button type="button" onclick="natSubmitAdd()" id="nat-add-submit" disabled class="btn primary sm">Add</button>
+              <button type="button" onclick="natHideAddRow()" class="btn ghost sm">Cancel</button>
+              <span id="nat-add-err" class="mut" style="color:var(--amber);font-size:11.5px;margin-left:8px;"></span>
+            </div>
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if not _is_enrichment %}
+  {# Bulk-action panel - surfaces when any row checkbox is active. #}
+  <div id="nat-bulk-panel" class="hidden"
+       style="margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <span style="font-size:12px;color:var(--tx);font-weight:500;">
+        Bulk apply to <span id="nat-bulk-count" style="color:var(--blue);">0</span> rule<span id="nat-bulk-plural">s</span>
+      </span>
+      <button type="button" onclick="natClearSelection()" class="btn ghost sm">Clear selection</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
+      <div style="display:flex;flex-direction:column;">
+        <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">State</label>
+        <select id="nat-bulk-disabled" class="inp" style="font-size:12px;padding:6px 10px;">
+          <option value="">(no change)</option>
+          <option value="false">enable</option>
+          <option value="true">disable</option>
+        </select>
+      </div>
+      <button type="button" onclick="natBulkApply()" id="nat-bulk-apply-btn" disabled class="btn primary sm">Apply</button>
+      <button type="button" onclick="natBulkDelete()" class="btn danger sm">Delete selection</button>
+      <span id="nat-bulk-status" class="mut" style="font-size:11.5px;"></span>
+    </div>
+  </div>
+  {% endif %}
+
+  {% endif %}{# end empty-state guard #}
+</div>

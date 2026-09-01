@@ -1,0 +1,45 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% with step = 1 %}{% include "_cp_wizard_progress.html" %}{% endwith %}
+
+{% if error %}
+<div class="tag bad" style="display:flex;width:auto;margin:0 0 12px;padding:8px 12px;border-radius:0;font-size:12px;color:var(--danger);border:1px solid var(--danger);">
+  <span style="font-weight:600;margin-right:6px;">Error:</span>{{ error }}
+</div>
+{% endif %}
+
+<form hx-post="/devices/add/cp/probe"
+      hx-target="#wizard-content"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      style="display:flex;flex-direction:column;gap:12px;max-width:440px;">
+
+  <div class="field">
+    <label>Mgmt-Server IP / Hostname</label>
+    <input type="text" name="mgmt_ip" required
+           value="{{ form_mgmt_ip or '' }}"
+          
+           class="inp" style="">
+  </div>
+
+  <div class="field">
+    <label>Mgmt-Port <span class="dash">(default 443)</span></label>
+    <input type="number" name="mgmt_port" min="1" max="65535"
+           value="{{ form_mgmt_port or 443 }}"
+           class="inp" style="">
+  </div>
+
+  <div class="field">
+    <label>API Key</label>
+    <input type="password" name="api_key" required
+           value="{{ form_api_key or '' }}"
+           class="inp" autocomplete="new-password">
+    <p class="dash" style="margin:0;font-size:11px;">Generated in SmartConsole under Manage &amp; Settings → Blades → Management API.</p>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:8px;padding-top:4px;">
+    <button type="submit" class="btn primary sm">Probe Mgmt-Server</button>
+    <a href="/devices" class="btn ghost sm">Cancel</a>
+    <span class="htmx-indicator dash" style="font-style:italic;">Connecting…</span>
+  </div>
+</form>

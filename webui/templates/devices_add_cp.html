@@ -1,0 +1,24 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% extends "base.html" %}
+{% block title %}Add Check Point Device - Gateshift{% endblock %}
+{% block content %}
+
+<div style="display:flex;align-items:center;gap:11px;padding:14px 20px 6px;font-size:13px;">
+  <a href="/devices" style="color:var(--tx2);text-decoration:none;">← Devices</a>
+  <span class="arr">/</span>
+  <span style="color:var(--tx);">Add Check Point Device</span>
+</div>
+
+<div class="toolbar">
+  <div>
+    <h1 style="margin:0;font-size:18px;font-weight:600;color:var(--tx);letter-spacing:-0.01em;">Add Check Point Gateway</h1>
+    <p style="margin:2px 0 0;font-size:12px;color:var(--tx2);">Connect to a Mgmt-Server, pick a policy, then pick the gateway running it.</p>
+  </div>
+</div>
+
+<div id="wizard-content" style="padding:6px 20px 22px;">
+  {% include "_cp_wizard_step1.html" %}
+</div>
+
+{% endblock %}

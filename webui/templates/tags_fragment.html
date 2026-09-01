@@ -1,0 +1,99 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# ── Enrichment > Tags - simplified UI (2026-06-03)
+   Vertical layout:
+     1) Tags header
+     2) Inline + Add Tag form (name + color + comments + Add)
+     3) Tags list (multi-select picker)
+     4) Action dropdown + Apply button + status
+   Tag picker is dynamically enabled/disabled + multi/single per action.
+   No catalog table; new tags only via + Add. #}
+
+{% set fields = (tag_schema or {}).get('fields') or [] %}
+
+<div id="tags-section-fragment"
+     data-source-device-id="{{ source_device_id or '' }}"
+     data-source-device-host="{{ source_device_host or '' }}"
+     data-target-id="{{ target_id or '' }}"
+     data-target-platform="{{ target_platform or '' }}">
+
+  {% set _color_key = 'pa_color' if target_platform == 'panw' else ('cp_color' if target_platform == 'checkpoint' else '') %}
+  {% set _color_field = (fields | selectattr('key','equalto', _color_key) | list | first) or {} %}
+  {% set _color_hex = _color_field.get('option_hex') or {} %}
+  {% set _color_lbl = _color_field.get('option_labels') or {} %}
+
+  {# (1) Tags header - spans the Add-form + list below. #}
+  <label style="display:block;font-size:12px;color:var(--tx2);margin-bottom:4px;">Tags</label>
+
+  {# (2) Inline Add-Tag (name + color + comments + Add). #}
+  {% if source_device_id %}
+  <div style="display:flex;flex-direction:column;gap:8px;width:576px;max-width:100%;margin-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:8px;font-size:12px;">
+      <input type="text" id="tag-new-name" placeholder="tag name"
+             class="inp" style="font-size:12px;padding:6px 10px;flex:1;"
+             onkeydown="if(event.key==='Enter')tagInlineAdd()">
+      {% for f in fields %}
+        {% if f.type == 'enum' %}
+          {% set _labels = f.option_labels or {} %}
+          {% set _hex    = f.option_hex or {} %}
+          <select id="tag-new-{{ f.key }}" class="inp" style="font-size:12px;padding:6px 10px;flex:1;">
+            <option value="">{{ f.label | lower }}</option>
+            {% for opt in f.options or [] %}
+            {% set _lbl = _labels.get(opt, opt) %}
+            {% set _h   = _hex.get(opt) %}
+            <option value="{{ opt }}" {% if opt == f.default %}selected{% endif %}
+                    {% if _h %}style="background-color: {{ _h }}; color: #fff"{% endif %}>{{ _lbl }}</option>
+            {% endfor %}
+          </select>
+        {% elif f.key.endswith('_comments') %}
+          <input type="text" id="tag-new-{{ f.key }}" placeholder="{{ f.label | lower }} (optional)"
+                 class="inp" style="font-size:12px;padding:6px 10px;flex:1;"
+                 onkeydown="if(event.key==='Enter')tagInlineAdd()">
+        {% elif f.key == 'cp_icon' %}
+          {# CP icon - V1 ignore, default at server side #}
+        {% endif %}
+      {% endfor %}
+      <button type="button" onclick="tagInlineAdd()" class="btn primary sm">+Add Tag</button>
+    </div>
+    <span id="tag-new-status" class="mut" style="font-size:11.5px;min-height:1em;"></span>
+  </div>
+  {% endif %}
+
+  {# (3) Tags list (multi-select picker). The Tags header above spans this. #}
+  <div style="display:flex;flex-direction:column;gap:8px;width:576px;max-width:100%;margin-bottom:16px;">
+    <select id="tag-apply-tag" multiple size="4" class="inp"
+            style="font-size:12px;padding:6px 10px;width:100%;">
+      {% for t in tags %}
+      {% set _color = (t.properties or {}).get(_color_key) if _color_key else None %}
+      {% set _hex   = _color_hex.get(_color) if _color else '' %}
+      {% set _lbl   = _color_lbl.get(_color, _color) if _color else '' %}
+      <option value="{{ t.name }}"
+              {% if _hex %}style="background-color: {{ _hex }}; color: #fff"{% endif %}>
+        {{ t.name }}{% if _lbl %} ({{ _lbl }}){% endif %}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  {# (4) Action + Apply. #}
+  <div style="display:flex;flex-direction:column;gap:8px;width:576px;max-width:100%;">
+    <label style="font-size:12px;color:var(--tx2);margin-bottom:-4px;">Action</label>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <select id="tag-apply-action" onchange="onTagActionChange()" class="inp"
+              style="font-size:12px;padding:6px 10px;flex:1;">
+        <option value="add_tag">Add selected tag(s)</option>
+        {% if target_platform == 'panw' %}
+        <option value="add_group_tag">Add group-tag</option>
+        {% endif %}
+        <option value="remove_tag">Remove all tags</option>
+        {% if target_platform == 'panw' %}
+        <option value="remove_group_tag">Remove group-tag</option>
+        <option value="remove_all_tags">Remove all tags and group-tags</option>
+        {% endif %}
+      </select>
+      <button onclick="applyTagAction()" id="tag-apply-btn" class="btn primary sm">Apply to selection</button>
+    </div>
+    <span id="tag-apply-status" class="mut" style="font-size:11.5px;min-height:1em;"></span>
+  </div>
+
+</div>

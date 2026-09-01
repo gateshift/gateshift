@@ -1,0 +1,372 @@
+/* Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 */
+
+/* gateshift - application stylesheet (dark blue primary + derived light theme)
+   Design system per handoff 2026-08-09: one typeface (Reddit Mono) for brand,
+   navigation, UI and data; border-radius 0 everywhere except status dots;
+   no tonal chips/badges - severity is carried by wording and position.
+
+   Token roles (design-final, dark):
+     --bg #132131 page ground · --surface #1A2A3C header/nav/table/cards/drawer
+     --panel-alt table head + diff labels (same tone, separated by lines)
+     --line #273D54 frames/column separators · --line2 #375473 row separators
+     --selection #22384F selected row + active tab · --accent #4FA3E3
+     --tx/--tx2/--tx3 text · --data data values + allow · --muted warnings/deny
+     --log log panel ground
+
+   LEGACY ALIASES: the old semantic names (--green/--amber/--red/--violet/
+   --blue and their -fill/-line pairs) remain defined but resolve into the
+   new neutral system - greens land on the accent, warn/error hues on
+   --muted, fills on transparent. Inline var() uses across the templates
+   de-tone automatically; do not reintroduce tonal values here.            */
+
+:root {
+  --bg: #132131; --surface: #1A2A3C; --panel-alt: #1A2A3C;
+  --line: #273D54; --line2: #375473; --selection: #22384F;
+  --accent: #4FA3E3;
+  --tx: #E4EDF6; --tx2: #BACCDE; --tx3: #8298B1;
+  --data: #C8D8E8; --muted: #8296AE; --log: #0E1B28;
+  --scrim: rgba(4,10,18,0.62);
+  /* interactive controls: white, clearly visible on the dark surface
+     (user feedback 2026-08-09 - the token grays were too quiet) */
+  --ctrl: #FFFFFF; --ctrl-line: var(--line2);
+  /* destructive controls - the ONE tonal exception to the neutral
+     system (user decision 2026-08-25): dangerous buttons read red. */
+  --danger: #E06C6C;
+  --shadow-pop: none;
+  --sans: 'Reddit Mono', ui-monospace, monospace;
+  --logo: 'Reddit Mono', ui-monospace, monospace;
+
+  /* structural aliases (pre-reskin names still used in templates).
+     --bg2 resolves to the PAGE ground, not the surface: it is the
+     background of inline-styled form fields all over the templates, and
+     a darker well on the surface is what makes them readable as inputs. */
+  --bg1: var(--surface); --bg2: var(--bg); --bg3: var(--selection);
+
+  /* legacy semantic aliases - resolve to the neutral system */
+  --green: var(--accent); --green-ink: var(--surface); --green-dim: var(--muted);
+  --violet: var(--tx2); --red: var(--muted); --amber: var(--muted); --blue: var(--accent);
+  --green-fill: transparent; --green-line: var(--line2);
+  --violet-fill: transparent; --violet-line: var(--line2);
+  --red-fill: transparent; --red-line: var(--line2);
+  --amber-fill: transparent; --amber-line: var(--line2);
+  --blue-fill: transparent; --blue-line: var(--line2);
+}
+/* Light theme - MECHANICALLY DERIVED from the dark spec (the handoff defines
+   dark only): same roles, blue family, legible on white. Not designer-final. */
+[data-theme="light"] {
+  --bg: #F2F5F8; --surface: #FFFFFF; --panel-alt: #FFFFFF;
+  --line: #D9E1E9; --line2: #C2CEDA; --selection: #E4EDF5;
+  --accent: #2E6FA8;
+  --tx: #1A2836; --tx2: #4C6076; --tx3: #8496A9;
+  --data: #2C4256; --muted: #7A8CA0; --log: #0E1B28;
+  --scrim: rgba(20,30,45,0.35);
+  --ctrl: #1A2836; --ctrl-line: var(--line2);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx); font-family: var(--sans); font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+#root { min-height: 100vh; }
+.app { min-width: 900px; display: flex; flex-direction: column; min-height: 100vh; }
+::-webkit-scrollbar { height: 11px; width: 11px; }
+::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 0; border: 3px solid var(--surface); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Workspace sub-tab strips - layout applies only when not hidden.
+   .hidden + inline `display:flex` would otherwise fight (inline wins);
+   :not(.hidden) defers to Tailwind's `.hidden { display: none }` when
+   the JS toggles it on. */
+#network-subtab-bar:not(.hidden),
+#enrichment-rulebase-bar:not(.hidden),
+#enrichment-subtab-bar:not(.hidden),
+#ruleset-subtab-bar:not(.hidden),
+#organization-subtab-bar:not(.hidden) {
+  display: flex;
+  align-items: center;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+}
+#enrichment-subtab-bar:not(.hidden) {
+  background: var(--surface);
+  padding: 8px 20px;
+}
+
+/* ---------- header (56px, surface, bottom line) ---------- */
+.hd { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--surface); flex: 0 0 auto; }
+.brand { display: inline-flex; align-items: baseline; font-family: var(--logo); font-weight: 500; font-size: 26px; letter-spacing: -0.05em; line-height: 1; color: var(--tx); user-select: none; }
+/* the Lambda mark replacing the 'a': legs on the baseline, a touch
+   taller than the 't' ascender; sits tight in the cell, closer to
+   the 't' (per draft) */
+.brand .brand-a { width: 0.507em; height: 0.825em; margin: 0 0.03em 0 0.06em; fill: var(--accent); }
+/* lockup: 1px rule between wordmark and two-line claim (draft: rule
+   #375473 = --line2, cap-height tall; claim 10/29 of the wordmark) */
+.brand-rule { width: 1px; height: 19px; background: var(--line2); margin: 0 11px 0 15px; }
+.brand-claim { font-size: 9px; line-height: 1.5; text-transform: uppercase; letter-spacing: 0.14em; color: var(--tx2); }
+.crumb { display: flex; align-items: center; gap: 11px; font-size: 12px; color: var(--tx2); margin-left: 28px; align-self: flex-end; margin-bottom: 4px; }
+.crumb .arr { color: var(--tx3); }
+/* the source→target arrow: big, bold, doubled - white + accent pair
+   (the slashes stay quiet) */
+.crumb .arr.flow { font-size: 20px; font-weight: 800; line-height: 1; letter-spacing: -0.12em; display: inline-flex; margin-right: 0.12em; }
+.crumb .arr.flow .a1 { color: var(--accent); }
+.crumb .arr.flow .a2 { color: var(--ctrl); margin-left: 3px; }
+/* device picker: plain text - no box, no border */
+.picker { display: inline-flex; align-items: center; gap: 9px; background: none; border: none; border-radius: 0; padding: 0; font-size: 12px; color: var(--tx); cursor: pointer; }
+.picker .vb { font-size: 11px; font-weight: 500; color: var(--accent); }
+.picker .chev { color: var(--tx2); font-size: 10px; }
+.sp { flex: 1; }
+
+/* theme toggle - bare text */
+.themebtn { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0; border: none; border-radius: 0; background: transparent; color: var(--ctrl); font-family: var(--sans); font-size: 11px; cursor: pointer; }
+.themebtn:hover { color: var(--tx); }
+
+/* buttons - ONE treatment app-wide (user decision 2026-08-09), modeled
+   on the object-control chips: thin line2 frame, white text, no fill;
+   hover brightens the frame. Primary carries the accent frame. */
+.btn { display: inline-flex; align-items: center; gap: 6px; height: auto; padding: 4px 10px; border-radius: 0; border: 1px solid var(--line2) !important; background: transparent; color: var(--ctrl) !important; font-family: var(--sans); font-size: 11px; font-weight: 400; cursor: pointer; white-space: nowrap; text-decoration: none; }
+.btn:hover { color: var(--ctrl) !important; border-color: var(--tx2) !important; background: none; }
+.btn.primary { border-color: var(--accent) !important; }
+.btn.primary:hover { border-color: var(--accent) !important; filter: brightness(1.15); }
+.btn.success { color: var(--ctrl) !important; }
+.btn.ghost { border-color: transparent !important; color: var(--tx2) !important; }
+.btn.ghost:hover { color: var(--ctrl) !important; border-color: transparent !important; }
+/* danger AFTER ghost so destructive controls stay red even as ghosts
+   (equal specificity - source order decides); ghost+danger = frameless red */
+.btn.danger { color: var(--danger) !important; border-color: var(--danger) !important; }
+.btn.danger:hover { color: var(--danger) !important; border-color: var(--danger) !important; filter: brightness(1.15); }
+.btn.danger.ghost, .btn.danger.ghost:hover { border-color: transparent !important; }
+.btn.sm { padding: 3px 8px; font-size: 10px; }
+/* outline button - the boxed treatment: thin line2 frame like the
+   object-control chips; used for navigation (Devices) and consequential
+   actions (push). */
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* left-align: segmented sub-tabs start flush on the gutter (boxed
+   buttons align by their frame, so no padding tricks for .btn anymore) */
+.seg button:first-child { padding-left: 0; }
+/* tailwind rounded-* utilities predate the flat system */
+[class*="rounded"] { border-radius: 0 !important; }
+
+/* ---------- nav (34px, surface, active = selection + accent bar) ---------- */
+.nav { display: flex; align-items: center; gap: 0; height: 34px; padding: 0 20px 0 7px; border-bottom: 1px solid var(--line); background: var(--surface); flex: 0 0 auto; }
+.tab { position: relative; padding: 0 13px; height: 34px; display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 400; color: var(--tx3); cursor: pointer; letter-spacing: -0.01em; background: none; border: none; font-family: var(--sans); }
+.tab:hover { color: #FFFFFF; }
+.tab.active { color: var(--tx); background: var(--selection); }
+.tab.active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); border-radius: 0; }
+.tab .cnt { font-size: 10px; color: var(--tx3); font-weight: 400; }
+.tab.active .cnt { color: var(--tx); }
+
+/* ---------- page scaffold ---------- */
+.page { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.toolbar { display: flex; align-items: center; gap: 16px; padding: 14px 20px 12px; flex: 0 0 auto; }
+.count { display: flex; align-items: baseline; gap: 7px; }
+.count .n { font-size: 12px; font-weight: 500; letter-spacing: 0; }
+.count .lbl { font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--tx2); text-transform: none; }
+.pillsel { display: inline-flex; align-items: center; gap: 7px; background: none; border: none; border-radius: 0; padding: 0; font-size: 12px; color: var(--accent); }
+.select { display: inline-flex; align-items: center; gap: 8px; background: none; border: none; border-bottom: 1px solid var(--ctrl-line); border-radius: 0; padding: 4px 0; font-size: 12px; color: var(--ctrl); cursor: pointer; }
+.select:hover { color: var(--accent); border-bottom-color: var(--accent); }
+/* filter field: text placeholder on a 1px bottom rule */
+.search { display: inline-flex; align-items: center; gap: 8px; background: none; border: none; border-bottom: 1px solid var(--line); border-radius: 0; padding: 4px 0; font-size: 12px; color: var(--tx2); min-width: 200px; }
+.search input { background: none; border: none; outline: none; color: var(--tx); font-family: var(--sans); font-size: 12px; width: 100%; }
+.search input::placeholder { color: var(--tx3); }
+
+/* segmented sub-tabs → plain labels, active carries an underline */
+.seg { display: inline-flex; background: none; border: none; border-radius: 0; padding: 0; gap: 14px; }
+.seg button { font-family: var(--sans); font-size: 11px; font-weight: 400; color: var(--tx3); background: none; border: none; border-bottom: 2px solid transparent; padding: 4px 1px; border-radius: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.seg button:hover { color: var(--tx); }
+.seg button.on, .seg button.active { color: var(--tx); background: none; border-bottom-color: var(--accent); }
+.seg button .c { font-size: 10px; color: var(--tx3); font-weight: 400; }
+.seg button.on .c, .seg button.active .c { color: var(--tx); }
+
+/* ---------- table ---------- */
+.twrap { margin: 0 20px 22px; border: 1px solid var(--line); border-radius: 0; overflow: auto; background: var(--surface); flex: 1 1 auto; min-height: 0; }
+table { border-collapse: collapse; width: 100%; }
+thead th { position: sticky; top: 0; z-index: 2; background: var(--panel-alt); text-align: left; font-size: 11px; font-weight: 500; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tx2); padding: 9px 12px; border-bottom: 1px solid var(--line2); white-space: nowrap; }
+.filt th { position: sticky; top: 37px; z-index: 1; background: var(--surface); padding: 6px 12px; border-bottom: 1px solid var(--line); }
+.filt input, .filt .fsel, .filt select { width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--ctrl-line); border-radius: 0; padding: 5px 8px; font-family: var(--sans); font-size: 11px; color: var(--ctrl); outline: none; }
+.filt input::placeholder { color: var(--tx3); }
+.filt .fsel { display: flex; align-items: center; justify-content: space-between; color: var(--tx2); cursor: pointer; }
+.filt select { height: 26px; padding: 0 6px; cursor: pointer; line-height: 1; }
+.filt select option { background: var(--surface); color: var(--tx); }
+tbody td { padding: 9px 12px; border-bottom: 1px solid var(--line2); font-size: 12px; color: var(--tx); vertical-align: middle; white-space: nowrap; }
+/* Table content is WHITE throughout (user decision 2026-08-09) - the
+   !important also overrides inline grays and Tailwind text-* utilities
+   inside cells. Disabled rows/controls are exempt by construction: the
+   UI marks them via reduced opacity, which dims the white accordingly. */
+tbody td, tbody td * { color: var(--ctrl) !important; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr.on { background: var(--selection); }
+
+/* Rules-table vertical column separators (opt-in via .rules-tbl; the
+   last column stays separator-free per spec). */
+.rules-tbl thead th,
+.rules-tbl tbody td { border-right: 1px solid var(--line); }
+.rules-tbl thead th:last-child,
+.rules-tbl tbody td:last-child { border-right: none; }
+.idx { color: var(--tx3); font-size: 11px; }
+.rname { color: var(--tx); }
+.rname .ic { color: var(--tx3); margin-left: 6px; font-size: 11px; cursor: pointer; }
+.rname .ic:hover { color: var(--accent); }
+td.num, th.num { text-align: right; }
+.date { color: var(--tx2); font-size: 11px; }
+.dash { color: var(--tx3); }
+.mut { color: var(--tx2); }
+
+/* checkbox - 15×15, 1.5px border, accent fill with surface check */
+.ck { width: 15px; height: 15px; border: 1.5px solid var(--ctrl-line); border-radius: 0; display: inline-block; cursor: pointer; vertical-align: middle; position: relative; flex: 0 0 auto; }
+.ck.on { background: var(--accent); border-color: var(--accent); }
+.ck.on::after { content: '[OK]'; position: absolute; inset: 0; color: var(--surface); font-size: 11px; display: flex; align-items: center; justify-content: center; font-weight: 700; }
+
+/* chips → TEXT, not chips. Tone only via colour: trust = --data,
+   wan/dmz/mgmt/vpn = --tx2, any = --tx3, public wildcards = --muted.
+   Class names stay (templates emit them); the box treatment is gone. */
+.chip { display: inline-flex; align-items: center; font-size: 12px; padding: 0; border-radius: 0; border: none; background: none; line-height: 1.5; white-space: nowrap; }
+.chip.trust { color: var(--data); }
+.chip.wan { color: var(--tx2); }
+.chip.any { color: var(--tx3); }
+.chip.pub { color: var(--muted); }
+.chip.dmz { color: var(--tx2); }
+/* former zone-palette tones - all neutralized to the text system */
+.chip.red    { color: var(--muted); }
+.chip.amber  { color: var(--muted); }
+.chip.teal   { color: var(--tx2); }
+.chip.pink   { color: var(--tx2); }
+.chip.purple { color: var(--tx2); }
+.chip-stack { display: inline-flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.more { color: var(--tx3); font-size: 11px; }
+
+/* action / status - text: allow = --data, deny = --muted */
+.act { display: inline-flex; align-items: center; font-size: 12px; font-weight: 400; padding: 0; border-radius: 0; border: none; background: none; }
+.act.deny { color: var(--muted); }
+.act.allow { color: var(--data); }
+.appchip { display: inline-flex; align-items: center; font-size: 12px; color: var(--data); border: none; border-radius: 0; padding: 0; background: none; }
+.appchip.ssl { color: var(--tx2); }
+
+/* profiles - 10px, tertiary, space-separated text */
+.prof { display: inline-flex; gap: 6px; }
+.pp { font-size: 10px; font-weight: 400; letter-spacing: 0.02em; padding: 0; border-radius: 0; border: none; color: var(--tx3); }
+.pp.on { color: var(--tx2); background: none; }
+
+/* status dot - the one place radius survives */
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+.dot.g { background: var(--accent); } .dot.r { background: var(--muted); } .dot.a { background: var(--muted); } .dot.m { background: var(--tx3); }
+
+/* generic tag - text with tone via colour only */
+.tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 0; border-radius: 0; border: none; color: var(--tx2); }
+.tag.ok { color: var(--data); background: none; }
+.tag.warn { color: var(--muted); background: none; }
+.tag.bad { color: var(--muted); background: none; }
+
+/* ---------- cards / panels ---------- */
+.cards { display: grid; gap: 14px; padding: 4px 20px 22px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.card.click { cursor: pointer; transition: border-color .12s; }
+.card.click:hover { border-color: var(--accent); }
+.card h3 { margin: 0; font-size: 15px; font-weight: 500; letter-spacing: -0.01em; }
+.card .sub { font-size: 12px; color: var(--tx2); }
+.kv { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
+.kv .k { color: var(--tx2); } .kv .v { color: var(--tx); }
+
+/* metric tiles - hairline strip treatment (no cards, no bars) */
+.metrics { display: flex; gap: 0; padding: 4px 20px 14px; }
+.metric { flex: 1; background: none; border: none; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 0; padding: 12px 16px; display: flex; flex-direction: column; gap: 5px; }
+.metric:last-child { border-right: 1px solid var(--line); }
+.metric .ml { font-size: 11px; color: var(--tx2); }
+.metric .mv { font-size: 15px; font-weight: 500; letter-spacing: 0; }
+.metric .bar { display: none; }
+.metric .bar > i { display: none; }
+
+/* section label */
+.seclbl { font-size: 11px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: var(--tx2); padding: 0 20px; margin: 6px 0; }
+
+/* ---------- drawer (460px, surface, line edge, no shadow) ---------- */
+.scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 40; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 460px; background: var(--surface); border-left: 1px solid var(--line2); z-index: 41; display: flex; flex-direction: column; box-shadow: none; }
+.drawer .dh { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.drawer .dh h2 { margin: 0; font-size: 15px; font-weight: 500; }
+.drawer .db { padding: 18px; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
+.drawer .df { padding: 14px 18px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
+.x { margin-left: auto; cursor: pointer; color: var(--tx2); font-size: 18px; line-height: 1; background: none; border: none; }
+.x:hover { color: var(--tx); }
+
+/* diff block */
+.diff { border: 1px solid var(--line); border-radius: 0; overflow: hidden; }
+.diff .dt { padding: 8px 12px; font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--tx2); background: var(--panel-alt); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+.diff.target .dt { color: var(--tx2); }
+.diff .dr { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; font-size: 12px; border-bottom: 1px solid var(--line); }
+.diff .dr:last-child { border-bottom: none; }
+.diff .dr .k { color: var(--tx2); }
+
+/* warning text - 2px left rule in --muted, no filled box */
+.warnnote { border-left: 2px solid var(--muted); padding-left: 10px; color: var(--muted); font-size: 12px; }
+
+/* forms */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 11px; color: var(--tx2); }
+.field input, .field .inp { background: var(--bg); border: 1px solid var(--ctrl-line); border-radius: 0; padding: 7px 10px; font-family: var(--sans); font-size: 12px; color: var(--ctrl); outline: none; }
+.field input:focus { border-color: var(--accent); }
+
+/* Standalone .inp - same treatment outside .field wrappers. Interactive
+   fields sit in a darker well with the brighter line so they read as
+   controls on the surface (contrast fix 2026-08-09). */
+.inp { background: var(--bg); border: 1px solid var(--ctrl-line); border-radius: 0; padding: 6px 10px; font-family: var(--sans); font-size: 12px; color: var(--ctrl); outline: none; }
+.inp:focus { border-color: var(--accent); }
+.inp:disabled { opacity: 0.4; cursor: not-allowed; }
+select.inp { min-width: 160px; cursor: pointer; }
+select.inp option { background: var(--surface); color: var(--tx); }
+/* bare selects (inline-styled all over the templates): legible defaults
+   wherever no inline value pins them */
+select { color: var(--ctrl); }
+select option { background: var(--surface); color: var(--tx); }
+
+/* Interactive elements are WHITE regardless of legacy Tailwind utility
+   grays (text-gray-*/border-gray-* on buttons and fields predate the
+   reskin). Disabled elements are exempt - they keep their attribute
+   styling and opacity-based dimming. */
+button:not(:disabled):not(.tab):not(.x):not(.themebtn), select:not(:disabled),
+input:not(:disabled), textarea:not(:disabled) { color: var(--ctrl) !important; }
+select:not(:disabled), input:not(:disabled), textarea:not(:disabled) { border-color: var(--ctrl-line) !important; }
+/* Tailwind's font-mono predates the single-typeface system */
+.font-mono { font-family: var(--sans) !important; }
+
+/* toggle switch - functional control; keeps its rounded track (reads as
+   a control, not a badge; the thumb is a status dot by geometry). */
+.sw { width: 38px; height: 22px; border-radius: 999px; background: var(--selection); border: 1px solid var(--line2); position: relative; cursor: pointer; flex: 0 0 auto; transition: background .12s; }
+.sw > i { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--tx2); transition: transform .14s, background .14s; }
+.sw.on { background: var(--selection); border-color: var(--accent); }
+.sw.on > i { transform: translateX(16px); background: var(--accent); }
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
+/* Peer-checked toggle pattern (hidden checkbox + sibling track + thumb). */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.ptoggle-track { width: 32px; height: 16px; background: var(--selection); border-radius: 999px; transition: background .15s; }
+.ptoggle-thumb { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; background: var(--tx); border-radius: 50%; transition: transform .15s, background .15s; }
+input.peer:checked + .ptoggle-track { background: var(--accent); }
+input.peer:checked + .ptoggle-track + .ptoggle-thumb { transform: translateX(16px); background: var(--surface); }
+input.peer:disabled + .ptoggle-track,
+input.peer:disabled + .ptoggle-track + .ptoggle-thumb { opacity: 0.4; }
+.ptoggle-track-sm { width: 24px; height: 12px; background: var(--selection); border-radius: 999px; transition: background .15s; }
+.ptoggle-thumb-sm { position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; background: var(--tx); border-radius: 50%; transition: transform .15s, background .15s; }
+input.peer:checked + .ptoggle-track-sm { background: var(--accent); }
+input.peer:checked + .ptoggle-track-sm + .ptoggle-thumb-sm { transform: translateX(12px); background: var(--surface); }
+input.peer:disabled + .ptoggle-track-sm,
+input.peer:disabled + .ptoggle-track-sm + .ptoggle-thumb-sm { opacity: 0.4; }
+.cfg-dimmed { opacity: 0.4; pointer-events: none; }
+
+/* deploy log */
+.log { background: var(--log); border: 1px solid var(--line); border-radius: 0; padding: 14px 16px; font-family: var(--sans); font-size: 12px; line-height: 1.85; color: var(--tx2); overflow: auto; }
+.log .ts { color: var(--tx3); }
+.log .ok { color: var(--data); } .log .wn { color: var(--muted); } .log .er { color: var(--muted); } .log .in { color: var(--accent); }
+
+/* progress steps - 22px circles; done = filled accent, active = accent outline */
+.steps { display: flex; align-items: center; gap: 0; padding: 4px 20px 8px; }
+.step { display: flex; align-items: center; gap: 9px; }
+.step .b { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--line2); color: var(--tx3); display: flex; align-items: center; justify-content: center; font-size: 12px; flex: 0 0 auto; }
+.step.done .b { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.step.active .b { border-color: var(--accent); color: var(--accent); }
+.step .sl { font-size: 12px; color: var(--tx2); }
+.step.done .sl, .step.active .sl { color: var(--tx); }
+.step .conn { width: 46px; height: 1.5px; background: var(--line2); margin: 0 12px; }
+.step.done .conn { background: var(--accent); }
+
+.empty { padding: 60px 20px; text-align: center; color: var(--tx3); font-size: 12px; }

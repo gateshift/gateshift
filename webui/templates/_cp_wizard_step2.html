@@ -1,0 +1,75 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% with step = 2 %}{% include "_cp_wizard_progress.html" %}{% endwith %}
+
+{% if existing_devices %}
+<div class="tag" style="display:block;width:auto;margin:0 0 12px;padding:10px 14px;border-radius:0;color:var(--blue);border-color:var(--blue-line);background:var(--blue-fill);font-size:12px;line-height:1.55;">
+  <span style="font-weight:600;">Mgmt-Server already known.</span>
+  Currently used by:
+  <ul style="margin:6px 0 0;padding-left:18px;list-style:disc;">
+    {% for ed in existing_devices %}
+    <li>
+      <a href="/devices" style="color:var(--blue);text-decoration:underline;">{{ ed.host_name }}</a>
+      {% if ed.policy_package %}<span style="opacity:0.7;"> - {{ ed.policy_package }}</span>{% endif %}
+      {% if ed.is_legacy %}<span class="tag warn" style="margin-left:5px;padding:1px 6px;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;">Legacy</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  You're adding an additional gateway under the same Mgmt-Server.
+</div>
+{% endif %}
+
+{% if error %}
+<div class="tag bad" style="display:flex;width:auto;margin:0 0 12px;padding:8px 12px;border-radius:0;font-size:12px;color:var(--danger);border:1px solid var(--danger);">{{ error }}</div>
+{% endif %}
+
+<form hx-post="/devices/add/cp/gateways"
+      hx-target="#wizard-content"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      style="display:flex;flex-direction:column;gap:12px;">
+
+  <input type="hidden" name="mgmt_ip"   value="{{ form_mgmt_ip }}">
+  <input type="hidden" name="mgmt_port" value="{{ form_mgmt_port or 443 }}">
+  <input type="hidden" name="api_key"   value="{{ form_api_key }}">
+
+  <div class="field">
+    <label style="font-size:13px;color:var(--tx);font-weight:500;">Pick a policy package</label>
+    {% if not packages %}
+      <div class="empty" style="padding:14px;background:var(--bg2);border:1px solid var(--line);border-radius:0;text-align:left;">
+        No policy packages found on this Mgmt-Server.
+      </div>
+    {% else %}
+      <div style="display:flex;flex-direction:column;gap:6px;max-width:560px;">
+        {% for pkg in packages %}
+        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg1);border:1px solid var(--line);border-radius:0;cursor:pointer;font-size:12px;">
+          <input type="radio" name="package" value="{{ pkg.name }}" required style="accent-color:var(--green);">
+          <span style="color:var(--tx);">{{ pkg.name }}</span>
+          <span style="margin-left:auto;color:var(--tx2);">
+            {% if pkg.installed_on == 0 %}
+              <span style="color:var(--amber);">not deployed</span>
+            {% elif pkg.installed_on == 1 %}
+              installed on 1 gateway
+            {% else %}
+              installed on {{ pkg.installed_on }} gateways
+            {% endif %}
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div style="display:flex;align-items:center;gap:8px;padding-top:4px;">
+    <button type="button"
+            hx-post="/devices/add/cp/probe"
+            hx-target="#wizard-content"
+            hx-swap="innerHTML"
+            hx-include="closest form"
+            hx-vals='{"back": "1"}'
+            class="btn ghost sm">← Back</button>
+    <button type="submit" class="btn primary sm">Next: pick gateway</button>
+    <a href="/devices" class="btn ghost sm">Cancel</a>
+    <span class="htmx-indicator dash" style="font-style:italic;">Loading gateways…</span>
+  </div>
+</form>

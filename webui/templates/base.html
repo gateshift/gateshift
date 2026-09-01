@@ -1,0 +1,1114 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Gateshift{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/static/brand/favicon.svg">
+  {# Load order: fonts first (resolves font-family stack), tokens next
+     (CSS-vars + design components), tailwind output last (utilities).
+     Tailwind retires in Phase 4 - until then the three layers coexist. #}
+  <link rel="stylesheet" href="/static/fonts.css?v={{ static_version or '0' }}">
+  <link rel="stylesheet" href="/static/tokens.css?v={{ static_version or '0' }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ static_version or '0' }}">
+  <style>
+    /* rules-workspace crumb: source / target groups */
+    /* header groups: plain text, no boxes (design handoff - no bordered
+       elements anywhere in the header) */
+    .hdr-grp { display:inline-flex; align-items:center; gap:6px; padding:0; border:none; border-radius:0; }
+    .hdr-grp-lbl { font-size:12px; color:var(--ctrl); text-transform:capitalize; letter-spacing:.04em; font-weight:700; }
+    .hdr-cap { font-size:9px; color:var(--tx3); text-transform:uppercase; letter-spacing:.05em; }
+    .hdr-pair { display:inline-flex; align-items:center; gap:4px; }
+    /* header dropdowns must READ as dropdowns (user feedback): dark well,
+       visible border, white text - the inline chevron background-image
+       survives because only background-COLOR is overridden. Text inputs
+       keep the underline treatment. The plain-text SOURCE next to boxed
+       TARGET pickers is deliberate: fixed vs. selectable. */
+    .hd select {
+      background-color: var(--bg) !important; border: 1px solid var(--ctrl-line) !important;
+      border-radius: 0 !important; color: var(--ctrl) !important;
+      font-family: var(--sans); font-size: 11.5px !important;
+      padding-top: 3px !important; padding-bottom: 3px !important; padding-left: 8px !important;
+    }
+    .hd select:hover { border-color: var(--accent) !important; }
+    .hd input[type="text"] {
+      background: transparent !important; border: none !important;
+      border-bottom: 1px solid var(--ctrl-line) !important;
+      border-radius: 0 !important; color: var(--ctrl);
+      font-family: var(--sans); font-size: 11.5px !important;
+    }
+    .hd select option { background: var(--surface); color: var(--tx); }
+    .scope-add { border:1px solid var(--line); background:var(--bg2); color:var(--tx2); border-radius:0; width:20px; height:20px; line-height:18px; text-align:center; font-size:14px; cursor:pointer; padding:0; margin-left:2px; }
+    .scope-add:hover { color:var(--green); border-color:var(--green); }
+    .scope-del:hover { color:var(--amber); border-color:var(--amber); }
+  </style>
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body class="min-h-screen">
+  {# Token defaults take over: bg/text/font come from tokens.css html,body rule.
+     The Tailwind 'min-h-screen' utility stays only to keep the body filling the
+     viewport - token CSS doesn't set min-height. Will move to .app wrapper
+     when the page-scaffold (toolbar / page / etc.) is converted in Phase 2. #}
+
+  {# ── Toast container - bottom-right column, JS-injected pills.
+       Each toast carries its own color from showToast() in tokens-time. ── #}
+  <div id="toast-container" style="position:fixed;bottom:16px;right:16px;z-index:50;display:flex;flex-direction:column;gap:8px;pointer-events:none;"></div>
+
+  {# ── Navigation overlay - installed before a full-page navigation, dies
+       with the old page once the new one paints. ── #}
+  <div id="nav-busy-overlay" class="hidden">
+    <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:16px 24px;box-shadow:var(--shadow-pop);display:flex;align-items:center;gap:12px;">
+      <svg style="width:20px;height:20px;color:var(--green);flex-shrink:0;animation:gateshift-spin 1s linear infinite;" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
+      </svg>
+      <span style="color:var(--tx);font-size:13px;">Loading…</span>
+    </div>
+  </div>
+
+  {# ── Busy overlay (zone changes, import, generate) with optional progress
+       bar + scrollable log section. JS toggles inner panels by removing
+       the .hidden class. ── #}
+  <div id="zone-busy-overlay" class="hidden">
+    <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:16px 24px;box-shadow:var(--shadow-pop);min-width:288px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <svg style="width:20px;height:20px;color:var(--green);flex-shrink:0;animation:gateshift-spin 1s linear infinite;" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
+        </svg>
+        <span id="zone-busy-label" style="color:var(--tx);font-size:13px;">Applying zone changes…</span>
+        <span id="zone-busy-elapsed" class="dash" style="font-size:11.5px;margin-left:auto;"></span>
+      </div>
+      <div id="zone-busy-progress" class="hidden" style="margin-top:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;font-size:11.5px;color:var(--tx2);margin-bottom:4px;">
+          <span id="zone-busy-step"></span>
+          <span id="zone-busy-pct"></span>
+        </div>
+        <div style="width:100%;background:var(--bg2);border-radius:0;height:6px;overflow:hidden;">
+          <div id="zone-busy-bar" style="background:var(--green);height:100%;border-radius:0;width:0%;transition:width .3s;"></div>
+        </div>
+      </div>
+      <div id="zone-busy-log" class="hidden" style="margin-top:12px;max-height:240px;overflow-y:auto;font-size:11.5px;line-height:1.4;"></div>
+    </div>
+  </div>
+
+  <style>
+    /* Spinner keyframes - shared by nav-busy + zone-busy overlays. */
+    @keyframes gateshift-spin {
+      to { transform: rotate(360deg); }
+    }
+    /* Overlay layout - applies only when not hidden. Inline display:flex
+       would otherwise win the cascade fight against Tailwind .hidden
+       (display:none); :not(.hidden) defers to .hidden when JS toggles it.
+       Same pattern as the workspace sub-tab strips in tokens.css. */
+    #nav-busy-overlay:not(.hidden) {
+      position: fixed; inset: 0; z-index: 50;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(4,7,11,0.7); backdrop-filter: blur(4px);
+    }
+    #zone-busy-overlay:not(.hidden) {
+      position: fixed; inset: 0; z-index: 40;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(4,7,11,0.6);
+    }
+    /* Org pending-changes banner - same .hidden-vs-inline-flex quirk: layout
+       only when not hidden, so the server-rendered hidden class and the JS
+       _orgMarkPending/_orgClearPending classList toggles take effect (an inline
+       display:flex would always win the cascade and pin the banner visible). */
+    #org-pending-banner:not(.hidden) {
+      display: flex; align-items: center;
+    }
+    /* Tailwind ships .hidden { display: none } in app.css; if Tailwind
+       retires this rule needs a gateshift fallback at the top of tokens.css. */
+  </style>
+
+  {# ── Header (token .hd) ───────────────────────────────────────────
+       56px surface bar per design handoff: live-text wordmark + claim,
+       plain-text pickers (no boxes), source/target breadcrumb when inside
+       a device workspace. ── #}
+  <header class="hd">
+    {# Brand lockup: live-text wordmark, the 'a' replaced by the Lambda
+       mark (inline SVG so it scales with the type and takes the accent
+       token; legs on the baseline, 0.725em tall = height of the
+       neighbouring 't', tucked close to the 't'). Claim sits to the
+       right behind a 1px rule, two lines, uppercase - proportions per
+       the lockup draft. Two-bar Lambda mark - same paths as the favicon.
+       viewBox is the mark's tight bounding box so it sits snug in the
+       lockup; fill comes from the .brand-a token (theme-aware). #}
+    <a href="/devices" title="Gateshift - back to devices"
+       style="display:inline-flex;align-items:center;text-decoration:none;">
+      <span class="brand">g<svg class="brand-a" viewBox="12.644 1.055 38.712 62.945" aria-hidden="true"><path d="M28.127 1.055 L34.919 2.748 L19.647 64 L16.040 64 L12.644 63.153 Z"/><path d="M35.873 1.055 L29.081 2.748 L44.353 64 L47.960 64 L51.356 63.153 Z"/></svg>teshift</span>
+      <span class="brand-rule" aria-hidden="true"></span>
+      <span class="brand-claim">the firewall<br>migration tool</span>
+    </a>
+    {# Devices-First IA: source is picked on /devices, not via a header
+       dropdown. Workspace shows source as mono label, target as picker.
+       Hidden input keeps the legacy id so HTMX hx-include="#device-select"
+       calls (rules_fragment pagination) keep sending the device param. #}
+    {% if request.url.path.startswith('/rules') and device %}
+    <input type="hidden" id="device-select" name="device" value="{{ device }}">
+    <div class="crumb">
+      <span class="arr">/</span>
+      {# ── SOURCE group: the source device + (for a Panorama) its network/policy scope ── #}
+      <span class="hdr-grp" title="Source device + scope">
+        <span class="hdr-grp-lbl">source</span>
+        {% if pano_dgs is defined and pano_dgs and pano_manager_id %}
+      <a href="/manager/{{ pano_manager_id }}" class="btn sm" title="Open the Manager-View (multi-scope workbench)">{{ pano_manager_label or device }}<span style="color:var(--tx3);font-size:9px;margin-left:5px;">&#9656;&nbsp;mgr</span></a>
+      {% else %}
+      <a href="/devices" class="btn sm" title="Source device - click to change (Devices page)">{{ device }}</a>
+      {% endif %}
+        {% if pano_dgs is defined and pano_dgs %}
+        {% set _mgr_is_pano = (pano_manager_platform is not defined) or (pano_manager_platform == 'panw') %}
+        {# link toggle + network dropdown render only when the manager HAS network scopes
+           (templates / device-db / gateways) - an empty dropdown + a link with nothing to
+           follow is noise. #}
+        {% if pano_templates %}
+        {# link toggle - LEFTMOST scope control; on = network scope follows the policy scope's
+           BOUND network layer (Panorama: the DG's template-stack; FMG: the package's
+           install-target device). #}
+        <label class="picker" title="{% if _mgr_is_pano %}Link: network scope follows the device-group's bound template-stack{% elif pano_manager_platform == 'checkpoint' %}Link: network follows the package's installation-target gateway{% else %}Link: network follows the package's install-target device{% endif %}"
+               style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none;">
+          <span style="display:inline-flex;align-items:center;color:var(--tx2);" aria-label="link - network follows the policy scope's bound network layer">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </span>
+          <span style="position:relative;display:inline-flex;align-items:center;">
+            <input type="checkbox" id="pano-net-link" class="sr-only peer" onchange="_panoSetLink(this.checked)">
+            <div class="ptoggle-track"></div>
+            <div class="ptoggle-thumb"></div>
+          </span>
+        </label>
+        {# network scope: Panorama = template / template-STACK (stacks first, * = the DG's bound
+           stack); FMG = the managed devices (* = the package's install-target).
+           data-net-relevant=1 = the policy scope's own composition (grayed when "link" is on) #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">{{ 'tmpl' if _mgr_is_pano else ('gateway' if pano_manager_platform == 'checkpoint' else 'device') }}</span>
+          <select id="pano-net-select" class="picker" title="{% if _mgr_is_pano %}Network scope - template or template-stack (interfaces/routes/zones){% elif pano_manager_platform == 'checkpoint' %}Network layer - a gateway/cluster's interfaces/routes (topology + Gaia){% else %}Network layer - a managed device's interfaces/routes/zones (device-db){% endif %}"
+                  style="appearance:none;-webkit-appearance:none;padding-right:22px;"
+                  onchange="if(this.value)location.href='/rules?device={{ device | urlencode }}&template='+encodeURIComponent(this.value)">
+            {% set _stacks = pano_templates|selectattr('type','equalto','template-stack')|list %}
+            {% set _plain  = pano_templates|rejectattr('type','equalto','template-stack')|list %}
+            {% if _stacks %}<optgroup label="Template-Stacks">
+              {% for t in _stacks %}<option value="{{ t.name }}" data-net-relevant="{% if t.name == pano_bound_stack %}1{% else %}0{% endif %}" {% if t.name == pano_current_template %}selected{% endif %}>{{ t.name }}{% if t.name == pano_bound_stack %} *{% endif %}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% if _plain %}<optgroup label="{{ 'Templates' if _mgr_is_pano else ('Gateways' if pano_manager_platform == 'checkpoint' else 'Devices') }}">
+              {% for t in _plain %}{% set _mem = (pano_bound_members is defined and t.name in pano_bound_members) or t.name == pano_bound_stack %}<option value="{{ t.name }}" data-net-relevant="{% if _mem %}1{% else %}0{% endif %}" {% if t.name == pano_current_template %}selected{% endif %}>{% if _mem and _mgr_is_pano %}↳ {% endif %}{{ t.name }}{% if t.name == pano_bound_stack %} *{% endif %}</option>{% endfor %}
+            </optgroup>{% endif %}
+          </select>
+        </span>
+        {% endif %}{# /pano_templates #}
+        {# policy scope switcher - drives the rule/NAT/PBF/SSL tabs; no empty option #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">{{ 'dg' if _mgr_is_pano else 'scope' }}</span>
+          <select class="picker" title="{{ 'Device-group (policy scope)' if _mgr_is_pano else 'Scope (global / ADOM / policy package)' }}"
+                  style="appearance:none;-webkit-appearance:none;padding-right:22px;"
+                  onchange="_panoGoDG(this.value)">
+            {% if _mgr_is_pano %}
+            {% for dg in pano_dgs %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            {% else %}
+            {# FMG mixes three scope kinds - group them so ADOM vs package is scannable #}
+            {% set _sg = pano_dgs|selectattr('type','equalto','global')|list %}
+            {% set _sa = pano_dgs|selectattr('type','in',('adom','domain'))|list %}
+            {% set _sp = pano_dgs|selectattr('type','equalto','package')|list %}
+            {% if _sg %}<optgroup label="Global">
+              {% for dg in _sg %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {# CP: a Global scope ⇒ MDS (label "Domains"); no Global ⇒ SmartCenter (one mgmt
+               context, label "Management"). FMG ⇒ "ADOMs". #}
+            {% if _sa %}<optgroup label="{{ ('Domains' if _sg else 'Management') if pano_manager_platform == 'checkpoint' else 'ADOMs' }}">
+              {% for dg in _sa %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% if _sp %}<optgroup label="Policy Packages">
+              {% for dg in _sp %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% endif %}
+          </select>
+        </span>
+        {% endif %}
+      </span>
+      {% if pano_dgs is defined and pano_dgs %}
+      <script>
+        function _panoLinked(){ return localStorage.getItem('pano_net_linked') !== '0'; }  /* default LINKED */
+        /* When linked, only the DG's own network composition (bound stack * + its member templates ↳,
+           data-net-relevant="1") stays selectable; everything else is grayed. Unlinked → all selectable.
+           No-op when the DG has no bound stack (no relevant option) so nothing gets locked out. */
+        function _panoApplyLinkFilter(){
+          var sel = document.getElementById('pano-net-select'); if(!sel) return;
+          var linked = _panoLinked();
+          var hasBound = !!sel.querySelector('option[data-net-relevant="1"]');
+          var opts = sel.querySelectorAll('option[data-net-relevant]');
+          for(var i=0;i<opts.length;i++){
+            opts[i].disabled = (linked && hasBound && opts[i].getAttribute('data-net-relevant') !== '1');
+          }
+        }
+        function _panoSetLink(on){
+          localStorage.setItem('pano_net_linked', on ? '1' : '0');
+          if(on){ location.href = '/rules?device={{ device | urlencode }}'; return; }  /* snap network → bound stack */
+          _panoApplyLinkFilter();                              /* unlinked → re-enable all options in place */
+        }
+        function _panoGoDG(v){
+          if(!v) return;
+          var u = '/rules?device=' + encodeURIComponent(v);
+          if(!_panoLinked()){                                   /* unlinked → keep the current network scope */
+            var cur = {{ pano_current_template|tojson|safe }};
+            if(cur) u += '&template=' + encodeURIComponent(cur);
+          }
+          location.href = u;
+        }
+        (function(){ var c = document.getElementById('pano-net-link'); if(c) c.checked = _panoLinked();
+                     _panoApplyLinkFilter(); })();
+      </script>
+      {% endif %}
+      {% if target_devices is defined and target_devices and selected_device %}
+      <span class="arr flow" aria-hidden="true"><span class="a1">&gt;</span><span class="a2">&gt;</span></span>
+      {# ── TARGET group: the migration destination device + (for a Panorama target) the egress scope ── #}
+      <span class="hdr-grp" title="Target device + egress scope (migration destination)">
+        <span class="hdr-grp-lbl">target</span>
+        {# Target picker - native <select> styled to the token .picker pill; chevron via background-image. #}
+        <select id="target-device-select" name="target" title="Target device for migration"
+                onchange="changeTargetDevice(this.value)" class="picker"
+                style="appearance:none;-webkit-appearance:none;padding-right:24px;background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>');background-repeat:no-repeat;background-position:right 8px center;">
+          {# No empty "- target device -" state: the server defaults selected_target to the first. #}
+          {% for t in target_devices %}
+          <option value="{{ t.id }}" {% if selected_target and selected_target.id == t.id %}selected{% endif %}>{{ t.name }} · {{ t.platform }}</option>
+          {% endfor %}
+        </select>
+        {% if target_pano_dgs is defined and target_pano_dgs %}
+        {# Panorama TARGET (dst) - the scope to EGRESS into: template (network) + device-group (policy).
+           startPush sends these; deploy_push builds config.panorama from them. #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">tmpl</span>
+          <select id="target-template-select" class="picker" title="Egress into network scope - template OR template-stack (a stack writes into its own-config layer)"
+                  onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% if target_pano_stacks %}<optgroup label="Template-Stacks">
+              {% for t in target_pano_stacks %}<option value="{{ t }}" data-kind="template-stack">{{ t }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% if target_pano_templates %}<optgroup label="Templates">
+              {% for t in target_pano_templates %}<option value="{{ t }}" data-kind="template">{{ t }}</option>{% endfor %}
+            </optgroup>{% endif %}
+          </select>
+          <button type="button" class="scope-add" title="New template / template-stack on the target candidate" onclick="scopeCreateOpen('network')">+</button>
+          <button type="button" id="scope-del-net" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('network')">×</button>
+        </span>
+        <span class="hdr-pair">
+          <span class="hdr-cap">dg</span>
+          <select id="target-dg-select" class="picker" title="Egress into device-group"
+                  onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% for dg in target_pano_dgs %}<option value="{{ dg }}">{{ dg }}</option>{% endfor %}
+          </select>
+          <button type="button" class="scope-add" title="New device-group on the target candidate" onclick="scopeCreateOpen('dg')">+</button>
+          <button type="button" id="scope-del-dg" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('dg')">×</button>
+        </span>
+        {% endif %}
+        {% if target_cp_packages is defined and target_cp_packages %}
+        {# CheckPoint manager TARGET (dst) - the domain/package to EGRESS into. startPush sends the
+           selected package label; deploy_push resolves it to config.cp.domain + policy_package.
+           Packages are created via Manager-View pkg-CRUD, not here (no + in V1). #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">pkg</span>
+          <select id="target-cp-pkg-select" class="picker" title="Egress into CheckPoint domain / policy-package"
+                  onchange="if(typeof _cpSyncGw==='function')_cpSyncGw(); if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% for p in target_cp_packages %}<option value="{{ p.label }}" data-gw="{{ p.gateway }}">{{ p.label }}</option>{% endfor %}
+          </select>
+        </span>
+        {% if target_cp_gateways is defined and target_cp_gateways %}
+        {# Network-layer picker (CN-2): the gateway/cluster the NETWORK strand pushes to (routes
+           per member Gaia, VIPs/zones via the domain Mgmt session). *-defaults to the selected
+           package's install-target (data-gw, synced on pkg change) - overridable. #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">gw</span>
+          <select id="target-cp-gw-select" class="picker" title="Network egress gateway/cluster - defaults to the package's install target"
+                  onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% for g in target_cp_gateways %}<option value="{{ g }}">{{ g }}</option>{% endfor %}
+          </select>
+        </span>
+        <script>
+          // *-binding: a pkg pick re-defaults the gw picker to that package's install-target
+          // (same coupling as the source-side composite). Manual gw changes stick until the
+          // next pkg change (deliberate - the pkg's * is the canonical default).
+          function _cpSyncGw() {
+            var p = document.getElementById('target-cp-pkg-select');
+            var g = document.getElementById('target-cp-gw-select');
+            if (!p || !g) return;
+            var o = p.selectedOptions && p.selectedOptions[0];
+            var want = o ? (o.getAttribute('data-gw') || '') : '';
+            if (want && Array.prototype.some.call(g.options, function (x) { return x.value === want; }))
+              g.value = want;
+          }
+        </script>
+        {% endif %}
+        {% endif %}
+      </span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# Manager-View: identity crumb in the top bar (parallel to the /rules source crumb) -
+       Manager⟷Scope toggle + manager label + scope count + analysis summary. #}
+    {% if request.url.path.startswith('/manager') and manager_label is defined %}
+    <div class="crumb">
+      <span class="arr">/</span>
+      {# SOURCE group - this manager IS the migration source; label it like the /rules source crumb #}
+      <span class="hdr-grp" title="Source device - this manager">
+        <span class="hdr-grp-lbl">source</span>
+        <span style="color:var(--tx);font-size:12px;">{{ manager_label }}</span>
+      </span>
+      <span class="mgr-toggle">
+        <span class="on">Manager</span>
+        {# land on the ROOT scope (PA 'shared', FMG 'global') - by role, never a hardcoded name #}
+        {% set _mroot = (policy_scopes or []) | selectattr('scope_role', 'equalto', 'root') | first %}
+        <a href="/rules?device={{ (_mroot.name if _mroot else 'shared') | urlencode }}&from=manager" title="Edit a single scope">Scope</a>
+      </span>
+      {# DEST group - pick the deploy target: this manager (optimize in place) or another
+         manager (migrate). The Deploy tab reacts to this (mgrDestChange in manager.html). #}
+      {% if dest_managers %}
+      <span class="hdr-grp" title="Deploy target - this manager = optimize in place, another manager = migrate" style="margin-left:4px;">
+        <span class="hdr-grp-lbl">target</span>
+        <select id="mgr-dest-picker" onchange="if(window.mgrDestChange) mgrDestChange();"
+                style="background:var(--bg2);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:11.5px;padding:2px 6px;">
+          {% for d in dest_managers %}
+          <option value="{{ d.id }}"{% if d.is_self %} data-self="1"{% endif %} data-plat="{{ d.platform }}">{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </span>
+      {% endif %}
+      {# CREATE-SCOPE group - the SAME tmpl/dg picker + "+" as the firewall→Panorama header, but
+         scoped to THIS Panorama: "+" stages a template / stack / device-group, then "Deploy"
+         create-if-missing's them on the candidate (you commit on the box). Bootstraps an empty
+         Panorama (dg = just shared, tmpl empty). PANORAMA-ONLY: scope-CRUD (create/rename/delete
+         + staged-scope deploy) is a Panorama driver feature - hidden for other managers (FMG). #}
+      {% if manager and manager.platform == 'panw' %}
+      <span class="hdr-pair" style="margin-left:6px;">
+        <span class="hdr-cap">tmpl</span>
+        <select id="target-template-select" class="picker" title="Network scope on this Panorama - template or template-stack. Use + to create one."
+                onchange="if(typeof _toggleScopeDelBtns==='function')_toggleScopeDelBtns();"
+                style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+          {% set _mstacks = (net_scopes or []) | selectattr('scope_type','equalto','template-stack') | list %}
+          {% set _mtmpls  = (net_scopes or []) | selectattr('scope_type','equalto','template') | list %}
+          {% if _mstacks %}<optgroup label="Template-Stacks">
+            {% for s in _mstacks %}<option value="{{ s.scope_name }}" data-kind="template-stack">{{ s.scope_name }}</option>{% endfor %}
+          </optgroup>{% endif %}
+          {% if _mtmpls %}<optgroup label="Templates">
+            {% for s in _mtmpls %}<option value="{{ s.scope_name }}" data-kind="template">{{ s.scope_name }}</option>{% endfor %}
+          </optgroup>{% endif %}
+        </select>
+        <button type="button" class="scope-add" title="New template / template-stack on this Panorama candidate" onclick="scopeCreateOpen('network')">+</button>
+        <button type="button" id="scope-del-net" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('network')">&times;</button>
+      </span>
+      <span class="hdr-pair">
+        <span class="hdr-cap">dg</span>
+        <select id="target-dg-select" class="picker" title="Device-group on this Panorama. Use + to create one."
+                onchange="if(typeof _toggleScopeDelBtns==='function')_toggleScopeDelBtns();"
+                style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+          {% for s in (policy_scopes or []) %}<option value="{{ s.name }}">{{ s.name }}</option>{% endfor %}
+        </select>
+        <button type="button" class="scope-add" title="New device-group on this Panorama candidate" onclick="scopeCreateOpen('dg')">+</button>
+        <button type="button" id="scope-del-dg" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('dg')">&times;</button>
+      </span>
+      <button type="button" id="mgr-scope-deploy" class="btn primary sm" style="display:none;margin-left:6px;" onclick="if(window.mgrDeployScopes)mgrDeployScopes();" title="Create the staged scopes on this Panorama's candidate - you commit on the box, then re-import to see them.">Deploy staged scopes</button>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="sp"></div>
+
+    <div style="display:flex;align-items:center;gap:14px;">
+      {% block toolbar %}{% endblock %}
+      {# Version chip -> About dialog. Underlined so it reads as a link;
+         last element in the right group = flush with the header's right
+         padding (same 20px edge as the page toolbar's + Add device). #}
+      <button type="button" id="about-open" title="About Gateshift"
+              onclick="document.getElementById('about-modal').classList.remove('hidden')">v{{ app_version }}</button>
+    </div>
+  </header>
+
+  <main class="px-6 py-6">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    // ── Toast notifications ──────────────────────────────────────────
+    // Levels: success / warn / error / info. Auto-dismiss after `duration`
+    // ms, manual close via the × button. Use queueToast(...) instead of
+    // showToast(...) when the action triggers a full-page reload - the queue
+    // rides sessionStorage and drains on the next DOMContentLoaded.
+    function showToast(msg, type, duration) {
+      type     = type     || 'info';
+      duration = duration || 3500;
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      // Per-type CSS-var colour tuple - text/background/border via token vars.
+      const styles = {
+        success: 'color:var(--green);background:var(--green-fill);border-color:var(--green-line);',
+        warn:    'color:var(--amber);background:var(--amber-fill);border-color:var(--amber-line);',
+        error:   'color:var(--red);background:var(--red-fill);border-color:var(--red-line);',
+        info:    'color:var(--tx);background:var(--bg2);border-color:var(--line2);',
+      };
+      const toast = document.createElement('div');
+      toast.style.cssText =
+        'pointer-events:auto;padding:8px 28px 8px 12px;border-radius:0;border:1px solid;' +
+        'font-size:11.5px;max-width:288px;box-shadow:var(--shadow-pop);position:relative;' +
+        'opacity:0;transform:translateX(8px);transition:opacity .2s,transform .2s;' +
+        (styles[type] || styles.info);
+      toast.textContent = msg;
+      const close = document.createElement('button');
+      close.type = 'button';
+      close.setAttribute('aria-label', 'Close');
+      close.style.cssText =
+        'position:absolute;top:2px;right:6px;background:none;border:none;color:currentColor;' +
+        'opacity:0.6;cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;';
+      close.textContent = '×';
+      var dismissed = false;
+      function dismiss() {
+        if (dismissed) return;
+        dismissed = true;
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(8px)';
+        setTimeout(() => toast.remove(), 200);
+      }
+      close.onclick = dismiss;
+      toast.appendChild(close);
+      container.appendChild(toast);
+      requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateX(0)';
+      });
+      setTimeout(dismiss, duration);
+    }
+
+    // ── Shared confirm modal ────────────────────────────────────────
+    // Drop-in for window.confirm() with proper styling + Esc-cancel +
+    // backdrop-cancel + danger variant. Returns Promise<bool>.
+    // Body may include \n line breaks; rendered as a vertical list when
+    // an array is passed.
+    function confirmModal(opts) {
+      opts = opts || {};
+      var title   = opts.title   || 'Are you sure?';
+      var body    = opts.body    || '';
+      var label   = opts.confirmLabel || 'Confirm';
+      var danger  = !!opts.danger;
+      return new Promise(function(resolve) {
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(4,7,11,0.6);';
+        overlay.tabIndex = -1;
+        var bodyHtml = '';
+        if (Array.isArray(body)) {
+          bodyHtml = '<ul style="color:var(--tx2);font-size:12px;margin:0 0 16px;text-align:left;list-style:disc;padding-left:20px;">'
+            + body.map(function(line) {
+                return '<li>' + String(line).replace(/[&<>]/g, function(c) {
+                  return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
+                }) + '</li>';
+              }).join('')
+            + '</ul>';
+        } else if (body) {
+          var safe = String(body).replace(/[&<>]/g, function(c) {
+            return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
+          }).replace(/\n/g, '<br>');
+          bodyHtml = '<p style="color:var(--tx2);font-size:12px;margin:0 0 16px;white-space:pre-line;">' + safe + '</p>';
+        }
+        var confirmBtnCls = danger ? 'btn danger sm' : 'btn primary sm';
+        overlay.innerHTML =
+          '<div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:440px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">'
+          + '<p style="color:var(--tx);font-size:13px;font-weight:500;margin:0 0 8px;">' +
+              String(title).replace(/[&<>]/g, function(c) {
+                return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
+              })
+            + '</p>'
+          + bodyHtml
+          + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
+            + '<button type="button" data-cm-cancel class="btn ghost sm">Cancel</button>'
+            + '<button type="button" data-cm-confirm class="' + confirmBtnCls + '">' +
+                String(label).replace(/[&<>]/g, function(c) {
+                  return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
+                })
+              + '</button>'
+          + '</div>'
+          + '</div>';
+        function cleanup(result) {
+          document.removeEventListener('keydown', onKey, true);
+          overlay.remove();
+          resolve(!!result);
+        }
+        function onKey(e) {
+          if (e.key === 'Escape') { e.preventDefault(); cleanup(false); }
+          else if (e.key === 'Enter') { e.preventDefault(); cleanup(true); }
+        }
+        overlay.addEventListener('click', function(e) {
+          if (e.target === overlay) cleanup(false);
+        });
+        overlay.querySelector('[data-cm-cancel]').addEventListener('click', function() { cleanup(false); });
+        overlay.querySelector('[data-cm-confirm]').addEventListener('click', function() { cleanup(true); });
+        document.body.appendChild(overlay);
+        document.addEventListener('keydown', onKey, true);
+        var ok = overlay.querySelector('[data-cm-confirm]');
+        if (ok) ok.focus();
+      });
+    }
+    window.confirmModal = confirmModal;
+
+    // Drop-in replacement for `onsubmit="return confirm(…)"` form patterns.
+    // Returns false synchronously to block the immediate submit; opens the
+    // styled modal; on accept, re-submits the form via .submit() (bypasses
+    // onsubmit thanks to data-cm-confirmed). Optional `busyLabel` shows the
+    // global overlay; optional `busyFn` runs an arbitrary callback (e.g.
+    // setZoneBusy) instead of / in addition to the overlay.
+    function confirmFormSubmit(form, opts) {
+      if (form.dataset.cmConfirmed === '1') return true;
+      opts = opts || {};
+      confirmModal({
+        title: opts.title,
+        body: opts.body,
+        confirmLabel: opts.confirmLabel,
+        danger: opts.danger,
+      }).then(function(ok) {
+        if (!ok) return;
+        if (opts.busyLabel) _setOverlay(true, opts.busyLabel);
+        if (typeof opts.busyFn === 'function') {
+          try { opts.busyFn(); } catch (e) { /* non-fatal */ }
+        }
+        var btn = form.querySelector('button[type="submit"], button:not([type])');
+        if (btn) btn.disabled = true;
+        form.dataset.cmConfirmed = '1';
+        form.submit();
+      });
+      return false;
+    }
+    window.confirmFormSubmit = confirmFormSubmit;
+
+    var _TOAST_QUEUE_KEY = 'gateshift-toast-queue';
+    function queueToast(msg, type, duration) {
+      try {
+        var arr = JSON.parse(sessionStorage.getItem(_TOAST_QUEUE_KEY) || '[]');
+        arr.push({msg: msg, type: type || 'info', duration: duration || 3500});
+        sessionStorage.setItem(_TOAST_QUEUE_KEY, JSON.stringify(arr));
+      } catch (e) { /* sessionStorage unavailable - toast lost across reload */ }
+    }
+    (function _drainToastQueue() {
+      try {
+        var arr = JSON.parse(sessionStorage.getItem(_TOAST_QUEUE_KEY) || '[]');
+        sessionStorage.removeItem(_TOAST_QUEUE_KEY);
+        arr.forEach(function(t) { showToast(t.msg, t.type, t.duration); });
+      } catch (e) { /* ignore */ }
+    })();
+
+    // ── Global HTMX error handlers ──────────────────────────────────
+    document.addEventListener('htmx:responseError', function(e) {
+      const status = e.detail.xhr && e.detail.xhr.status;
+      showToast(status ? 'Server error (' + status + ') - please try again' : 'Request failed - please try again', 'error');
+    });
+    document.addEventListener('htmx:sendError', function() {
+      showToast('Network error - check your connection', 'error');
+    });
+
+    // ── Header pickers ──────────────────────────────────────────────
+    // Source + Target are independent device pickers. Both pieces of state
+    // ride on the URL (?device=&target=) so server-rendered panes (Enrichment,
+    // Deploy, Interfaces, Zones) know what's in scope. localStorage just
+    // remembers the last pick so the next visit auto-preselects.
+
+    function _setTargetParam(url, targetId) {
+      try {
+        var u = new URL(url, window.location.origin);
+        if (targetId) u.searchParams.set('target', String(targetId));
+        else u.searchParams.delete('target');
+        return u.pathname + u.search;
+      } catch (e) {
+        return url;
+      }
+    }
+
+    // Show the nav overlay just before a full-page navigation. The overlay
+    // stays visible until the destination page paints (the browser holds the
+    // current DOM during navigation), so the user always sees a clear
+    // "loading" state instead of a blank/stale page.
+    function showNavOverlay() {
+      var ov = document.getElementById('nav-busy-overlay');
+      if (ov) ov.classList.remove('hidden');
+    }
+
+    function changeTargetDevice(targetId) {
+      if (targetId) localStorage.setItem('last-used-target-id', String(targetId));
+      else localStorage.removeItem('last-used-target-id');
+      // Rewrite URL with the new ?target= and reload - server re-renders all
+      // target-aware panels with the picked device's platform in scope.
+      var url = _setTargetParam(window.location.href, targetId);
+      showNavOverlay();
+      window.location.href = url;
+    }
+
+    // On first paint, reconcile URL ↔ localStorage. If the URL has no ?target=
+    // but we have a remembered choice, redirect once to bring server-side state
+    // in line with what the user picked last time. On a fresh session (no saved
+    // choice) the SERVER already defaults selected_target to the first, so the
+    // dropdown shows it and there is nothing to redirect for here.
+    (function _autoPickTarget() {
+      try {
+        var sel = document.getElementById('target-device-select');
+        if (!sel) return;
+        var url = new URL(window.location.href);
+        if (url.searchParams.get('target')) return;
+        var saved = localStorage.getItem('last-used-target-id');
+        if (!saved) return;
+        // Verify the saved id still appears in the picker (device may have been removed).
+        if (!sel.querySelector('option[value="' + CSS.escape(saved) + '"]')) {
+          localStorage.removeItem('last-used-target-id');
+          return;
+        }
+        url.searchParams.set('target', saved);
+        window.location.replace(url.pathname + url.search);
+      } catch (e) { /* non-fatal */ }
+    })();
+
+    // ── Run controls ─────────────────────────────────────────────────
+    let _pollTimer = null;
+    let _runPending = false;
+
+    // ── Zone operation progress ───────────────────────────────────────
+    let _zonePollTimer = null;
+
+    // Default time window: last 7 days
+    (function initTimeWindow() {
+      const sinceEl = document.getElementById('since-input');
+      const untilEl = document.getElementById('until-input');
+      if (!sinceEl || !untilEl) return;
+      const now   = new Date();
+      const since = new Date(now - 7 * 24 * 60 * 60 * 1000);
+      const fmt   = d => d.toISOString().slice(0, 16);
+      sinceEl.value = fmt(since);
+      untilEl.value = fmt(now);
+    })();
+
+    function startRun(mode, device) {
+      if (_runPending) return;
+      _runPending = true;
+
+      document.querySelectorAll('.run-btn').forEach(function(b) {
+        b.disabled = true;
+        b.classList.add('opacity-40', 'cursor-not-allowed', 'pointer-events-none');
+      });
+
+      const sinceEl = document.getElementById('since-input');
+      const untilEl = document.getElementById('until-input');
+      const since = sinceEl ? sinceEl.value : '';
+      const until = untilEl ? untilEl.value : '';
+
+      fetch('/run/' + mode, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({since: since, until: until, device: device || ''}),
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          _runPending = false;
+          if (data.error) {
+            showToast(data.error, 'error');
+            _restoreRunButtons();
+            return;
+          }
+          setRunning(mode);
+          if (!_pollTimer) _pollTimer = setInterval(pollStatus, 1500);
+        })
+        .catch(function() {
+          _runPending = false;
+          showToast('Failed to start - check connection', 'error');
+          _restoreRunButtons();
+        });
+    }
+
+    function _restoreRunButtons() {
+      document.querySelectorAll('.run-btn').forEach(function(b) {
+        b.disabled = false;
+        b.classList.remove('opacity-40', 'cursor-not-allowed', 'pointer-events-none');
+      });
+    }
+
+    function _fmtElapsed(s) {
+      if (!s || s < 0) return '';
+      var m = Math.floor(s / 60);
+      var sec = s % 60;
+      return m > 0 ? m + ':' + (sec < 10 ? '0' : '') + sec : sec + 's';
+    }
+
+    function pollStatus() {
+      fetch('/run/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.running) {
+            setRunning(data.mode || 'running', data);
+            if (!_pollTimer) _pollTimer = setInterval(pollStatus, 1500);
+          } else {
+            clearInterval(_pollTimer);
+            _pollTimer = null;
+            var overlay = document.getElementById('zone-busy-overlay');
+            var wasRunning = overlay && !overlay.classList.contains('hidden');
+            // The overlay is shared between pipeline runs and the push UI.
+            // A run finishing behind an OPEN push log (post-push auto-
+            // generate) must not hide the log or reload the page - the
+            // operator would lose the push result. Defer the reload until
+            // the push log is closed (_setOverlay(false) performs it).
+            if (wasRunning && overlay.dataset.pushUi === '1') {
+              _restoreRunButtons();
+              window._runReloadDeferred = true;
+              showToast('Import complete - view refreshes when the push log is closed', 'success');
+              return;
+            }
+            setRunning(null);
+            if (wasRunning) {
+              // Server-rendered pages don't auto-refresh via HTMX - reload to
+              // surface new data: /rules (Objects/Interfaces/Zones/Routing/NAT
+              // tabs) AND /devices (the registry's host->context link is
+              // has_data-gated at render time; without the reload a first
+              // log-ingest leaves the dead 'No data yet' span unclickable).
+              if (window.location.pathname === '/rules'
+                  || window.location.pathname === '/devices') {
+                queueToast('Import complete', 'success');
+                // On /rules use the position-capturing reload (defined
+                // there) - the run can finish while the user is deep in a
+                // sub-tab (e.g. editing routes during a long log ingest);
+                // a plain reload threw them back to the leftmost sub-tab.
+                if (typeof window._reload === 'function') { _reload(); }
+                else { location.reload(); }
+                return;
+              }
+              showToast('Import complete', 'success');
+              htmx.trigger(document.body, 'configSaved');
+            }
+          }
+        });
+    }
+
+    // Re-import confirm: fetches the preview, shows a confirm dialog
+    // listing the CURATION that a re-import actually resets (interface
+    // rows are replaced atomically): iface→zone bindings + deploy-skip
+    // flags, plus the un-countable edit classes as static text. Renames
+    // SURVIVE re-import (fw_interface_overrides re-applies them) - the
+    // old dialog claimed the opposite.
+    // Returns false to block the synchronous submit; we re-submit
+    // programmatically after the user confirms.
+    function confirmReimport(form, deviceId, busyLabel) {
+      if (form.dataset.confirmed === '1') return true;
+      var btn = form.querySelector('button');
+      if (btn) btn.disabled = true;
+      fetch('/devices/' + deviceId + '/reimport-preview')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          var parts = [];
+          if (d.zone_bindings) parts.push(d.zone_bindings + ' interface→zone binding' + (d.zone_bindings === 1 ? '' : 's') + ' will be reset');
+          if (d.deploy_skips)  parts.push(d.deploy_skips  + ' deploy-skip flag' + (d.deploy_skips === 1 ? '' : 's') + ' will be reset');
+          var p = (d.total > 0)
+            ? confirmModal({
+                title: 'Re-import resets curated interface data',
+                body: parts.concat([
+                  'Interface type/VLAN edits and route egress edits are also reset.',
+                  'Interface renames are kept.',
+                ]),
+                confirmLabel: 'Re-import',
+                danger: true,
+              })
+            : Promise.resolve(true);
+          p.then(function(ok) {
+            if (!ok) { if (btn) btn.disabled = false; return; }
+            _setOverlay(true, busyLabel || 'Importing…');
+            form.dataset.confirmed = '1';
+            form.submit();
+          });
+        })
+        .catch(function() {
+          if (btn) btn.disabled = false;
+          showToast('Could not check for user renames - try again', 'error');
+        });
+      return false;
+    }
+
+    // Watchdog so the full-screen busy overlay (fixed inset-0, captures every
+    // click) can never trap the user if some handler shows it and never clears
+    // it. Re-armed on each _updateProgress tick, so a genuinely long-running
+    // op that reports progress keeps the overlay alive; only a silently-stuck
+    // overlay gets force-hidden. > fetchWithTimeout(130s).
+    var _overlayWatchdog = null;
+    var _OVERLAY_WATCHDOG_MS = 150000;
+
+    function _clearOverlayWatchdog() {
+      if (_overlayWatchdog) { clearTimeout(_overlayWatchdog); _overlayWatchdog = null; }
+    }
+    function _armOverlayWatchdog() {
+      _clearOverlayWatchdog();
+      _overlayWatchdog = setTimeout(function() {
+        _overlayWatchdog = null;
+        var ov = document.getElementById('zone-busy-overlay');
+        if (ov && !ov.classList.contains('hidden')) {
+          // Push-owned overlay: a single push SECTION (e.g. 164 CP access
+          // rules) legitimately runs >2.5 min without a step event, and a
+          // finished result stays open on purpose. The push has its own
+          // liveness paths (SSE onerror surfaces a drop, a reload
+          // re-attaches, Escape always closes) - the watchdog only guards
+          // the pipeline overlay.
+          if (ov.dataset.pushUi === '1') return;
+          _setOverlay(false);
+          if (typeof showToast === 'function') {
+            showToast('No progress for 2.5 min - the push may still be running on the server. Reload to re-attach.', 'error', 9000);
+          }
+        }
+      }, _OVERLAY_WATCHDOG_MS);
+    }
+
+    function _setOverlay(visible, label) {
+      var overlay = document.getElementById('zone-busy-overlay');
+      var labelEl = document.getElementById('zone-busy-label');
+      if (!overlay) return;
+      if (labelEl && label) labelEl.textContent = label;
+      overlay.classList.toggle('hidden', !visible);
+      if (visible) {
+        _armOverlayWatchdog();
+      } else {
+        _clearOverlayWatchdog();
+        // Hide progress when overlay hides
+        var prog = document.getElementById('zone-busy-progress');
+        if (prog) prog.classList.add('hidden');
+        var el = document.getElementById('zone-busy-elapsed');
+        if (el) el.textContent = '';
+        var logEl = document.getElementById('zone-busy-log');
+        if (logEl) { logEl.classList.add('hidden'); logEl.innerHTML = ''; }
+        if (overlay.dataset.pushUi) delete overlay.dataset.pushUi;
+        // A pipeline run finished behind the push log - perform the reload
+        // that pollStatus deferred, now that the operator closed the log.
+        if (window._runReloadDeferred) {
+          window._runReloadDeferred = false;
+          if (typeof window._reload === 'function') { _reload(); }
+          else { location.reload(); }
+        }
+      }
+    }
+
+    // Manual escape hatch: Escape dismisses a stuck overlay so the user is
+    // never locked out while a background op is wedged.
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'Escape') return;
+      var ov = document.getElementById('zone-busy-overlay');
+      if (ov && !ov.classList.contains('hidden')) _setOverlay(false);
+    });
+
+    // Safety net for target-catalog fetches: if a device goes unreachable
+    // mid-session the backend connect-cap (drivers) should 502 in ~5s, but a
+    // half-dead device that accepts the TCP connection then never responds
+    // could still hang. Abort after `ms` so the caller's .catch/.finally
+    // always runs and no overlay/spinner sticks. Generous default (130s) -
+    // above the largest backend read-timeout (PA app-dump 120s) - so a slow
+    // but reachable catalog is never falsely aborted.
+    function fetchWithTimeout(url, opts, ms) {
+      opts = opts || {};
+      ms = ms || 130000;
+      var ctrl = new AbortController();
+      var timer = setTimeout(function() { ctrl.abort(); }, ms);
+      var merged = Object.assign({}, opts, { signal: ctrl.signal });
+      return fetch(url, merged).finally(function() { clearTimeout(timer); });
+    }
+
+    // Collapse the noisy transport-level errors (ConnectTimeout, Max retries,
+    // AbortError, refused) into a single clear phrase so a failed catalog load
+    // reads as "unreachable" instead of a raw stack-trailing 502 body - or
+    // worse, a silent disappear that looks like success.
+    function _friendlyReachErr(msg) {
+      msg = String(msg || '');
+      if (/timed out|timeout|ConnectTimeout|Max retries|refused|Failed to establish|NewConnectionError|AbortError|NetworkError|Failed to fetch/i.test(msg)) {
+        return 'target unreachable';
+      }
+      return msg.replace(/^read failed:\s*/i, '');
+    }
+
+    function _updateProgress(data) {
+      var prog    = document.getElementById('zone-busy-progress');
+      var stepEl  = document.getElementById('zone-busy-step');
+      var pctEl   = document.getElementById('zone-busy-pct');
+      var barEl   = document.getElementById('zone-busy-bar');
+      var elapsed = document.getElementById('zone-busy-elapsed');
+      if (!prog || !data) return;
+
+      // Activity → keep the overlay alive past the watchdog window.
+      _armOverlayWatchdog();
+
+      if (elapsed) elapsed.textContent = _fmtElapsed(data.elapsed);
+
+      if (data.total > 0) {
+        prog.classList.remove('hidden');
+        var pct = Math.min(100, Math.round((data.step / data.total) * 100));
+        if (stepEl) stepEl.textContent = data.step_label || (data.step + '/' + data.total);
+        if (pctEl)  pctEl.textContent  = pct + '%';
+        if (barEl)  barEl.style.width  = pct + '%';
+      } else if (data.step_label) {
+        prog.classList.remove('hidden');
+        if (stepEl) stepEl.textContent = data.step_label;
+        if (pctEl)  pctEl.textContent  = '';
+        if (barEl)  barEl.style.width  = '100%';
+        barEl.classList.add('animate-pulse');
+      } else {
+        prog.classList.add('hidden');
+      }
+    }
+
+    function setZoneBusy(busy) {
+      _setOverlay(busy, 'Applying zone changes…');
+      if (busy) {
+        if (!_zonePollTimer) {
+          _zonePollTimer = setInterval(function() {
+            fetch('/zones/status').then(function(r) { return r.json(); }).then(_updateProgress);
+          }, 500);
+        }
+      } else {
+        clearInterval(_zonePollTimer);
+        _zonePollTimer = null;
+        _updateProgress({step: 0, total: 0, step_label: ''});
+      }
+    }
+
+    var _RUN_LABELS = {
+      ingest:   'Importing logs…',
+      generate: 'Generating ruleset…',
+      all:      'Importing & generating…',
+    };
+
+    function setRunning(mode, data) {
+      var buttons  = document.querySelectorAll('.run-btn');
+      var _ov = document.getElementById('zone-busy-overlay');
+      if (mode && _ov && _ov.dataset.pushUi === '1') {
+        // A pipeline run started while the push UI owns the overlay - the
+        // run proceeds server-side, but repainting the overlay here would
+        // destroy the push log. Keep the buttons locked, leave the log.
+        buttons.forEach(function(b) {
+          b.disabled = true;
+          b.classList.add('opacity-40', 'cursor-not-allowed', 'pointer-events-none');
+        });
+        return;
+      }
+      if (mode) {
+        var label = _RUN_LABELS[mode] || (mode + '…');
+        _setOverlay(true, label);
+        _updateProgress(data || null);
+        buttons.forEach(function(b) {
+          b.disabled = true;
+          b.classList.add('opacity-40', 'cursor-not-allowed', 'pointer-events-none');
+        });
+      } else {
+        _setOverlay(false, null);
+        buttons.forEach(function(b) {
+          b.disabled = false;
+          b.classList.remove('opacity-40', 'cursor-not-allowed', 'pointer-events-none');
+        });
+      }
+    }
+
+    // Triggered by Apply button when a generate was auto-started
+    document.body.addEventListener('runStarted', function() {
+      if (!_pollTimer) _pollTimer = setInterval(pollStatus, 1500);
+      pollStatus();
+    });
+
+    // On load: restore spinner if a run is already in progress
+    fetch('/run/status').then(function(r) { return r.json(); }).then(function(data) {
+      if (data.running) {
+        setRunning(data.mode, data);
+        if (!_pollTimer) _pollTimer = setInterval(pollStatus, 1500);
+      }
+    });
+  </script>
+
+  {# ── Standard hint dialog - THE pattern for guidance/notice popups.
+       Pages keep their hint markup in a hidden div and call
+       openHintModal('Title', 'content-div-id'); the body is copied into
+       the dialog. Esc, backdrop click and Close dismiss it. ── #}
+  <div id="hint-modal" class="hidden fixed inset-0 z-50 items-center justify-center"
+       style="background:rgba(4,7,11,0.6);"
+       onclick="if (event.target === this) closeHintModal();">
+    <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:520px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <h2 id="hint-modal-title" style="margin:0;font-size:14px;font-weight:600;color:var(--tx);"></h2>
+        <button type="button" onclick="closeHintModal()" class="x" aria-label="Close">×</button>
+      </div>
+      <div id="hint-modal-body" style="font-size:12px;line-height:1.6;color:var(--tx2);"></div>
+    </div>
+  </div>
+  <script>
+    function openHintModal(title, contentId) {
+      const m = document.getElementById('hint-modal');
+      const src = document.getElementById(contentId);
+      if (!m || !src) return;
+      document.getElementById('hint-modal-title').textContent = title;
+      document.getElementById('hint-modal-body').innerHTML = src.innerHTML;
+      m.classList.remove('hidden');
+      m.style.display = 'flex';
+      document.addEventListener('keydown', _hintModalEsc, true);
+    }
+    function closeHintModal() {
+      const m = document.getElementById('hint-modal');
+      if (!m) return;
+      m.classList.add('hidden');
+      m.style.display = '';
+      document.removeEventListener('keydown', _hintModalEsc, true);
+    }
+    function _hintModalEsc(e) {
+      if (e.key === 'Escape') { e.preventDefault(); closeHintModal(); }
+    }
+  </script>
+
+  {# ── About dialog (header version chip opens it) ──────────────────
+     Static content only - version/edition/license from template globals
+     (webui/VERSION + enterprise-load flag). Styling mirrors confirmModal;
+     scoped <style> so no Tailwind rebuild is needed. #}
+  <style>
+    #about-modal { position: fixed; inset: 0; z-index: 60; display: flex;
+      align-items: center; justify-content: center;
+      background: rgba(4,7,11,0.6); }
+    #about-modal.hidden { display: none; }
+    #about-modal .abx { background: var(--bg1); border: 1px solid var(--line2);
+      padding: 22px 24px; max-width: 480px; width: 100%; margin: 0 16px;
+      box-shadow: var(--shadow-pop); font-size: 12px; color: var(--tx2); }
+    #about-modal .abx a { color: var(--accent); text-decoration: none; }
+    #about-modal .abx a:hover { text-decoration: underline; }
+    #about-modal .ab-row { margin: 0 0 10px; line-height: 1.55; }
+    #about-open { background: none; border: none; cursor: pointer;
+      font-family: inherit; color: var(--tx3); font-size: 10px;
+      letter-spacing: .05em; padding: 2px 0;
+      text-decoration: underline; text-underline-offset: 2px; }
+    #about-open:hover { color: var(--accent); }
+  </style>
+  <div id="about-modal" class="hidden"
+       onclick="if (event.target === this) this.classList.add('hidden')">
+    <div class="abx" role="dialog" aria-label="About Gateshift">
+      <p style="color:var(--tx);font-size:14px;font-weight:600;margin:0 0 2px;">
+        g<svg viewBox="12.644 1.055 38.712 62.945" aria-hidden="true" style="width:0.5em;height:0.78em;display:inline-block;fill:var(--accent);margin:0 0.02em;vertical-align:-0.04em;"><path d="M28.127 1.055 L34.919 2.748 L19.647 64 L16.040 64 L12.644 63.153 Z"/><path d="M35.873 1.055 L29.081 2.748 L44.353 64 L47.960 64 L51.356 63.153 Z"/></svg>teshift
+        <span style="color:var(--tx3);font-weight:400;">- the firewall migration tool</span>
+      </p>
+      <p class="ab-row" style="color:var(--tx);">
+        Version {{ app_version }} &middot; {{ app_edition }}
+      </p>
+      <p class="ab-row" style="color:var(--amber);">
+        Lab use only - Gateshift is still under development and not
+        intended for production use. It is recommended to not connect
+        Gateshift to production systems.
+      </p>
+      <p class="ab-row">
+        Business Source License 1.1 &middot; converts to the Mozilla Public
+        License 2.0 {% if app_license_change_date %}on {{ app_license_change_date }}{% else %}four years after release{% endif %}
+        &middot; <code>LICENSE</code> is authoritative.
+      </p>
+      <p class="ab-row">
+        &copy; 2026 Timo Duttine. The Gateshift name and logo are trademarks
+        and not licensed with the code.
+      </p>
+      <p class="ab-row" style="margin-bottom:16px;">
+        <a href="https://github.com/gateshift/gateshift" target="_blank" rel="noopener">GitHub</a> &middot;
+        <a href="https://github.com/gateshift/gateshift/issues" target="_blank" rel="noopener">Report a bug</a> &middot;
+        <a href="https://github.com/gateshift/gateshift/blob/main/KNOWN_LIMITATIONS.md" target="_blank" rel="noopener">Known limitations</a>
+      </p>
+      <div style="display:flex;justify-content:flex-end;">
+        <button type="button" class="btn ghost sm"
+                onclick="document.getElementById('about-modal').classList.add('hidden')">Close</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

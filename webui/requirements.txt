@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+jinja2
+pymysql
+sqlalchemy
+python-multipart
+docker
+requests
+cryptography

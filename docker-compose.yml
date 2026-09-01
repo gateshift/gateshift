@@ -1,0 +1,114 @@
+# Gateshift - production stack.
+#
+# Copy .env.example to .env and fill it in before the first start; the
+# database password has no default on purpose.
+
+services:
+
+  mariadb:
+    image: mariadb:11.8
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env (see .env.example)}
+      # Reachable from the other services on the project network, which each
+      # arrive with their own container IP - not from outside: the port is
+      # deliberately not published.
+      MARIADB_ROOT_HOST: "%"
+      # Unprivileged account the application uses. The entrypoint creates it
+      # with rights on this schema only - root stays for administration.
+      MARIADB_DATABASE: ${DB_NAME:-gateshift}
+      MARIADB_USER: ${DB_USER:-gateshift}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (see .env.example)}
+    command:
+      # Pin the server default collation to utf8mb4_unicode_ci. MariaDB 11.8
+      # changed the default to utf8mb4_uca1400_ai_ci; the entrypoint-created
+      # database and any table without an explicit COLLATE would take it,
+      # while every schema file pins utf8mb4_unicode_ci - a JOIN across the
+      # two then fails with "Illegal mix of collations". One default keeps
+      # the whole schema consistent on a fresh install.
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-buffer-pool-size=1G
+      - --innodb-io-capacity=1000
+      - --innodb-io-capacity-max=4000
+      - --tmp-table-size=256M
+      - --max-heap-table-size=256M
+      - --innodb-log-file-size=256M
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./sql/init:/docker-entrypoint-initdb.d:ro
+    # Gate dependents on real readiness, not just "container started". On a
+    # fresh install the initdb phase runs every sql/init file before the
+    # server accepts connections; without this the webapp races it, its
+    # schema-setup helpers fail on connection-refused, and the first boot
+    # comes up with an incomplete schema until a manual restart.
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  python:
+    build:
+      context: ./pyapp/gateshift
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-gateshift}
+      DB_USER: ${DB_USER:-gateshift}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (see .env.example)}
+    volumes:
+      # Data, not code: SQL jobs and the syslog spool the collector reads.
+      - ./sql:/sql
+      - ./syslog-ng/logs:/logs:ro
+    command: ["sleep", "infinity"]
+
+  webapp:
+    build:
+      context: ./webui
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-gateshift}
+      DB_USER: ${DB_USER:-gateshift}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (see .env.example)}
+      # Sidecar the syslog flow discovery execs into. Compose names containers
+      # <project>-<service>-<index>, so this follows COMPOSE_PROJECT_NAME.
+      PYTHON_CONTAINER: ${COMPOSE_PROJECT_NAME:-gateshift}-python-1
+      # Encryption key for the VPN PSK secret store (Fernet). Substituted from
+      # the git-ignored .env file - never hard-coded here. Unset → PSK storage
+      # is disabled and the push falls back to the placeholder.
+      GATESHIFT_SECRET_KEY: ${GATESHIFT_SECRET_KEY:-}
+    ports:
+      # Loopback by default. Set WEBUI_BIND=0.0.0.0 in .env to reach the UI
+      # from elsewhere - do that only behind a reverse proxy or on a trusted
+      # management network: the application has no authentication of its own.
+      - "${WEBUI_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      # Required: the application execs into the python sidecar through the
+      # Docker API. This grants the container root-equivalent control of the
+      # host's Docker daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["sh", "-c", "tailwindcss -c tailwind.config.js -i ./styles/input.css -o ./static/app.css --minify && uvicorn main:app --host 0.0.0.0 --port 8080"]
+
+  syslog:
+    image: balabit/syslog-ng:latest
+    restart: unless-stopped
+    ports:
+      - "${SYSLOG_BIND:-0.0.0.0}:514:514/udp"
+    volumes:
+      - ./syslog-ng/syslog-ng.conf:/etc/syslog-ng/syslog-ng.conf:ro
+      - ./syslog-ng/logs:/var/log/syslog-ng
+
+volumes:
+  mariadb_data:

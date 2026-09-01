@@ -1,0 +1,104 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# Shared zone / action / disable macros. As of Phase 3 they emit token
+   CSS classes (.chip.<tone>, .act.<v>, etc.) instead of Tailwind utility
+   triples. Call-sites switched in lock-step. #}
+
+{# Returns the .chip.<tone> name for a zone - one of trust/wan/dmz/pub/any
+   (semantic) or red/amber/teal/pink/purple (extended). Resolution order:
+   1. zone_color_map (from DB via _load_zone_colors → ZONE_PALETTE.tone)
+   2. keyword sniff on the zone name itself (untrust/wan/… → red etc.)
+   3. unknown zone → dmz; null/empty → any. #}
+{% macro zone_cls(zone) -%}
+{%- if zone -%}
+  {%- if zone_color_map is defined and zone in zone_color_map -%}
+    {{ zone_color_map[zone] }}
+  {%- else -%}
+    {%- set zl = zone | lower -%}
+    {%- if zone == 'any' -%}any
+    {%- elif 'untrust' in zl or 'external' in zl or 'extern' in zl or 'internet' in zl or 'wan' in zl or 'outside' in zl or 'egress' in zl -%}red
+    {%- elif 'trust' in zl or 'internal' in zl or 'intern' in zl or 'inside' in zl or 'ingress' in zl or 'lan' in zl or 'corp' in zl -%}trust
+    {%- elif 'dmz' in zl -%}pub
+    {%- else -%}dmz
+    {%- endif -%}
+  {%- endif -%}
+{%- else -%}any
+{%- endif -%}
+{%- endmacro %}
+
+{# Renders a zone badge - the .chip token component. #}
+{% macro zone_badge(name) -%}
+<span class="chip {{ zone_cls(name) }}" style="">{{ name }}</span>
+{%- endmacro %}
+
+{# Renders an action badge - the .act token component. allow=green, deny/drop/
+   reset-* = red, reject = amber (between allow/deny in severity). #}
+{% macro action_badge(action) -%}
+{%- set act = (action or '') | lower -%}
+{%- if act == 'allow' -%}
+  <span class="act allow">allow</span>
+{%- elif act in ['deny', 'drop', 'reset-client', 'reset-server', 'reset-both'] -%}
+  <span class="act deny">{{ act }}</span>
+{%- elif act == 'reject' -%}
+  <span class="act" style="color:var(--amber);background:var(--amber-fill);border:1px solid var(--amber-line);">reject</span>
+{%- else -%}
+  <span class="tag">{{ action }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{# Renders a Phase-C empty-state hero. `state` is one of
+   no_source_picked / no_data / no_rules / no_generate. `label` is shown in
+   the body copy as the noun-phrase that *would* be visible once data arrives. #}
+{% macro empty_hero(state, label) %}
+{% if state == 'no_source_picked' %}
+<div class="empty" style="padding:64px 20px;">
+  <div style="max-width:380px;margin:0 auto;">
+    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">No source device selected.</div>
+    <div style="color:var(--tx2);font-size:12px;">Pick a source device in the header to see {{ label }}.</div>
+  </div>
+</div>
+{% elif state == 'no_data' %}
+<div class="empty" style="padding:64px 20px;">
+  <div style="max-width:380px;margin:0 auto;">
+    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">No data for this device yet.</div>
+    <div style="color:var(--tx2);font-size:12px;margin-bottom:16px;">Import the source configuration on the Devices page to build {{ label }}.</div>
+    <a href="/devices" class="btn primary sm" style="text-decoration:none;">Go to Devices &rarr;</a>
+  </div>
+</div>
+{% elif state == 'no_rules' %}
+<div class="empty" style="padding:64px 20px;">
+  <div style="max-width:380px;margin:0 auto;">
+    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">No security rules on this device.</div>
+    <div style="color:var(--tx2);font-size:12px;">Gateshift imported this device&rsquo;s interfaces and objects, but the source carries no policies &mdash; there is nothing to generate into {{ label }}.</div>
+  </div>
+</div>
+{% elif state == 'no_generate' %}
+<div class="empty" style="padding:64px 20px;">
+  <div style="max-width:380px;margin:0 auto;">
+    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">Pipeline regenerates automatically on tab switch.</div>
+    <div style="color:var(--tx2);font-size:12px;">Once Generate finishes, {{ label }} will appear here.</div>
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{# Renders disabled badge + toggle button for a rule. The toggle button is
+   only meaningful for api_import / both source-types; pure log-derived
+   rules can't be enabled/disabled at the source. #}
+{% macro disable_toggle(rule) %}
+{% if rule.disabled %}
+<span class="tag" style="font-size:10px;padding:1px 6px;color:var(--tx3);">disabled</span>
+{% endif %}
+{% if rule.source_type in ('api_import', 'both') %}
+<button title="{{ 'Enable rule' if rule.disabled else 'Disable rule' }}"
+        onclick="toggleDisabled({{ rule.id }}, this)"
+        style="background:none;border:none;cursor:pointer;color:var(--tx3);padding:0 2px;flex-shrink:0;display:inline-flex;align-items:center;margin-left:2px;"
+        onmouseover="this.style.color = {{ "'var(--green)'" if rule.disabled else "'var(--amber)'" }};"
+        onmouseout="this.style.color='var(--tx3)';">
+  <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
+  </svg>
+</button>
+{% endif %}
+{% endmacro %}

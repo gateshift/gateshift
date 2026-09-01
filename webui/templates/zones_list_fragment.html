@@ -1,0 +1,295 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# ── Enrichment > Zone Mapping > Zones-Section ───────────────────────
+   Re-renderable via GET /enrichment/zones/list-fragment. The wrapper
+   div#zone-section-fragment is the outerHTML swap target. JS handlers
+   (showAddZoneRow, submitAddZone, startZoneRename, …) live in rules.html
+   so they survive the swap.
+
+   Schema-driven: zone-property columns + bulk-form fields are generated
+   from `zone_schema` (vendor-keyed in webui/zone_schemas.py). Catalog-
+   typed fields read their options from `zone_catalogs[catalog_kind]`. #}
+
+{% set fields = zone_schema.get('fields') or [] %}
+{% set palette_full = zone_palette_full or {} %}
+
+<div id="zone-section-fragment" style="margin-top:16px;"
+     data-source-device-id="{{ source_device_id or '' }}"
+     data-source-device-host="{{ source_device_host or '' }}"
+     data-target-id="{{ target_id or '' }}"
+     data-target-platform="{{ target_platform or '' }}">
+
+  <div style="display:flex;align-items:center;margin-bottom:8px;">
+    <span style="font-size:12px;color:var(--tx);font-weight:500;">
+      Zones <span class="mut">({{ zones_list | length }})</span>
+    </span>
+  </div>
+
+  {# The table renders even when zones_list is empty so the inline
+     zone-add-row stays in the DOM. When the list is empty an
+     'empty-state' row sits above the (hidden by default) add-row. #}
+  <div class="twrap" style="margin:0;max-height:512px;">
+    <table>
+      <thead>
+        <tr>
+          <th class="sel-col" style="width:32px;">
+            <input type="checkbox" id="zone-sel-all" onchange="zoneSelectAll(this.checked)"
+                   style="cursor:pointer;accent-color:var(--green);" aria-label="Select all zones">
+          </th>
+          <th>Name</th>
+          {% for f in fields %}
+          <th style="white-space:nowrap;" title="{{ f.label }}">{{ f.label }}</th>
+          {% endfor %}
+          {# External column HIDDEN everywhere (decision 2026-08-27): the
+             is_external flag is CP-topology thinking that confused the
+             migration workflow; per-NAT-rule zone dropdowns are the planned
+             replacement. The COLUMN + fw_zones.is_external stay - the
+             syslog NAT inference (27_infer_nat_rules) and the PA NAT
+             renderer fallback still read them. Flip _show_external to
+             re-enable the toggle UI. #}
+          {% set _show_external = false %}
+          {% if _show_external %}
+          <th style="white-space:nowrap;" title="WAN / untrusted zone - read by NAT inference (27_infer_nat_rules)">External</th>
+          {% endif %}
+          <th style="white-space:nowrap;" title="Interfaces bound to this zone (fw_interfaces.zone_name). × to release; + bind to add/move one.">Interfaces</th>
+          <th class="sel-col" style="width:32px;"></th>
+        </tr>
+      </thead>
+      <tbody id="zone-list-tbody">
+        {% if not zones_list %}
+        <tr>
+          <td colspan="{{ (4 if _show_external else 3) + (fields | length) }}" class="empty" style="text-align:center;padding:16px;font-style:italic;">
+            No zones for this device yet - use <strong style="color:var(--tx);">+ Add zone</strong> to create one.
+          </td>
+        </tr>
+        {% endif %}
+        {% for z in zones_list %}
+        {% set color = z.color or 'blue' %}
+        {% set pcls = palette_full.get(color, palette_full.get('blue', {})) %}
+        {% set tone = pcls.get('tone', 'dmz') %}
+        {% set _z_inherited = z.editable is defined and not z.editable %}
+        {% set _zn_ifaces = (iface_zones or []) | selectattr('zone_name', 'equalto', z.name) | list %}
+        <tr data-zone-id="{{ z.id }}" data-zone-name="{{ z.name }}"
+            data-inherited="{{ '1' if _z_inherited else '0' }}"
+            {% if z.src_scope %}data-src-scope="{{ z.src_scope }}"{% endif %}
+            {% if _z_inherited %}style="opacity:.7;"{% endif %}>
+          <td>
+            <input type="checkbox" class="zone-row-sel"
+                   style="cursor:pointer;accent-color:var(--green);"
+                   data-zid="{{ z.id }}" onchange="zoneRowToggle({{ z.id }}, this.checked)"
+                   aria-label="Select {{ z.name }}">
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;">
+              {# Color swatch - uses .chip.<tone> for the colored dot; the
+                 picker popover (rules.html JS) lookups pcls.tone via
+                 _PALETTE_FULL when the user re-picks. #}
+              <button type="button"
+                      data-color-key="{{ color }}"
+                      data-zone-id="{{ z.id }}"
+                      onclick="zoneOpenColorPicker(this)"
+                      title="Click to change color"
+                      class="zone-swatch chip {{ tone }}"
+                      style="width:14px;height:14px;border-radius:50%;padding:0;flex-shrink:0;cursor:pointer;transition:transform .12s;"
+                      onmouseover="this.style.transform='scale(1.1)';" onmouseout="this.style.transform='scale(1)';"></button>
+              <span class="zone-name"
+                    style="color:var(--tx);cursor:text;"
+                    data-zone-id="{{ z.id }}"
+                    data-original-name="{{ z.name }}"
+                    onclick="zoneStartRename(this)"
+                    onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx)';"
+                    title="Click to rename">{{ z.name }}</span>
+              {% if _z_inherited %}<span style="color:#BACCDE;font-size:10px;" title="Inherited from template {{ z.src_scope }} - read-only in this effective (stack) view; switch the network scope to {{ z.src_scope }} to edit">&#8627; {{ z.src_scope }}</span>{% endif %}
+            </div>
+          </td>
+          {% for f in fields %}
+          {% set val = (z.properties or {}).get(f.key) %}
+          <td style="white-space:nowrap;">
+            {% if f.type == 'bool' %}
+              {% if val %}<span style="color:var(--green);">on</span>{% else %}<span class="dash">off</span>{% endif %}
+            {% elif f.type == 'enum' %}
+              <span style="color:var(--tx2);">{{ val or '-' }}</span>
+            {% elif f.type == 'catalog' %}
+              {% if val %}
+                {% set catalog = (zone_catalogs.get(f.catalog_kind) or []) %}
+                {% set known = (catalog | selectattr('name', 'equalto', val) | list | length) > 0 %}
+                <span style="color:var(--tx2);">{{ val }}</span>
+                {% if not known %}<span class="tag warn" style="margin-left:4px;padding:1px 5px;font-size:10px;text-transform:uppercase;"
+                                       title="Not in target snapshot - refresh to verify">?</span>{% endif %}
+              {% else %}
+                <span class="dash">-</span>
+              {% endif %}
+            {% else %}
+              <span style="color:var(--tx2);">{{ val or '-' }}</span>
+            {% endif %}
+          </td>
+          {% endfor %}
+          {% if _show_external %}
+          <td style="text-align:center;">
+            <button type="button" onclick="zoneToggleExternal({{ z.id }}, {{ 1 if z.is_external else 0 }})"
+                    style="cursor:pointer;font-size:10px;padding:1px 7px;border-radius:0;
+                           border:1px solid {{ 'var(--green-line)' if z.is_external else 'var(--line)' }};
+                           background:{{ 'var(--green-fill)' if z.is_external else 'transparent' }};
+                           color:{{ 'var(--green)' if z.is_external else 'var(--tx3)' }};"
+                    title="{{ 'External (WAN) zone - used by NAT inference. Click to unset.' if z.is_external else 'Internal zone. Click to mark as external (WAN).' }}">
+              {{ 'WAN' if z.is_external else '-' }}
+            </button>
+          </td>
+          {% endif %}
+          <td style="line-height:1.9;">
+            {% for iz in _zn_ifaces %}
+            <span style="display:inline-flex;align-items:center;gap:3px;background:var(--bg2);border:1px solid var(--line);border-radius:0;padding:0 3px 0 5px;margin:1px;font-size:11px;color:var(--tx2);white-space:nowrap;"
+                  title="{{ iz.ip_addresses | join(', ') if iz.ip_addresses else 'no IP' }}">
+              {{ iz.interface_name }}
+              {% if not _z_inherited %}<button type="button" onclick="zoneUnbindIface({{ iz.id }})"
+                      title="Release {{ iz.interface_name }} from {{ z.name }}"
+                      style="background:none;border:none;color:var(--tx3);cursor:pointer;padding:0;font-size:11px;line-height:1;"
+                      onmouseover="this.style.color='var(--danger)';" onmouseout="this.style.color='var(--tx3)';">&times;</button>{% endif %}
+            </span>
+            {% endfor %}
+            {% if not _z_inherited %}
+            {% set _other = (iface_zones or []) | rejectattr('zone_name', 'equalto', z.name) | list %}
+            {% if _other %}
+            <select onchange="if(this.value){zoneBindIface(this.value, '{{ z.name | e }}');this.value='';}"
+                    title="Bind an interface to {{ z.name }}"
+                    style="background:var(--bg2);border:1px dashed var(--line);border-radius:0;color:var(--tx3);font-size:11px;padding:1px 3px;margin:1px;cursor:pointer;">
+              <option value="">+ bind</option>
+              {% for iz in _other %}<option value="{{ iz.id }}">{{ iz.interface_name }}{% if iz.zone_name %} &nbsp;(in {{ iz.zone_name }}){% endif %}</option>{% endfor %}
+            </select>
+            {% endif %}
+            {% endif %}
+            {% if not _zn_ifaces and _z_inherited %}<span class="dash">-</span>{% endif %}
+          </td>
+          <td style="text-align:center;">
+            {% if _zn_ifaces %}
+            <button type="button" disabled
+                    style="background:none;border:none;color:var(--tx3);opacity:0.4;cursor:not-allowed;"
+                    title="Release the {{ _zn_ifaces | length }} interface(s) first">&times;</button>
+            {% else %}
+            <button type="button" onclick="zoneDelete({{ z.id }}, '{{ z.name | e }}')"
+                    style="background:none;border:none;color:var(--tx3);cursor:pointer;"
+                    onmouseover="this.style.color='var(--danger)';" onmouseout="this.style.color='var(--tx3)';"
+                    title="Delete zone">&times;</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+
+        {# Inline Add-Zone row (hidden until '+ Add zone' clicked). #}
+        <tr id="zone-add-row" class="hidden" style="background:var(--bg2);">
+          <td></td>
+          <td colspan="{{ 3 + (fields | length) }}">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <input type="text" id="zone-add-name" placeholder="zone name"
+                     class="inp" style="font-size:12px;padding:5px 8px;width:176px;"
+                     oninput="zoneAddValidate()"
+                     onkeydown="if(event.key==='Enter')zoneSubmitAdd();if(event.key==='Escape')zoneHideAddRow()">
+              {% if target_platform == 'panw' %}
+              <select id="zone-add-type" class="inp" style="font-size:12px;padding:5px 8px;">
+                <option value="layer3">layer3</option>
+              </select>
+              {% endif %}
+              <button type="button" onclick="zoneSubmitAdd()" id="zone-add-submit" disabled class="btn primary sm">Add</button>
+              <button type="button" onclick="zoneHideAddRow()" class="btn ghost sm">Cancel</button>
+              <span id="zone-add-err" class="mut" style="color:var(--amber);font-size:11.5px;"></span>
+            </div>
+          </td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  {# Add-zone sits under the list, left - clicking reveals the inline
+     add-row at the table's bottom, directly above this button. #}
+  <div style="margin-top:8px;">
+    <button type="button" onclick="zoneShowAddRow()"
+            class="btn primary sm"
+            {% if not source_device_id %}disabled title="No source device selected"{% endif %}>
+      + Add zone
+    </button>
+  </div>
+
+  {# ── Interface-mapping summary + UNASSIGNED bucket. The per-zone Members column shows/edits the
+       bound interfaces; zone-LESS interfaces have no zone row to live in, so they surface here with
+       a quick "→ zone" assign. Keeps the old Interfaces-tab's completeness ("X of Y mapped"). ── #}
+  {% set _all_ifaces = (iface_zones or []) %}
+  {% set _unassigned = _all_ifaces | rejectattr('zone_name') | list %}
+  {% if _all_ifaces %}
+  <div style="margin-top:10px;display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;font-size:11px;">
+    <span style="color:var(--tx3);text-transform:uppercase;letter-spacing:.04em;font-size:10px;padding-top:4px;white-space:nowrap;">
+      {{ (_all_ifaces | length) - (_unassigned | length) }}/{{ _all_ifaces | length }} iface mapped
+    </span>
+    {% if _unassigned %}
+    <span style="color:var(--amber);padding-top:4px;white-space:nowrap;">unassigned:</span>
+    {% for iz in _unassigned %}
+    <span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg2);border:1px solid var(--line);border-radius:0;padding:1px 4px 1px 6px;color:var(--tx2);white-space:nowrap;"
+          title="{{ iz.ip_addresses | join(', ') if iz.ip_addresses else 'no IP' }}">
+      {{ iz.interface_name }}
+      <select onchange="if(this.value)zoneBindIface({{ iz.id }}, this.value);"
+              title="Assign {{ iz.interface_name }} to a zone"
+              style="background:var(--bg1);border:1px solid var(--line);border-radius:0;color:var(--tx3);font-size:10px;padding:0 2px;cursor:pointer;">
+        <option value="">&rarr; zone</option>
+        {% for _zc in zones_list %}{% if not (_zc.editable is defined and not _zc.editable) %}<option value="{{ _zc.name }}">{{ _zc.name }}</option>{% endif %}{% endfor %}
+      </select>
+    </span>
+    {% endfor %}
+    {% else %}
+    <span style="color:var(--green);padding-top:4px;white-space:nowrap;">all mapped &check;</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if fields %}
+  <div id="zone-bulk-panel" {% if not zones_list %}class="hidden"{% endif %}
+       style="margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <span style="font-size:12px;color:var(--tx);font-weight:500;">
+        Bulk apply to <span id="zone-bulk-count" style="color:var(--blue);">0</span> zone<span id="zone-bulk-plural">s</span>
+      </span>
+      <button type="button" onclick="zoneClearSelection()" class="btn ghost sm">Clear selection</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
+      {% for f in fields %}
+      <div style="display:flex;flex-direction:column;">
+        <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">{{ f.label }}</label>
+        {% if f.type == 'bool' %}
+        <select data-bulk-field="{{ f.key }}" data-bulk-type="bool" class="inp" style="font-size:12px;padding:6px 10px;">
+          <option value="">(no change)</option>
+          <option value="true">on</option>
+          <option value="false">off</option>
+        </select>
+        {% elif f.type == 'enum' %}
+        {% set is_ro = f.read_only_existing | default(false) %}
+        <select data-bulk-field="{{ f.key }}" data-bulk-type="enum"
+                {% if is_ro %}disabled title="Read-only for existing zones - set at add-time"{% endif %}
+                class="inp" style="font-size:12px;padding:6px 10px;">
+          <option value="">(no change)</option>
+          {% for opt in f.options or [] %}
+          <option value="{{ opt }}">{{ opt }}</option>
+          {% endfor %}
+        </select>
+        {% elif f.type == 'catalog' %}
+        {% set items = (zone_catalogs.get(f.catalog_kind) or []) %}
+        <select data-bulk-field="{{ f.key }}" data-bulk-type="catalog" class="inp" style="font-size:12px;padding:6px 10px;">
+          <option value="">(no change)</option>
+          <option value="__clear__">- clear -</option>
+          {% for it in items %}
+          <option value="{{ it.name }}">{{ it.name }}</option>
+          {% endfor %}
+        </select>
+        {% if not items %}
+        <span style="color:var(--amber);font-size:10px;margin-top:2px;">No catalog - refresh target snapshot</span>
+        {% endif %}
+        {% else %}
+        <input type="text" data-bulk-field="{{ f.key }}" data-bulk-type="string" placeholder="(no change)"
+               class="inp" style="font-size:12px;padding:6px 10px;width:160px;">
+        {% endif %}
+      </div>
+      {% endfor %}
+      <button type="button" onclick="zoneBulkApply()" id="zone-bulk-apply-btn" disabled class="btn primary sm">Apply to selection</button>
+      <span id="zone-bulk-status" class="mut" style="font-size:11.5px;"></span>
+    </div>
+  </div>
+  {% endif %}
+</div>

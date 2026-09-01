@@ -1,0 +1,317 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# Settings panel - pipeline-module toggles (Accumulate / Subnet / QF /
+   Endpoint pairs) + per-module parameter inputs. Renders inside
+   #config-panel; HTMX-swapped on form POST. Peer-checked sibling
+   selectors drive the toggle visuals; opacity is class-toggled by
+   the JS at the bottom (.dimmed = inert + 0.4 opacity). #}
+
+<style>
+  /* .ptoggle-* + .cfg-dimmed classes shipped from tokens.css; only the
+     row-hover rule stays local since it's specific to this card. */
+  .cfg-row:hover { background: var(--bg2); }
+</style>
+
+<div id="config-panel" style="padding:20px;">
+
+  {% if saved %}
+  <div id="saved-banner" class="tag ok" style="display:inline-flex;align-items:center;gap:6px;margin-bottom:14px;padding:5px 10px;font-size:11px;">
+    <svg style="width:14px;height:14px;" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414L8.414 15l-4.121-4.121a1 1 0 011.414-1.414L8.414 12.172l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+    Saved - generate running…
+  </div>
+  <script>setTimeout(() => { const b = document.getElementById('saved-banner'); if(b) b.style.opacity='0'; }, 4000);</script>
+  {% endif %}
+
+  <form hx-post="/config" hx-target="#config-panel" hx-swap="outerHTML" id="config-form">
+  <input type="hidden" name="device" value="{{ device or '' }}">
+  <div style="background:var(--bg2);border:1px solid var(--line);border-radius:0;">
+
+    {# ── Accumulate ── #}
+    {% set acc = jobs | selectattr("name", "equalto", "52_accumulate")     | first %}
+    <label class="cfg-row" style="display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--line);transition:background .12s;">
+      <div style="position:relative;flex-shrink:0;">
+        <input type="checkbox" name="module_{{ acc.name }}" id="toggle_accumulate" class="sr-only peer"
+               {% if acc.enabled %}checked{% endif %}>
+        <div class="ptoggle-track"></div>
+        <div class="ptoggle-thumb"></div>
+      </div>
+      <div>
+        <div style="color:var(--tx);font-size:12px;font-weight:500;">Accumulate</div>
+        <div class="mut" style="font-size:11.5px;">Group traffic by destination - one rule per unique destination IP &amp; port, collecting all sources</div>
+      </div>
+    </label>
+
+    {# ── internet_public - src + dst side by side (sub, requires accumulate) ── #}
+    <div id="ip-row" class="{% if not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;border-bottom:1px solid var(--line);">
+      <div class="cfg-row" style="padding:10px 16px 10px 40px;transition:background .12s;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+
+          {# Sources #}
+          <div>
+            <label style="display:flex;align-items:center;gap:12px;cursor:pointer;margin-bottom:8px;">
+              <div style="position:relative;flex-shrink:0;">
+                <input type="checkbox" name="display_internet_public_src" id="toggle_ip_src" class="sr-only peer"
+                       {% if display.internet_public_src and acc.enabled %}checked{% endif %}>
+                <div class="ptoggle-track"></div>
+                <div class="ptoggle-thumb"></div>
+              </div>
+              <div style="color:var(--tx);font-size:12px;font-weight:500;">Collapse internet sources</div>
+            </label>
+            <div id="ip-src-threshold-row" class="{% if not display.internet_public_src or not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;">
+              <label style="display:block;color:var(--tx2);font-size:11.5px;margin-bottom:4px;">Min. distinct public source IPs per rule</label>
+              <input type="number" name="display_ip_src_threshold" id="ip-src-threshold-input"
+                     value="{{ display.internet_public_src_threshold }}" min="1"
+                     onclick="event.stopPropagation()"
+                     class="inp" style="width:112px;font-size:12px;padding:5px 8px;">
+            </div>
+          </div>
+
+          {# Destinations #}
+          <div>
+            <label style="display:flex;align-items:center;gap:12px;cursor:pointer;margin-bottom:8px;">
+              <div style="position:relative;flex-shrink:0;">
+                <input type="checkbox" name="display_internet_public_dst" id="toggle_ip_dst" class="sr-only peer"
+                       {% if display.internet_public_dst and acc.enabled %}checked{% endif %}>
+                <div class="ptoggle-track"></div>
+                <div class="ptoggle-thumb"></div>
+              </div>
+              <div style="color:var(--tx);font-size:12px;font-weight:500;">Collapse internet destinations</div>
+            </label>
+            <div id="ip-dst-threshold-row" class="{% if not display.internet_public_dst or not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;">
+              <label style="display:block;color:var(--tx2);font-size:11.5px;margin-bottom:4px;">Min. distinct public destination IPs per port</label>
+              <input type="number" name="display_ip_dst_threshold" id="ip-dst-threshold-input"
+                     value="{{ display.internet_public_dst_threshold }}" min="1"
+                     onclick="event.stopPropagation()"
+                     class="inp" style="width:112px;font-size:12px;padding:5px 8px;">
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    {# ── Subnet (sub, requires accumulate) ── #}
+    {% set sub = jobs | selectattr("name", "equalto", "53_subnet")         | first %}
+    {% set src_on = sub.param_values.src_subnet_on %}
+    {% set dst_on = sub.param_values.dst_subnet_on %}
+    <div id="subnet-row" class="{% if not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;border-bottom:1px solid var(--line);">
+      <div class="cfg-row" style="padding:10px 16px 10px 40px;transition:background .12s;">
+        <label style="display:flex;align-items:center;gap:12px;cursor:pointer;">
+          <div style="position:relative;flex-shrink:0;">
+            <input type="checkbox" name="module_{{ sub.name }}" id="toggle_subnet" class="sr-only peer"
+                   {% if sub.enabled and acc.enabled %}checked{% endif %}>
+            <div class="ptoggle-track"></div>
+            <div class="ptoggle-thumb"></div>
+          </div>
+          <div>
+            <div style="color:var(--tx);font-size:12px;font-weight:500;">Subnet aggregation</div>
+            <div class="mut" style="font-size:11.5px;">Summarize dense groups of private IPs into their containing subnet (/28 → /24 → /16 → /8)</div>
+          </div>
+        </label>
+
+        <div id="subnet-params" class="{% if not sub.enabled or not acc.enabled %}cfg-dimmed{% endif %}" style="margin-top:10px;margin-left:44px;display:flex;flex-direction:column;gap:10px;transition:opacity .12s;">
+
+          {# Sources #}
+          <div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:6px;">
+              <div style="position:relative;flex-shrink:0;">
+                <input type="checkbox" name="param_{{ sub.name }}_src_subnet_on" id="toggle_src_subnet" class="sr-only peer"
+                       {% if src_on %}checked{% endif %}>
+                <div class="ptoggle-track-sm"></div>
+                <div class="ptoggle-thumb-sm"></div>
+              </div>
+              <span style="color:var(--tx);font-size:11.5px;font-weight:500;">Sources</span>
+            </label>
+            <div id="src-thresholds" class="{% if not src_on %}cfg-dimmed{% endif %}" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;transition:opacity .12s;">
+              {% for suffix, label in [('28', '/28'), ('24', '/24'), ('16', '/16'), ('8', '/8')] %}
+              <div>
+                <label style="display:block;color:var(--tx2);font-size:11px;margin-bottom:4px;" title="Min. distinct source IPs within a {{ label }} to aggregate">{{ label }} min.</label>
+                <input type="number" name="param_{{ sub.name }}_src_threshold_{{ suffix }}"
+                       value="{{ sub.param_values['src_threshold_' ~ suffix] }}" min="2"
+                       onclick="event.stopPropagation()"
+                       class="inp" style="width:100%;font-size:12px;padding:5px 8px;">
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+
+          {# Destinations #}
+          <div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:6px;">
+              <div style="position:relative;flex-shrink:0;">
+                <input type="checkbox" name="param_{{ sub.name }}_dst_subnet_on" id="toggle_dst_subnet" class="sr-only peer"
+                       {% if dst_on %}checked{% endif %}>
+                <div class="ptoggle-track-sm"></div>
+                <div class="ptoggle-thumb-sm"></div>
+              </div>
+              <span style="color:var(--tx);font-size:11.5px;font-weight:500;">Destinations</span>
+            </label>
+            <div id="dst-thresholds" class="{% if not dst_on %}cfg-dimmed{% endif %}" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;transition:opacity .12s;">
+              {% for suffix, label in [('28', '/28'), ('24', '/24'), ('16', '/16'), ('8', '/8')] %}
+              <div>
+                <label style="display:block;color:var(--tx2);font-size:11px;margin-bottom:4px;" title="Min. distinct destination IPs within a {{ label }} to aggregate">{{ label }} min.</label>
+                <input type="number" name="param_{{ sub.name }}_dst_threshold_{{ suffix }}"
+                       value="{{ sub.param_values['dst_threshold_' ~ suffix] }}" min="2"
+                       onclick="event.stopPropagation()"
+                       class="inp" style="width:100%;font-size:12px;padding:5px 8px;">
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    {# ── Quality filter ── #}
+    {% set qf = jobs | selectattr("name", "equalto", "55_quality_filter")  | first %}
+    <div id="qf-row" style="border-bottom:1px solid var(--line);">
+      <div class="cfg-row" style="padding:10px 16px;transition:background .12s;">
+        <label style="display:flex;align-items:center;gap:12px;cursor:pointer;">
+          <div style="position:relative;flex-shrink:0;">
+            <input type="checkbox" name="module_{{ qf.name }}" id="toggle_qf" class="sr-only peer"
+                   {% if qf.enabled %}checked{% endif %}>
+            <div class="ptoggle-track"></div>
+            <div class="ptoggle-thumb"></div>
+          </div>
+          <div>
+            <div style="color:var(--tx);font-size:12px;font-weight:500;">Relevance filter</div>
+            <div class="mut" style="font-size:11.5px;">Drop rules with insufficient activity - filters by hit count, active duration, and days since last seen
+              {% if display.qf_reads_from %}<span class="dash" style="margin-left:4px;">· reads from: {{ display.qf_reads_from }}</span>{% endif %}
+            </div>
+          </div>
+        </label>
+        {% if qf.params %}
+        <div id="qf-params" class="{% if not qf.enabled %}cfg-dimmed{% endif %}" style="margin-top:10px;margin-left:44px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;transition:opacity .12s;">
+          {% for param in qf.params %}
+          <div>
+            <label style="display:block;color:var(--tx2);font-size:11.5px;margin-bottom:4px;" title="{{ param.description }}">{{ param.label }}</label>
+            <input type="number"
+                   name="param_{{ qf.name }}_{{ param.key }}"
+                   value="{{ qf.param_values[param.key] }}"
+                   min="{{ param.min }}"
+                   onclick="event.stopPropagation()"
+                   class="inp" style="width:100%;font-size:12px;padding:5px 8px;">
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ── Endpoint pairs ── #}
+    {% set ep = jobs | selectattr("name", "equalto", "56_endpoint_pairs")  | first %}
+    <div id="ep-row" class="{% if not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;">
+      <div class="cfg-row" style="padding:10px 16px 10px 40px;transition:background .12s;">
+        <label style="display:flex;align-items:center;gap:12px;cursor:pointer;">
+          <div style="position:relative;flex-shrink:0;">
+            <input type="checkbox" name="module_{{ ep.name }}" id="toggle_ep" class="sr-only peer"
+                   {% if ep.enabled and acc.enabled %}checked{% endif %}>
+            <div class="ptoggle-track"></div>
+            <div class="ptoggle-thumb"></div>
+          </div>
+          <div>
+            <div style="color:var(--tx);font-size:12px;font-weight:500;">Endpoint pairs view</div>
+            <div class="mut" style="font-size:11.5px;">Group rules with identical source+destination - accumulates ports and applications per host pair</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+  </div>{# end card #}
+
+  <div style="margin-top:16px;display:flex;justify-content:flex-end;">
+    <button type="submit" id="apply-btn" class="btn primary sm"
+            {% if not needs_generate %}disabled{% endif %}>
+      Apply &amp; Generate
+    </button>
+  </div>
+  </form>
+
+  <script>
+    // JS toggles .cfg-dimmed (opacity:0.4 + pointer-events:none) instead
+    // of the original Tailwind .opacity-40 + .pointer-events-none class
+    // pair. Same disable-cascade semantics.
+    const accToggle       = document.getElementById('toggle_accumulate');
+    const ipRow           = document.getElementById('ip-row');
+    const ipDstToggle     = document.getElementById('toggle_ip_dst');
+    const ipDstThreshold  = document.getElementById('ip-dst-threshold-row');
+    const ipSrcToggle     = document.getElementById('toggle_ip_src');
+    const ipSrcThreshold  = document.getElementById('ip-src-threshold-row');
+    const subnetRow       = document.getElementById('subnet-row');
+    const subnetToggle    = document.getElementById('toggle_subnet');
+    const subnetParams    = document.getElementById('subnet-params');
+    const srcSubnetToggle = document.getElementById('toggle_src_subnet');
+    const srcThresholds   = document.getElementById('src-thresholds');
+    const dstSubnetToggle = document.getElementById('toggle_dst_subnet');
+    const dstThresholds   = document.getElementById('dst-thresholds');
+    const qfToggle        = document.getElementById('toggle_qf');
+    const epRow           = document.getElementById('ep-row');
+    const epToggle        = document.getElementById('toggle_ep');
+
+    function syncIpRows(accOn) {
+      [ipRow, subnetRow, epRow].forEach(el => {
+        if (!el) return;
+        el.classList.toggle('cfg-dimmed', !accOn);
+      });
+      // Don't force-uncheck sub-toggles - their state is preserved so it
+      // survives an accumulate off→on cycle.  The server applies force-off
+      // for the pipeline; the UI just dims them visually.
+      syncIpThreshold(ipDstToggle, ipDstThreshold, accOn);
+      syncIpThreshold(ipSrcToggle, ipSrcThreshold, accOn);
+      syncSubnetParams();
+    }
+
+    function syncIpThreshold(toggle, thresholdRow, accOn) {
+      const on = toggle && toggle.checked && (accOn !== undefined ? accOn : accToggle.checked);
+      thresholdRow.classList.toggle('cfg-dimmed', !on);
+    }
+
+    function syncSubnetParams() {
+      const active = subnetToggle.checked && accToggle.checked;
+      subnetParams.classList.toggle('cfg-dimmed', !active);
+      syncSrcThresholds();
+      syncDstThresholds();
+    }
+
+    function syncSrcThresholds() {
+      const active = subnetToggle.checked && accToggle.checked && srcSubnetToggle && srcSubnetToggle.checked;
+      if (srcThresholds) {
+        srcThresholds.classList.toggle('cfg-dimmed', !active);
+      }
+    }
+
+    function syncDstThresholds() {
+      const active = subnetToggle.checked && accToggle.checked && dstSubnetToggle && dstSubnetToggle.checked;
+      if (dstThresholds) {
+        dstThresholds.classList.toggle('cfg-dimmed', !active);
+      }
+    }
+
+    function syncQfParams() {
+      const qfParams = document.getElementById('qf-params');
+      if (!qfParams) return;
+      qfParams.classList.toggle('cfg-dimmed', !qfToggle.checked);
+    }
+
+    accToggle.addEventListener('change', () => syncIpRows(accToggle.checked));
+    ipDstToggle.addEventListener('change', () => syncIpThreshold(ipDstToggle, ipDstThreshold));
+    ipSrcToggle.addEventListener('change', () => syncIpThreshold(ipSrcToggle, ipSrcThreshold));
+    subnetToggle.addEventListener('change', syncSubnetParams);
+    if (srcSubnetToggle) srcSubnetToggle.addEventListener('change', syncSrcThresholds);
+    if (dstSubnetToggle) dstSubnetToggle.addEventListener('change', syncDstThresholds);
+    if (qfToggle) qfToggle.addEventListener('change', syncQfParams);
+
+    syncSubnetParams();
+    syncIpThreshold(ipDstToggle, ipDstThreshold);
+    syncIpThreshold(ipSrcToggle, ipSrcThreshold);
+    syncQfParams();
+
+    // Enable Apply when the user changes any setting.
+    document.getElementById('config-form').addEventListener('change', () => {
+      const btn = document.getElementById('apply-btn');
+      if (btn && !btn.dataset.runDisabled) btn.disabled = false;
+    });
+  </script>
+
+</div>

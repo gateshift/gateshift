@@ -1,0 +1,30 @@
+name: Feature request
+description: "Something Gateshift should do but does not claim to"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome from anyone. They are read and labelled,
+        but carry **no commitment or date**. Enterprise subscribers get a say
+        in release prioritization.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The migration problem this solves
+      description: Describe the real-world situation, not the button you want.
+    validations:
+      required: true
+  - type: input
+    id: vendors
+    attributes:
+      label: Affected vendors / directions
+      placeholder: e.g. Check Point as target, PA-to-Forti
+    validations:
+      required: false
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround, if any
+    validations:
+      required: false

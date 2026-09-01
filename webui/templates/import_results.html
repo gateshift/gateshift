@@ -1,0 +1,229 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% extends "base.html" %}
+{% from "_macros.html" import zone_badge, action_badge %}
+{% block title %}Import - {{ device.display_name or device.host_name }} - Gateshift{% endblock %}
+{% block content %}
+
+{# Page crumb sits below the global header. action_badge/zone_badge macros
+   still emit Tailwind classes inside the rules table - they migrate to
+   tokens with the macro file in a later commit (used in 6+ templates). #}
+<div style="display:flex;align-items:center;gap:11px;padding:14px 20px 6px;font-size:13px;">
+  <a href="/devices" style="color:var(--tx2);text-decoration:none;">Devices</a>
+  <span class="arr">/</span>
+  <span style="color:var(--tx);">{{ device.display_name or device.host_name }}</span>
+</div>
+
+<div class="toolbar">
+  <div>
+    <h1 style="margin:0;font-size:18px;font-weight:600;color:var(--tx);letter-spacing:-0.01em;">Imported ruleset</h1>
+    <p style="margin:2px 0 0;font-size:12px;color:var(--tx2);">{{ device.host_name }}</p>
+  </div>
+  <div class="sp"></div>
+  {% if last_import_ts %}
+  <span class="date">Last import: {{ last_import_ts.strftime('%Y-%m-%d %H:%M UTC') }}</span>
+  {% endif %}
+  {% if device.platform == 'panw' %}
+  <form method="post" action="/devices/{{ device.id }}/renormalize" style="display:contents;">
+    <button type="submit" class="btn sm">Re-normalize</button>
+  </form>
+  <form method="post" action="/devices/{{ device.id }}/import" style="display:contents;"
+        onsubmit="return confirmReimport(this, {{ device.id }}, 'Importing…');">
+    <button type="submit" class="btn primary sm" style="background:var(--violet);border-color:var(--violet);color:var(--green-ink);">Re-import from device</button>
+  </form>
+  {% endif %}
+</div>
+
+{# ── Status banners ── #}
+{% if errors %}
+{% set error_list = errors.split('; ') %}
+<div class="tag bad" style="display:flex;flex-direction:column;align-items:flex-start;width:auto;margin:6px 20px;padding:10px 14px;border-radius:0;font-size:12px;line-height:1.55;">
+  <div style="font-weight:600;margin-bottom:4px;">Import completed with {{ error_list | length }} error{{ 's' if error_list | length != 1 }}:</div>
+  <ul style="margin:0;padding-left:18px;list-style:disc;">
+    {% for err in error_list[:5] %}
+    <li style="">{{ err }}</li>
+    {% endfor %}
+  </ul>
+  {% if error_list | length > 5 %}
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer;color:var(--red);">Show {{ error_list | length - 5 }} more…</summary>
+    <ul style="margin:4px 0 0;padding-left:18px;list-style:disc;">
+      {% for err in error_list[5:] %}
+      <li style="">{{ err }}</li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% elif just_imported %}
+<div class="tag ok" style="display:flex;width:auto;margin:6px 20px;padding:8px 12px;border-radius:0;font-size:12px;">
+  Import successful - {{ normalized }} log rows written.
+  <a href="/rules" style="margin-left:8px;text-decoration:underline;color:var(--green);">Run generate to process →</a>
+</div>
+{% endif %}
+
+{% if norm_log_count %}
+<div class="tag" style="display:flex;width:auto;margin:6px 20px;padding:8px 12px;border-radius:0;font-size:12px;color:var(--blue);border-color:var(--blue-line);background:var(--blue-fill);">
+  <span style="font-weight:600;margin-right:4px;color:var(--blue);">{{ norm_log_count }}</span>
+  api_import rows active in the pipeline for this device.
+</div>
+{% endif %}
+
+{% if not last_import_ts %}
+<div class="empty" style="margin:6px 20px 22px;background:var(--bg1);border:1px solid var(--line);border-radius:0;">
+  {% if device.platform == 'panw' %}
+  No import data yet. Click "Re-import from device" to fetch the ruleset.
+  {% elif device.platform == 'asa' %}
+  No import data yet. Click "import config" to re-parse the stored running-config.
+  {% else %}
+  No imported ruleset. API import is only supported for Palo Alto Networks devices.
+  {% endif %}
+</div>
+{% else %}
+
+{# ── Object summary bar - count chips, one per object class ── #}
+{% if object_counts %}
+<div style="display:flex;flex-wrap:wrap;gap:8px;padding:6px 20px 14px;">
+  {% set type_labels = {
+    'address':       'Addresses',
+    'address_group': 'Address groups',
+    'service':       'Services',
+    'service_group': 'Service groups',
+    'zone':          'Zones'
+  } %}
+  {% for otype, cnt in object_counts.items() %}
+  <span class="tag" style="padding:4px 10px;font-size:11.5px;">
+    <span style="color:var(--tx);font-weight:600;">{{ cnt }}</span>
+    <span style="color:var(--tx2);margin-left:4px;">{{ type_labels.get(otype, otype) }}</span>
+  </span>
+  {% endfor %}
+  <span class="tag" style="padding:4px 10px;font-size:11.5px;">
+    <span style="color:var(--tx);font-weight:600;">{{ rules | length }}</span>
+    <span style="color:var(--tx2);margin-left:4px;">Security rules</span>
+  </span>
+</div>
+{% endif %}
+
+{# ── Import-drop panel - fields the source had that V1 doesn't process. ── #}
+{% if import_drops %}
+{% set drop_labels = {
+  'user_identity':                'User-ID / source-user',
+  'schedule':                     'Schedule',
+  'security_profile_group':       'Security profile group',
+  'security_profile_individual':  'Individual security profiles',
+  'log_setting':                  'Log forwarding profile',
+  'url_category':                 'URL category match',
+  'negate_source':                'Negated source',
+  'negate_destination':           'Negated destination',
+  'rule_type_nondefault':         'Non-default rule type (intrazone/interzone)',
+  'application_layer_match':      'Application-layer match',
+  'vendor_specific_other':        'Vendor-specific (other)',
+  'unbound_acl':                  'ASA: ACL not bound (no access-group in)',
+  'egress_acl':                   'ASA: ACL bound egress (out) - V1 ingress-only',
+  'global_acl':                   'ASA: global ACL - V1 ingress-only',
+  'standard_acl':                 'ASA: standard ACL - V1 extended-only',
+  'non_tcp_udp_proto':            'ASA: non-tcp/udp ACE proto (icmp, esp, gre, ah, …)',
+  'iface_address_ref':            'ASA: interface IF as src/dst - IP not resolved',
+  'time_range_ace':               'ASA: ACE with time-range - schedule out-of-scope',
+  'fqdn_address_object':          'ASA: FQDN address object - out-of-scope V1',
+  'icmp_service_object':          'ASA: ICMP service object - V1 tcp/udp only',
+  'protocol_object_group':        'ASA: protocol object-group - out-of-scope V1',
+  'legacy_name_alias':            'ASA: legacy `name X ALIAS` - out-of-scope V1',
+  'inactive_interface':           'ASA: shutdown interface - persisted but inactive',
+  'duplicate_route':               'ASA: extra route(s) for same prefix - first wins',
+  'routing_protocol':             'ASA: dynamic routing (ospf/bgp) - out-of-scope V1',
+  'invalid_route_mask':           'ASA: non-contiguous route mask - dropped',
+  'nat_unidirectional':           'ASA: NAT `unidirectional` flag - V1 bidirectional only',
+  'nat_dns_rewrite':              'ASA: NAT `dns` rewrite - out-of-scope V1',
+  'nat_unknown_source_mode':      'ASA: NAT source-mode neither static nor dynamic',
+  'nat_unknown_token':            'ASA: NAT line had unknown token (skipped)',
+  'legacy_dialect':               'ASA: pre-8.3 NAT (`global`, `static (in,out) …`)',
+} %}
+<details class="tag warn" style="display:block;margin:6px 20px;padding:0;border-radius:0;">
+  <summary style="cursor:pointer;padding:10px 14px;font-size:12px;">
+    <span style="font-weight:600;">{{ import_drops | length }} field{{ 's' if import_drops | length != 1 }} present in source but not processed by V1</span>
+    <span style="color:var(--amber);opacity:0.7;margin-left:8px;">- raw retained for future use; not part of the pipeline today</span>
+  </summary>
+  <div style="padding:0 14px 12px;">
+    <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
+      <thead>
+        <tr style="color:var(--amber);opacity:0.75;text-transform:uppercase;letter-spacing:0.07em;">
+          <th style="padding:6px 4px;text-align:left;font-size:10.5px;">Field</th>
+          <th style="padding:6px 4px;text-align:right;font-size:10.5px;width:80px;">Rules</th>
+          <th style="padding:6px 4px;text-align:left;font-size:10.5px;">Sample rule names</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in import_drops %}
+        <tr style="border-top:1px solid var(--amber-line);">
+          <td style="padding:6px 4px;color:var(--amber);">{{ drop_labels.get(d.field, d.field) }}</td>
+          <td style="padding:6px 4px;text-align:right;color:var(--amber);">{{ d.rule_count }}</td>
+          <td style="padding:6px 4px;color:var(--amber);opacity:0.8;">{{ d.samples | join(', ') | truncate(80, True, '…') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+{# ── Rules table (still uses action_badge / zone_badge Tailwind macros) ── #}
+{% if rules %}
+<div class="twrap" style="margin:8px 20px 22px;">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:34px;">#</th>
+        <th>Rule name</th>
+        <th>Action</th>
+        <th>From → To zones</th>
+        <th>Sources</th>
+        <th>Destinations</th>
+        <th>Services</th>
+        <th>Applications</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for rule in rules %}
+      <tr{% if rule.disabled %} style="opacity:0.45;"{% endif %}>
+        <td class="idx">{{ loop.index }}</td>
+        <td>
+          <span style="color:var(--tx);">{{ rule.rule_name }}</span>
+          {% if rule.disabled %}
+          <span class="dash" style="margin-left:4px;font-style:italic;">disabled</span>
+          {% endif %}
+        </td>
+        <td>{{ action_badge(rule.action) }}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+            {% for z in (rule.src_zones or []) %}{{ zone_badge(z) }}{% endfor %}
+            <span class="arr">→</span>
+            {% for z in (rule.dst_zones or []) %}{{ zone_badge(z) }}{% endfor %}
+          </div>
+        </td>
+        <td style="" class="mut">
+          {{ (rule.sources or []) | join(', ') | truncate(60, True, '…') }}
+        </td>
+        <td style="" class="mut">
+          {{ (rule.destinations or []) | join(', ') | truncate(60, True, '…') }}
+        </td>
+        <td style="" class="mut">
+          {{ (rule.services or []) | join(', ') | truncate(40, True, '…') }}
+        </td>
+        <td style="" class="mut">
+          {{ (rule.applications or []) | join(', ') | truncate(40, True, '…') }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty" style="margin:6px 20px 22px;background:var(--bg1);border:1px solid var(--line);border-radius:0;">
+  No rules were returned by the device.
+</div>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}

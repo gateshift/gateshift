@@ -1,0 +1,877 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% from "_macros.html" import zone_cls, action_badge, disable_toggle %}
+
+<div id="rules-container"
+     hx-get="/rules-fragment"
+     hx-trigger="configSaved from:body{% if has_device_data and (running or needs_generate) %}, every 2s{% endif %}"
+     hx-swap="outerHTML"
+     hx-include="#device-select, #target-device-select"
+     data-running="{{ 'true' if running else 'false' }}">
+
+{# Background "Generate running…" splash intentionally removed - the
+   floating run-overlay (base.html) is the canonical progress UI; the
+   inline amber banner in the {% else %} branch covers the
+   running+needs_generate case while keeping the previous table visible
+   (dimmed) underneath. #}
+{% if not has_device_data %}
+  <div class="mt-16 text-center py-12">
+    <div class="text-gray-400 text-sm font-medium mb-1">No data for this device yet</div>
+    <div class="text-gray-600 text-xs">Use the button in the top right to import logs or configuration.</div>
+  </div>
+
+{% elif not devices %}
+  <div class="text-gray-500 text-sm mt-10 text-center">
+    No rules found - the pipeline has not run for this source yet.
+    <div style="margin-top:10px;">
+      <button type="button" onclick="startRun('generate')" class="btn primary sm run-btn">
+        Run pipeline (Generate)</button>
+    </div>
+  </div>
+
+{% else %}
+  {% if needs_generate %}
+  {% if running %}
+  <div class="mb-4 flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-950/50 border border-amber-800/60 text-amber-300 text-xs">
+    <svg class="w-3.5 h-3.5 flex-shrink-0 animate-spin" viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
+    </svg>
+    Results are outdated - generating updated view…
+  </div>
+  {% else %}
+  <div class="mb-4 flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-950/50 border border-amber-800/60 text-amber-300 text-xs">
+    <span>Results are outdated - re-generating automatically…</span>
+    <button type="button" onclick="startRun('generate')"
+            class="btn danger sm run-btn" style="margin-left:auto;">Re-generate</button>
+  </div>
+  <script>
+    // Auto-trigger the pipeline ONCE per page load; the red button stays as
+    // the fallback (a failed run would otherwise loop - see the re-heal
+    // warning at main.py's needs_generate handling).
+    if (!window._autoRegenFired && typeof startRun === 'function') {
+      window._autoRegenFired = true;
+      startRun('generate');
+    }
+  </script>
+  {% endif %}
+  {% endif %}
+
+  <div class="transition-opacity duration-300 {% if needs_generate %}opacity-30 pointer-events-none select-none{% endif %}">
+  {% set page        = page | default(1) %}
+  {% set total       = total | default(0) %}
+  {% set total_pages = total_pages | default(1) %}
+  {% set page_size   = page_size | default(1000) %}
+  {% set offset      = (page - 1) * page_size %}
+  {% set ns = namespace(row=offset) %}
+
+  {# ── Top bar: token .toolbar with count + page size + CSV + bulk-delete +
+       pagination. Pagination chip-row hugs the right edge via .sp spacer. ── #}
+  <div class="toolbar" style="padding:14px 20px 12px;">
+    <div class="count">
+      <span class="n" id="rules-count-label" data-total="{{ total }}"><span id="rules-count-text">{{ "{:,}".format(total) }}</span></span>
+      <span class="lbl">rule{{ 's' if total != 1 }}</span>
+    </div>
+
+    {# Page size selector - keep native <select> styled to match .select pill. #}
+    <select id="page-size-select"
+            hx-get="/rules-fragment"
+            hx-target="#rules-container"
+            hx-swap="outerHTML"
+            hx-include="#device-select, #target-device-select"
+            hx-vals='{"page": 1}'
+            name="page_size"
+            class="select"
+            style="appearance:none;-webkit-appearance:none;padding-right:24px;background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>');background-repeat:no-repeat;background-position:right 8px center;">
+      {% for size in [25, 50, 100, 250, 500, 1000] %}
+      <option value="{{ size }}" {% if size == page_size %}selected{% endif %}>{{ size }} / page</option>
+      {% endfor %}
+    </select>
+
+    {# CSV export - neutral .btn.sm with inline icon. #}
+    <a id="csv-export-btn"
+       href="/export.csv{% if device %}?device={{ device | urlencode }}{% endif %}"
+       class="btn sm" style="text-decoration:none;">
+      <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+      CSV
+    </a>
+
+    {# Bulk-Delete - activates when one or more row checkboxes are set.
+       POSTs the selected rule_hashes to /rules/bulk-delete, which prunes
+       them from fw_imported_rules and triggers a fresh pipeline regen.
+       Endpoint-pairs mode aggregates multiple imported rules into one
+       display row - there's no stable rule_hash per row, so checkboxes
+       and bulk-delete are disabled while it's on. #}
+    {% if module == 'endpoint_pairs' %}
+    <span class="tag warn" style="font-size:11px;padding:3px 9px;font-style:italic;"
+          title="The Endpoint-pairs aggregation collapses many imported rules into one display row, so a single rule-hash per row isn't available. Disable `Endpoint pairs` in the Consolidation panel (Ruleset &gt; Security) to select rows.">
+      Bulk-select disabled in Endpoint-pairs mode
+    </span>
+    {% else %}
+    <button type="button" id="rules-bulk-delete-btn"
+            onclick="rulesBulkDelete()" disabled
+            class="btn danger sm"
+            style="opacity:0.4;">
+      Delete selected (<span id="rules-bulk-count">0</span>)
+    </button>
+    <span id="rules-bulk-status" class="mut" style="font-size:11px;"></span>
+    {% endif %}
+
+    <div class="sp"></div>
+
+    {# Pagination chip-row. #}
+    {% if total_pages > 1 %}
+    <div style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--tx2);">
+      {% if page > 1 %}
+        <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+                class="btn sm" style="height:28px;padding:0 10px;">&larr; Prev</button>
+      {% else %}
+        <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
+      {% endif %}
+      <span class="mut" style="padding:0 6px;">{{ page }} / {{ total_pages }}</span>
+      {% if page < total_pages %}
+        <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+                class="btn sm" style="height:28px;padding:0 10px;">Next &rarr;</button>
+      {% else %}
+        <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  {% set group_by = group_by | default("device") %}
+  {% set show_groups = multi_group or group_by in ("zone", "src_zone", "dst_zone", "dst_port") %}
+  {% if effective_layers %}
+  <div style="margin:0 0 10px;padding:8px 12px;border:1px solid var(--line2);border-radius:0;background:var(--bg2);font-size:12px;color:var(--tx2);">
+    <b style="color:var(--tx);">Effective view</b> - inherited rules from
+    <span style="color:var(--tx);">{{ effective_layers[:-1] | join(", ") }}</span>
+    are read-only (origin = group header ↓). Order matches evaluation: inherited first, own rules below.
+    <span class="mut" style="display:block;margin-top:3px;">Note: Gateshift merges the pre-/post-rulebases &rarr; a shared <i>post</i> catch-all (e.g. &ldquo;deny all&rdquo;) appears <i>at the top</i> here instead of at the bottom.</span>
+  </div>
+  <style>
+    tr.group-row.inh-row > td { background: var(--bg2); }
+    tr.group-row.inh-row { opacity: .72; }
+    tr.group-row.inh-row button, tr.group-row.inh-row input,
+    tr.group-row.inh-row select, tr.group-row.inh-row a,
+    tr.group-row.inh-row [onclick] { pointer-events: none; opacity: .55; }
+  </style>
+  {% endif %}
+  {# Applications, Logging, Profile, and Zone columns are always rendered but
+     CSS-hidden outside their owning Enrichment sub-tab - see body.show-*-col
+     toggles in rules.html. Selection column (sel-col) is the leftmost -
+     always rendered, used by bulk-action UIs (logging-profile apply, etc.). #}
+  {# ncols = base 15 + 1 schedule column (PA + CP + Forti, sched-col
+     CSS-gated via show-sched-col) + 2 PA tag columns (Tag + Group-Tag,
+     both PA-only - CP has no rule-level tags, Forti no tag concept at
+     all). Used for colspan on group-header and empty-state rows;
+     hidden CSS columns count too (display:none cells keep their slot
+     in the table). #}
+  {% set _has_sched = target_platform in ('panw', 'checkpoint', 'fortigate') %}
+  {% set _has_iden = target_platform in ('panw', 'checkpoint', 'fortigate') %}
+  {% set ncols = 15 + (1 if _has_sched else 0) + (1 if _has_iden else 0) + (2 if target_platform == 'panw' else 0) %}
+
+  {# Token .twrap wraps the rules table; <thead>/<tbody> styling comes from
+     tokens.css element selectors. Filter row carries .filt class which the
+     token CSS treats with its own sticky-top + smaller padding rules.
+     Column-hide classes (.sel-col, .zone-col, .app-col, .log-col, .prof-col,
+     .sched-col, .tag-col, .gtag-col) stay on the <th> + <td> and are
+     toggled by body.show-X-col gates in the inline <style> block of
+     rules.html - independent of styling. #}
+  <div class="twrap">
+  <table class="rules-tbl">
+    <thead>
+      <tr>
+        <th class="sel-col" style="text-align:center;width:32px;">
+          <input id="rules-select-all" type="checkbox"
+                 class="rules-select-all"
+                 style="accent-color:var(--green);vertical-align:middle;"
+                 title="Select all visible rules">
+        </th>
+        <th class="num" style="width:60px;" title="{% if can_reorder and group_by == 'device' %}Rule sequence - use ▲▼ to reorder{% endif %}">#</th>
+        <th>Name</th>
+        <th class="zone-col">{% if target_platform == 'fortigate' %}Incoming Interface{% else %}Src Zone{% endif %}</th>
+        <th>Sources</th>
+        {% if _has_iden %}
+        <th class="iden-col">Source User</th>
+        {% endif %}
+        <th class="zone-col">{% if target_platform == 'fortigate' %}Outgoing Interface{% else %}Dst Zone{% endif %}</th>
+        <th>Destinations</th>
+        <th class="app-col">Applications</th>
+        <th>Services/Ports</th>
+        <th>Action</th>
+        <th class="log-col">Logging</th>
+        <th class="prof-col">Profile</th>
+        {% if _has_sched %}
+        <th class="sched-col">Schedule</th>
+        {% endif %}
+        {# Tag columns: PA + CP have rule-tags, PA also has group-tag. Forti
+           policy has no tag concept → no <th>/<td> rendered for non-PA.
+           Body class show-tag-col / show-gtag-col gates visibility across
+           Enrichment sub-tabs. #}
+        {% if target_platform == 'panw' %}
+        <th class="tag-col">Tags</th>
+        {% endif %}
+        {% if target_platform == 'panw' %}
+        <th class="gtag-col">Group-Tag</th>
+        {% endif %}
+        <th class="num">Hits</th>
+        <th>Last Seen</th>
+      </tr>
+      <tr class="filt">
+        <th class="sel-col"></th>
+        <th></th>
+        <th><input data-fkey="fname" type="text" placeholder="Name…"></th>
+        <th class="zone-col"><input data-fkey="fsrcz" type="text" placeholder="Zone…"></th>
+        <th><input data-fkey="fsrc" type="text" placeholder="Search…"></th>
+        {% if _has_iden %}
+        <th class="iden-col"><input data-fkey="fiden" type="text" placeholder="User…"></th>
+        {% endif %}
+        <th class="zone-col"><input data-fkey="fdstz" type="text" placeholder="Zone…"></th>
+        <th><input data-fkey="fdst" type="text" placeholder="Search…"></th>
+        <th class="app-col"><input data-fkey="fapp" type="text" placeholder="App…"></th>
+        <th><input data-fkey="fsvc" type="text" placeholder="tcp/80…"></th>
+        <th>
+          <select data-fkey="faction">
+            <option value="">all</option>
+            <option value="allow">allow</option>
+            <option value="deny">deny</option>
+            <option value="drop">drop</option>
+            <option value="reject">reject</option>
+          </select>
+        </th>
+        <th class="log-col"><input data-fkey="flog" type="text" placeholder="Profile…"></th>
+        <th class="prof-col"><input data-fkey="fprof" type="text" placeholder="Group…"></th>
+        {% if _has_sched %}
+        <th class="sched-col"><input data-fkey="fsched" type="text" placeholder="Schedule…"></th>
+        {% endif %}
+        {% if target_platform == 'panw' %}
+        <th class="tag-col"><input data-fkey="ftag" type="text" placeholder="Tag…"></th>
+        {% endif %}
+        {% if target_platform == 'panw' %}
+        <th class="gtag-col"><input data-fkey="fgtag" type="text" placeholder="Group-Tag…"></th>
+        {% endif %}
+        <th></th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+
+  {% for group_label, rules in devices.items() %}
+    {% set gid = loop.index %}
+    {% set _ginh = rules and rules[0].is_inherited %}
+
+    {# ── Group header row - section label + bg2 fill + collapsible chevron.
+         Click toggles .group-collapsed on the group via toggleGroup(gid). ── #}
+    {% if show_groups %}
+    <tr class="group-header"
+        style="background:var(--bg2);cursor:pointer;user-select:none;border-top:1px solid var(--line2);border-bottom:1px solid var(--line2);"
+        data-gid="{{ gid }}" onclick="toggleGroup({{ gid }})">
+      <td class="sel-col" style="padding:8px 10px;text-align:center;border-right:1px solid var(--line);">
+        {% if not _ginh %}
+        <input type="checkbox"
+               class="rules-select-group"
+               style="accent-color:var(--green);vertical-align:middle;"
+               data-gid="{{ gid }}"
+               onclick="event.stopPropagation()">
+        {% endif %}
+      </td>
+      <td colspan="{{ ncols - 1 }}" style="padding:8px 16px;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          {# Collapse chevron - rotates via .group-collapsed in CSS. #}
+          <svg class="group-chevron" style="width:14px;height:14px;color:var(--tx3);flex-shrink:0;transition:transform .15s;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+          {# Group label - semantic chip per group-by mode. #}
+          {% if group_by == "zone" %}
+            {% set gm = group_meta[group_label] %}
+            {% if gm[0] or gm[1] %}
+              <span class="mut" style="font-size:11px;">Zone Pair:</span>
+              <span class="chip {{ zone_cls(gm[0]) }}" style="font-weight:600;font-size:11.5px;padding:3px 9px;">{{ gm[0] or '?' }}</span>
+              <svg style="width:12px;height:12px;color:var(--tx3);flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
+              </svg>
+              <span class="chip {{ zone_cls(gm[1]) }}" style="font-weight:600;font-size:11.5px;padding:3px 9px;">{{ gm[1] or '?' }}</span>
+            {% else %}
+              <span style="color:var(--tx2);font-size:11.5px;font-style:italic;">{{ group_label }}</span>
+            {% endif %}
+          {% elif group_by in ("src_zone", "dst_zone") %}
+            {% set gz = group_meta[group_label] %}
+            {% if gz %}
+              <span class="mut" style="font-size:11px;">{{ 'Source Zone:' if group_by == 'src_zone' else 'Destination Zone:' }}</span>
+              <span class="chip {{ zone_cls(gz) }}" style="font-weight:600;font-size:11.5px;padding:3px 9px;">{{ gz }}</span>
+            {% else %}
+              <span style="color:var(--tx2);font-size:11.5px;font-style:italic;">{{ group_label }}</span>
+            {% endif %}
+          {% elif group_by == "dst_port" %}
+            <span class="mut" style="font-size:11px;">Destination Port:</span>
+            <span style="color:var(--tx);font-size:12px;font-weight:600;">{{ group_label }}</span>
+          {% elif group_by == "pa_group_tag" %}
+            {% set _gt_name = group_meta[group_label] %}
+            <span class="seclbl" style="padding:0;">Group-Tag</span>
+            {% if _gt_name == "(none)" %}
+              <span class="mut" style="font-size:11px;font-style:italic;">none</span>
+            {% else %}
+              <span class="chip red" style="padding:3px 9px;">{{ _gt_name }}</span>
+            {% endif %}
+          {% else %}
+            <span style="color:var(--tx);font-size:12px;font-weight:600;">{{ group_label }}</span>
+            {% if _ginh %}<span style="font-size:10px;padding:2px 7px;margin-left:8px;border:1px solid var(--line2);border-radius:0;color:var(--tx3);white-space:nowrap;">↳ vererbt · read-only</span>{% endif %}
+          {% endif %}
+          <span class="device-count mut" style="font-size:11px;margin-left:4px;"
+                data-total="{{ rules | length }}"
+                data-unit="entries">
+            {{ rules | length }} entries
+          </span>
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+          {% for rule in rules %}
+          {% set ns.row = ns.row + 1 %}
+          {% set _nat_list = rule.dst_nats | select | list %}
+          <tr class="group-row{% if rule.is_inherited %} inh-row{% endif %}"{% if rule.disabled %} style="opacity:0.4;"{% endif %}
+              data-gid="{{ gid }}"
+              data-rid="{{ rule.id }}"
+              data-rhash="{{ rule.rhash or '' }}"
+              data-fname="{{ (rule.rule_name or '') | lower }}"
+              data-fsrc="{{ rule.sources | join(' ') | lower }}"
+              data-fdst="{{ (rule.destinations + _nat_list) | join(' ') | lower }}"
+              data-fsrcz="{{ (rule.src_zones or []) | join(' ') | lower }}"
+              data-fdstz="{{ (rule.dst_zones or []) | join(' ') | lower }}"
+              data-fsvc="{{ ((rule.ports_list_orig | join(' ')) if rule.ports_list_orig else ((rule.proto or '') ~ ' ' ~ (rule.port_display or ''))) | lower }}"
+              data-faction="{{ (rule.action or '') | lower }}"
+              data-fapp="{{ (rule.application or '') | lower }}"
+              data-flog="{{ (rule.log_forwarding or '') | lower }}"
+              {% if target_platform == 'fortigate' %}
+              data-fprof="{{ [rule.av_profile, rule.webfilter_profile, rule.dnsfilter_profile, rule.ips_sensor, rule.application_list, rule.ssl_ssh_profile] | select | join(' ') | lower }}"
+              {% elif target_platform == 'panw' %}
+              data-fprof="{{ [rule.profile_group, rule.av_profile, rule.webfilter_profile, rule.pa_spyware_profile, rule.pa_vulnerability_profile, rule.pa_file_blocking_profile, rule.pa_wildfire_profile, rule.pa_data_filtering_profile] | select | join(' ') | lower }}"
+              {% else %}
+              data-fprof="{{ (rule.profile_group or '') | lower }}"
+              {% endif %}
+              {% if _has_sched %}
+              data-fsched="{{ (rule.schedule or '') | lower }}"
+              {% endif %}
+              {% if _has_iden %}
+              data-fiden="{{ (rule.source_identities or []) | map(attribute='name') | join(' ') | lower }}"
+              {% endif %}
+              {% if target_platform == 'panw' %}
+              data-ftag="{{ (rule.eff_tags or []) | join(' ') | lower }}"
+              {% endif %}
+              {% if target_platform == 'panw' %}
+              data-fgtag="{{ (rule.pa_group_tag or '') | lower }}"
+              {% endif %}>
+
+            <td class="sel-col" style="text-align:center;">
+              {% if rule.rhash and not rule.is_inherited %}
+              <input type="checkbox"
+                     class="rules-select-row"
+                     style="accent-color:var(--green);vertical-align:middle;"
+                     data-rid="{{ rule.id }}"
+                     data-rhash="{{ rule.rhash }}"
+                     title="Selects this visible row. Backend operations (Apply / Reset) work on the underlying rule's content-hash - multiple rows can share one rule, so the rule-count in the action status may be lower than the row count.">
+              {% endif %}
+            </td>
+
+            <td class="idx num" style="width:60px;">
+              {% if can_reorder and group_by == "device" %}
+              <div style="display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;">
+                <div style="display:flex;flex-direction:column;">
+                  <button onclick="moveRule({{ rule.id }}, 'up')"
+                          style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:11px;line-height:1;padding:0 2px;"
+                          onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx3)';">▲</button>
+                  <button onclick="moveRule({{ rule.id }}, 'down')"
+                          style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:11px;line-height:1;padding:0 2px;"
+                          onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx3)';">▼</button>
+                </div>
+                <span style="color:var(--tx2);">{{ rule.sequence or ns.row }}</span>
+              </div>
+              {% else %}
+              {{ ns.row }}
+              {% endif %}
+            </td>
+
+            <td>
+              {% if name_editable %}
+              <div id="name-cell-{{ rule.id }}" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                {% if rule.rule_name %}
+                  <span class="rname" style="{% if rule.disabled %}text-decoration:line-through;color:var(--tx3);{% endif %}">{{ rule.rule_name }}</span>
+                {% else %}
+                  <span class="dash">-</span>
+                {% endif %}
+                {{ disable_toggle(rule) }}
+                <button class="name-edit-btn hidden ic"
+                        style="background:none;border:none;cursor:pointer;color:var(--tx3);padding:0 2px;flex-shrink:0;"
+                        data-tbl="{{ table_base | e }}" data-rid="{{ rule.id }}" data-name="{{ rule.rule_name | e }}"
+                        onclick="editName(this.dataset.tbl,+this.dataset.rid,this.dataset.name)"
+                        onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx3)';">
+                  <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                  </svg>
+                </button>
+              </div>
+              {% else %}
+                <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                {% if rule.rule_name %}
+                  <span class="rname" style="{% if rule.disabled %}text-decoration:line-through;color:var(--tx3);{% endif %}">{{ rule.rule_name }}</span>
+                {% else %}
+                  <span class="dash">-</span>
+                {% endif %}
+                {{ disable_toggle(rule) }}
+                </div>
+              {% endif %}
+            </td>
+
+            {# Zone cell - Manual override gets violet tint background + 'M'
+               badge. Auto-map / Reset preserve manual overrides. #}
+            <td class="zone-col"{% if rule.zone_override_source == 'manual' %} style="background:var(--violet-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;"
+                   {% if rule.zone_override_source == 'manual' %}title="Manual override - preserved by Auto-map / Reset"{% endif %}>
+                {% for z in (rule.src_zones or []) %}
+                  {% if z %}
+                    <span class="chip {{ zone_cls(z) }}" style="">{{ z }}{% if zone_editable and z != 'any' %}<button type="button" onclick="zoneRemoveOne('{{ rule.rhash }}','src','{{ z }}')" title="Remove {{ z }}" style="background:none;border:none;cursor:pointer;color:inherit;opacity:0.55;padding:0 1px 0 3px;font-size:11px;line-height:1;">&times;</button>{% endif %}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+                {% if rule.zone_override_source == 'manual' %}
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                      title="Manual override">M</span>
+                {% endif %}
+              </div>
+            </td>
+
+            <td{% if rule.negate_source %} style="background:var(--red-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {{ negate_btn(rule.rhash, 'source', rule.negate_source, rule.negate_override_source, target_platform, 'security') | safe }}
+                {% for src in rule.sources %}
+                  {% if src == 'internet_public' %}
+                    <span class="chip red" style="">internet_public</span>
+                  {% else %}
+                    {% set zone = rule.src_ip_zones.get(src) %}
+                    {% if zone %}
+                      <span class="chip {{ zone_cls(zone) }}" style="">{{ src }}</span>
+                    {% else %}
+                      <span class="chip dmz" style="">{{ src }}</span>
+                    {% endif %}
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+              </div>
+            </td>
+
+            {% if _has_iden %}
+            {# Source User - identity constraints (Phase 2 Option C). Chip
+               tint by kind: group=violet, user=blue, keyword=amber (PA
+               sentinels), unknown=neutral. Override (idovr) gets an 'M'. #}
+            <td class="iden-col">
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {% for idn in (rule.source_identities or []) %}
+                  {% set _k = idn.kind or 'unknown' %}
+                  {% set _cls = 'purple' if _k == 'group' else ('dmz' if _k == 'user' else ('amber' if _k == 'keyword' else 'any')) %}
+                  <span class="chip {{ _cls }}" style=""
+                        title="{{ _k }}{% if rule.identity_override_source == 'manual' %} - manual override{% endif %}">{{ idn.name }}</span>
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+                {% if rule.identity_override_source == 'manual' %}
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                      title="Manual override">M</span>
+                {% endif %}
+              </div>
+            </td>
+            {% endif %}
+
+            <td class="zone-col"{% if rule.zone_override_source == 'manual' %} style="background:var(--violet-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;"
+                   {% if rule.zone_override_source == 'manual' %}title="Manual override - preserved by Auto-map / Reset"{% endif %}>
+                {% for z in (rule.dst_zones or []) %}
+                  {% if z %}
+                    <span class="chip {{ zone_cls(z) }}" style="">{{ z }}{% if zone_editable and z != 'any' %}<button type="button" onclick="zoneRemoveOne('{{ rule.rhash }}','dst','{{ z }}')" title="Remove {{ z }}" style="background:none;border:none;cursor:pointer;color:inherit;opacity:0.55;padding:0 1px 0 3px;font-size:11px;line-height:1;">&times;</button>{% endif %}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+                {% if rule.zone_override_source == 'manual' %}
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                      title="Manual override">M</span>
+                {% endif %}
+              </div>
+            </td>
+
+            <td{% if rule.negate_destination %} style="background:var(--red-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {{ negate_btn(rule.rhash, 'destination', rule.negate_destination, rule.negate_override_source, target_platform, 'security') | safe }}
+                {% for dst in rule.destinations %}
+                  {% set nat = rule.dst_nats[loop.index0] %}
+                  {% set zone = rule.dst_ip_zones.get(dst) %}
+                  {% if zone %}
+                    <span class="chip {{ zone_cls(zone) }}" style=""
+                          {% if nat %}title="NAT → {{ nat }}"{% endif %}>
+                      {{ dst }}{% if nat %} <span style="opacity:0.7;">→ {{ nat }}</span>{% endif %}
+                    </span>
+                  {% elif nat %}
+                    <span class="chip wan" style=""
+                          title="NAT → {{ nat }}">{{ dst }} <span style="opacity:0.7;">→ {{ nat }}</span></span>
+                  {% else %}
+                    <span class="chip wan" style="">{{ dst }}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+              </div>
+            </td>
+
+            <td class="app-col">
+              {% set _apps = (rule.application or '').split(',') | map('trim') | reject('equalto', '') | list %}
+              {% if _apps %}
+                <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                  {% for a in _apps %}
+                    {# 'any' is the pipeline default for rules without a bound app
+                       (PA L7-permissive). Render dimmer so unbound rules visibly
+                       stand out. Bound apps use the .appchip token (green). #}
+                    {% if a == 'any' %}
+                      <span class="tag" style="font-style:italic;color:var(--tx3);">any</span>
+                    {% else %}
+                      <span class="appchip" style="">{{ a }}</span>
+                    {% endif %}
+                  {% endfor %}
+                </div>
+              {% else %}
+                <span class="dash">-</span>
+              {% endif %}
+            </td>
+
+            {# Merged Service column - proto+port as paired chips so mixed-
+               protocol rules (tcp/80 + udp/53) keep their pairing readable.
+               endpoint_pairs has ports_list_orig with the proto-qualified
+               originals; raw rules fall back to a single {proto}/{port}
+               chip (or just {proto} when there's no port). #}
+            <td{% if rule.negate_service %} style="background:var(--red-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {{ negate_btn(rule.rhash, 'service', rule.negate_service, rule.negate_override_source, target_platform, 'security') | safe }}
+                {% if rule.service_override %}
+                  <span class="chip dmz" style=""
+                        title="Service override - replaces proto/port at deploy time">{{ rule.service_override }}</span>
+                {% elif rule.ports_list_orig %}
+                  {% for _orig in rule.ports_list_orig %}
+                    <span class="chip any" style="">{{ _orig }}</span>
+                  {% endfor %}
+                {% else %}
+                  {% set _proto = rule.proto or '' %}
+                  {% set _port  = rule.port_display or '' %}
+                  {% if _proto and _port and _port != '-' %}
+                    <span class="chip any" style="">{{ _proto }}/{{ _port }}</span>
+                  {% elif _proto %}
+                    <span class="chip any" style="">{{ _proto }}</span>
+                  {% elif _port and _port != '-' %}
+                    <span class="chip any" style="">{{ _port }}</span>
+                  {% else %}
+                    <span class="dash">-</span>
+                  {% endif %}
+                {% endif %}
+              </div>
+            </td>
+
+            <td>
+              {{ action_badge(rule.action) }}
+              {% if rule.security_profile %}
+                <div style="margin-top:4px;">
+                  <span class="chip wan">{{ rule.security_profile }}</span>
+                </div>
+              {% endif %}
+            </td>
+
+            <td class="log-col" style="white-space:nowrap;">
+              {% set _auto_log = (rule.log_override_source == 'auto') %}
+              {# Token color rules across the auto/active/disabled axes:
+                 - auto      → amber (Phase B suggestion, pending review)
+                 - active    → blue (sky/indigo in old palette, dmz here)
+                 - disable   → neutral mut (gray)
+                 - on-flag   → green (.chip.trust)
+                 - off-flag  → neutral
+              #}
+              {# Target-driven: show the logging model the SELECTED TARGET
+                 supports, not whichever source field happens to be set
+                 (feedback_enrichment_target_driven). Forti=logtraffic,
+                 PA=log-forwarding, CP=track. Keyed on target_platform so a
+                 forti→cp migration shows the editable CP track, not the
+                 read-only Forti source logtraffic. #}
+              {% if target_platform == 'fortigate' and rule.log_traffic %}
+                <span class="chip{% if rule.log_traffic == 'disable' %} any{% elif _auto_log %} amber{% else %} dmz{% endif %}"
+                      style=""
+                      title="logtraffic{% if _auto_log %} (auto from source - pending review){% endif %}">{{ rule.log_traffic }}</span>
+                {% if rule.log_traffic != 'disable' %}
+                <span class="chip{% if rule.log_start %} trust{% else %} any{% endif %}"
+                      style="font-size:10px;padding:1px 5px;margin-left:4px;"
+                      title="logtraffic-start: {{ 'yes' if rule.log_start else 'no' }}">S</span>
+                <span class="chip{% if rule.capture_packet %} trust{% else %} any{% endif %}"
+                      style="font-size:10px;padding:1px 5px;"
+                      title="capture-packet: {{ 'yes' if rule.capture_packet else 'no' }}">PCAP</span>
+                {% endif %}
+              {% elif target_platform == 'panw' and rule.log_forwarding %}
+                <span class="chip{% if _auto_log %} amber{% else %} dmz{% endif %}"
+                      style=""
+                      title="{{ rule.log_forwarding }}{% if _auto_log %} (auto from source){% endif %}">{{ rule.log_forwarding }}</span>
+                <span class="chip{% if rule.log_start %} trust{% else %} any{% endif %}"
+                      style="font-size:10px;padding:1px 5px;margin-left:4px;"
+                      title="Log at session start: {{ 'yes' if rule.log_start else 'no' }}">S</span>
+                <span class="chip{% if rule.log_end %} trust{% else %} any{% endif %}"
+                      style="font-size:10px;padding:1px 5px;"
+                      title="Log at session end: {{ 'yes' if rule.log_end else 'no' }}">E</span>
+              {% elif target_platform == 'checkpoint' and rule.track_type %}
+                {% set _auto_track = (rule.track_override_source == 'auto') %}
+                <span class="chip{% if _auto_track %} amber{% else %} dmz{% endif %}"
+                      style=""
+                      title="{{ rule.track_type }}{% if _auto_track %} (auto from source - pending review){% endif %}">{{ rule.track_type }}</span>
+                {% if rule.accounting %}<span class="chip trust" style="font-size:10px;padding:1px 5px;margin-left:4px;" title="Accounting">A</span>{% endif %}
+                {% if rule.per_session %}<span class="chip trust" style="font-size:10px;padding:1px 5px;margin-left:4px;" title="Per session">PS</span>{% endif %}
+                {% if rule.per_connection %}<span class="chip trust" style="font-size:10px;padding:1px 5px;margin-left:4px;" title="Per connection">PC</span>{% endif %}
+              {% else %}
+                <span class="dash">-</span>
+              {% endif %}
+            </td>
+
+            <td class="prof-col" style="white-space:nowrap;">
+              {% if target_platform == 'fortigate' %}
+                {% set _utm_slots = [
+                    ('AV',  rule.av_profile),
+                    ('WF',  rule.webfilter_profile),
+                    ('DNS', rule.dnsfilter_profile),
+                    ('IPS', rule.ips_sensor),
+                    ('APP', rule.application_list),
+                    ('SSL', rule.ssl_ssh_profile),
+                ] %}
+                {# auto = Phase-B suggestion from source-import (amber).
+                   Manual edit promotes to source='manual' (violet/wan tone).
+                   Unset slot = .pp (neutral mini-pill from tokens). #}
+                {% set _auto_prof = (rule.prof_override_source == 'auto') %}
+                <div class="prof">
+                  {% for slot_label, slot_val in _utm_slots %}
+                    {% if slot_val %}
+                      <span class="pp on" {% if _auto_prof %}style="color:var(--amber);border-color:var(--amber-line);background:var(--amber-fill);"{% endif %}
+                            title="{{ slot_label }}: {{ slot_val }}{% if _auto_prof %} (auto from source - pending review){% endif %}">{{ slot_label }}</span>
+                    {% else %}
+                      <span class="pp" title="{{ slot_label }}: (none)">{{ slot_label }}</span>
+                    {% endif %}
+                  {% endfor %}
+                </div>
+              {% elif rule.profile_group %}
+                {% set _auto_pg = (rule.prof_override_source == 'auto') %}
+                <span class="chip{% if _auto_pg %} amber{% else %} wan{% endif %}"
+                      style=""
+                      title="{{ rule.profile_group }}{% if _auto_pg %} (auto from source){% endif %}">{{ rule.profile_group }}</span>
+              {% elif target_platform == 'panw' and (rule.av_profile or rule.webfilter_profile or rule.pa_spyware_profile or rule.pa_vulnerability_profile or rule.pa_file_blocking_profile or rule.pa_wildfire_profile or rule.pa_data_filtering_profile) %}
+                {% set _pa_slots = [
+                    ('AV',  rule.av_profile),
+                    ('URL', rule.webfilter_profile),
+                    ('SPY', rule.pa_spyware_profile),
+                    ('VUL', rule.pa_vulnerability_profile),
+                    ('FIL', rule.pa_file_blocking_profile),
+                    ('WF',  rule.pa_wildfire_profile),
+                    ('DAT', rule.pa_data_filtering_profile),
+                ] %}
+                {% set _auto_pa = (rule.prof_override_source == 'auto') %}
+                <div class="prof">
+                  {% for slot_label, slot_val in _pa_slots %}
+                    {% if slot_val %}
+                      <span class="pp on" {% if _auto_pa %}style="color:var(--amber);border-color:var(--amber-line);background:var(--amber-fill);"{% endif %}
+                            title="{{ slot_label }}: {{ slot_val }}{% if _auto_pa %} (auto from source - pending review){% endif %}">{{ slot_label }}</span>
+                    {% else %}
+                      <span class="pp" title="{{ slot_label }}: (none)">{{ slot_label }}</span>
+                    {% endif %}
+                  {% endfor %}
+                </div>
+              {% else %}
+                <span class="dash">-</span>
+              {% endif %}
+            </td>
+
+            {# Schedule column (PA + CP + Forti). rule.schedule comes from
+               rules_query via COALESCE(override, import). Amber = source='auto'
+               (Phase-B promoted from raw_extras); wan/violet = 'manual';
+               neutral .chip.any otherwise. #}
+            {% if _has_sched %}
+            <td class="sched-col" style="white-space:nowrap;">
+              {% if rule.schedule %}
+                {% set _auto_sched = (rule.schedule_override_source == 'auto') %}
+                {% set _manual_sched = (rule.schedule_override_source == 'manual') %}
+                <span class="chip{% if _auto_sched %} amber{% elif _manual_sched %} wan{% else %} any{% endif %}"
+                      style=""
+                      title="schedule: {{ rule.schedule }}{% if _auto_sched %} (auto from source - pending review){% elif _manual_sched %} (manual override){% endif %}">{{ rule.schedule }}</span>
+              {% else %}
+                <span class="dash">-</span>
+              {% endif %}
+            </td>
+            {% endif %}
+
+            {# Tags column (PA + CP). rule.eff_tags is server-side computed
+               (pa_tags/cp_tags override wins, otherwise import_tags). Pill bg
+               uses tag_color_map when a catalog-color is set, else neutral. #}
+            {% if target_platform == 'panw' %}
+            <td class="tag-col">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;">
+                {% for _t in (rule.eff_tags or []) %}
+                  {% set _hex = (tag_color_map or {}).get(_t) %}
+                  {% if _hex %}
+                  <span class="chip" style="color:#ffffff;background-color:{{ _hex }};border-color:{{ _hex }};">{{ _t }}</span>
+                  {% else %}
+                  <span class="chip any" style="">{{ _t }}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+              </div>
+            </td>
+            {% endif %}
+            {# Group-Tag column (PA only). Single value pa_group_tag from
+               rules_query via COALESCE(override, import). #}
+            {% if target_platform == 'panw' %}
+            <td class="gtag-col">
+              {% if rule.pa_group_tag %}
+                {% set _hex = (tag_color_map or {}).get(rule.pa_group_tag) %}
+                {% if _hex %}
+                <span class="chip" style="color:#ffffff;background-color:{{ _hex }};border-color:{{ _hex }};">{{ rule.pa_group_tag }}</span>
+                {% else %}
+                <span class="chip red" style="">{{ rule.pa_group_tag }}</span>
+                {% endif %}
+              {% else %}
+                <span class="dash">-</span>
+              {% endif %}
+            </td>
+            {% endif %}
+
+            <td class="num" style="color:var(--tx);white-space:nowrap;">
+              {{ "{:,}".format(rule.hit_count) }}
+            </td>
+
+            <td class="date" style="white-space:nowrap;">
+              {{ rule.last_seen.strftime('%Y-%m-%d %H:%M') if rule.last_seen else '-' }}
+            </td>
+
+          </tr>
+          {% endfor %}{# rules #}
+  {% endfor %}{# groups #}
+
+  <tr id="filter-empty-row" class="hidden">
+    <td colspan="{{ ncols }}" class="empty" style="padding:32px 16px;">
+      No rules match the current filters.
+    </td>
+  </tr>
+
+    </tbody>
+  </table>
+  </div>
+
+  {# ── Bottom pagination - mirrors the top-bar chip row. ── #}
+  {% if total_pages > 1 %}
+  <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px;font-size:12px;color:var(--tx2);margin:6px 20px 22px;">
+    {% if page > 1 %}
+      <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+              class="btn sm" style="height:28px;padding:0 10px;">&larr; Prev</button>
+    {% else %}
+      <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
+    {% endif %}
+    <span class="mut" style="padding:0 6px;">{{ page }} / {{ total_pages }}</span>
+    {% if page < total_pages %}
+      <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+              class="btn sm" style="height:28px;padding:0 10px;">Next &rarr;</button>
+    {% else %}
+      <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  </div>{# end opacity wrapper #}
+
+{% endif %}
+
+{% if can_reorder and group_by == "device" %}
+<script>
+  function moveRule(ruleId, direction) {
+    fetch('/rules/reorder', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rule_id: ruleId, direction: direction}),
+    }).then(r => r.json()).then(data => {
+      if (data.moved) htmx.trigger(document.body, 'configSaved');
+    }).catch(() => { showToast('Reorder failed - please try again', 'error'); });
+  }
+</script>
+{% endif %}
+
+{% if zone_editable or name_editable %}
+<script>
+  function toggleDisabled(ruleId, btn) {
+    btn.disabled = true;
+    fetch('/rules/toggle-disabled', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rule_id: ruleId}),
+    }).then(r => r.json()).then(data => {
+      if (data.ok) htmx.trigger(document.body, 'configSaved');
+      else btn.disabled = false;
+    }).catch(() => { btn.disabled = false; });
+  }
+
+  function editName(table, ruleId, currentName) {
+    const cell = document.getElementById('name-cell-' + ruleId);
+    if (!cell) return;
+    const savedOuterHTML = cell.outerHTML;  // snapshot for Escape restore
+    let cancelled = false;
+    const input = document.createElement('input');
+    input.type  = 'text';
+    input.value = currentName || '';
+    input.className = 'bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-xs text-gray-200 font-mono focus:outline-none focus:border-blue-500 w-40';
+    cell.innerHTML = '';
+    cell.appendChild(input);
+    input.focus();
+    input.select();
+    function save() {
+      if (cancelled) return;
+      cancelled = true;  // prevent double-save from blur after Enter
+      const name = input.value.trim();
+      fetch('/rules/name', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({table, rule_id: ruleId, name}),
+      }).then(r => {
+        if (!r.ok) throw new Error('status ' + r.status);
+        return r.text();
+      }).then(html => {
+        const el = document.getElementById('name-cell-' + ruleId);
+        if (el) el.outerHTML = html;
+        if (window.__nameEditable) {
+          const btn = document.querySelector('#name-cell-' + ruleId + ' .name-edit-btn');
+          if (btn) btn.classList.remove('hidden');
+        }
+      }).catch(() => {
+        cancelled = false;  // allow retry
+        input.classList.add('border-red-500', 'focus:border-red-500');
+        input.classList.remove('border-gray-600', 'focus:border-blue-500');
+        showToast('Failed to save name - please try again', 'error');
+      });
+    }
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); save(); }
+      if (e.key === 'Escape') {
+        cancelled = true;  // prevent blur from saving
+        cell.outerHTML = savedOuterHTML;
+        if (window.__nameEditable) {
+          const restored = document.getElementById('name-cell-' + ruleId);
+          if (restored) {
+            const btn = restored.querySelector('.name-edit-btn');
+            if (btn) btn.classList.remove('hidden');
+          }
+        }
+      }
+    });
+    input.addEventListener('blur', () => setTimeout(save, 150));
+  }
+</script>
+{% endif %}
+
+</div>

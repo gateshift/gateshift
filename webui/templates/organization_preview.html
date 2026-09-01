@@ -1,0 +1,327 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# Organization > <rulebase> preview - Phase 2a MVP.
+
+   Renders the post-Generate DB state filtered to the selected rulebase
+   (Access / NAT / TP), with the per-sub-tab Accumulate-Toggle and
+   Grouping-Selector already applied at fetch time. The sub-tab header
+   lives in rules.html; this fragment renders only the rule body. HTMX
+   re-fetches it whenever the user flips either control. #}
+
+{% from "_macros.html" import zone_cls, action_badge %}
+
+<div id="org-preview-{{ rulebase }}-body" data-rulebase="{{ rulebase }}">
+
+{% if rulebase == 'access' %}
+  {# ── Access rulebase - single table with group-header rows between
+       blocks (rather than one table per group). All columns stay
+       consistent width and the look matches Ruleset > Security /
+       Enrichment > Rules. Group label comes from group_meta when
+       set (PA pa_group_tag emits block IDs gt_0000…; group_meta
+       maps them to the tag name / '(none)'). Org is read-only -
+       no editor controls, no filters, no chevrons/checkboxes. ── #}
+  {% if not devices %}
+    <div class="empty">No access rules for this source device yet.</div>
+  {% else %}
+    {# ncols: Base 8 (#, Name, Sources, Destinations, Service, Action,
+       Hits, Last Seen) + 2 when zones are visible. Used for group-header
+       colspan + empty-state. #}
+    {% set _ncols = 10 if target_zone_native else 8 %}
+    <div class="mut" style="font-size:11.5px;margin:0 4px 8px;">
+      {{ total | default(0) }} rule{{ 's' if (total | default(0)) != 1 else '' }}
+      {% if accumulate %}&middot; accumulated{% endif %}
+      {% if group_by != 'device' %} &middot; grouped by {{ group_by | replace('_', ' ') }}{% endif %}
+    </div>
+
+    <div class="twrap" style="margin:0 0 12px;max-height:640px;">
+      <table>
+        <thead>
+          <tr>
+            <th class="num" style="width:48px;">#</th>
+            <th>Name</th>
+            {% if target_zone_native %}
+            <th>{% if target_platform == 'fortigate' %}Incoming Interface{% else %}Src Zone{% endif %}</th>
+            {% endif %}
+            <th>Sources</th>
+            {% if target_zone_native %}
+            <th>{% if target_platform == 'fortigate' %}Outgoing Interface{% else %}Dst Zone{% endif %}</th>
+            {% endif %}
+            <th>Destinations</th>
+            <th>Service</th>
+            <th>Action</th>
+            <th class="num">Hits</th>
+            <th>Last Seen</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% set _show_group_headers = group_by != 'device' or devices.keys() | length > 1 %}
+        {% set ns = namespace(row=0) %}
+        {% for group_label, group_rules in devices.items() %}
+          {% if _show_group_headers %}
+          {# Group header - display name via group_meta when set (PA
+             pa_group_tag → tag-name); else fall back to the raw label. #}
+          {% set _disp = group_meta.get(group_label, group_label) if group_meta else group_label %}
+          <tr style="background:var(--bg2);border-top:1px solid var(--line2);border-bottom:1px solid var(--line2);">
+            <td colspan="{{ _ncols }}" style="padding:8px 16px;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                {% if group_by == 'pa_group_tag' %}
+                  <span class="seclbl" style="padding:0;">Group-Tag</span>
+                  {% if _disp == '(none)' %}
+                    <span class="mut" style="font-size:11px;font-style:italic;">none</span>
+                  {% else %}
+                    <span class="chip red" style="padding:3px 9px;">{{ _disp }}</span>
+                  {% endif %}
+                {% else %}
+                  <span style="color:var(--tx);font-size:12px;font-weight:600;">{{ _disp }}</span>
+                {% endif %}
+                <span class="mut" style="font-size:11px;margin-left:4px;">{{ group_rules | length }} entr{{ 'y' if group_rules | length == 1 else 'ies' }}</span>
+              </div>
+            </td>
+          </tr>
+          {% endif %}
+          {% for rule in group_rules %}
+          {% set ns.row = ns.row + 1 %}
+          <tr{% if rule.disabled %} style="opacity:0.5;"{% endif %}>
+            <td class="idx num">{{ rule.sequence or ns.row }}</td>
+            <td style="color:var(--tx);">{{ rule.rule_name or '-' }}</td>
+            {% set _zovr_manual = (rule.zone_override_source == 'manual') %}
+            {# Zone cells - colour from zone_cls(); manual override gets a
+               violet (.wan) cell tint + 'M' badge, mirroring rules_fragment. #}
+            {% if target_zone_native %}
+            <td{% if _zovr_manual %} style="background:var(--violet-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {% for z in (rule.src_zones or []) %}
+                  {% if z %}
+                  <span class="chip {{ zone_cls(z) }}" style="">{{ z }}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+                {% if _zovr_manual %}<span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);" title="Manual override">M</span>{% endif %}
+              </div>
+            </td>
+            {% endif %}
+            {# Source cell - one pill per src. internet_public uses .chip.red;
+               IPs with a known zone use that zone's tone; others fall back
+               to .chip.dmz. negate_btn is read-only-mode-aware via CSS. #}
+            <td{% if rule.negate_source %} style="background:var(--red-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {{ negate_btn(rule.rhash, 'source', rule.negate_source, rule.negate_override_source, target_platform, 'security') | safe }}
+                {% for src in (rule.sources or []) %}
+                  {% if src == 'internet_public' %}
+                    <span class="chip red" style="">internet_public</span>
+                  {% else %}
+                    {% set _z = (rule.src_ip_zones or {}).get(src) %}
+                    {% if _z %}
+                      <span class="chip {{ zone_cls(_z) }}" style="">{{ src }}</span>
+                    {% else %}
+                      <span class="chip dmz" style="">{{ src }}</span>
+                    {% endif %}
+                  {% endif %}
+                {% else %}
+                  <span class="dash">any</span>
+                {% endfor %}
+              </div>
+            </td>
+            {% if target_zone_native %}
+            <td{% if _zovr_manual %} style="background:var(--violet-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {% for z in (rule.dst_zones or []) %}
+                  {% if z %}
+                  <span class="chip {{ zone_cls(z) }}" style="">{{ z }}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">-</span>
+                {% endfor %}
+                {% if _zovr_manual %}<span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);" title="Manual override">M</span>{% endif %}
+              </div>
+            </td>
+            {% endif %}
+            {# Destination cell - zone-tone when known else .chip.wan (NAT
+               purple). NAT indicator appended as '→ <nat>'. #}
+            <td{% if rule.negate_destination %} style="background:var(--red-fill);"{% endif %}>
+              <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
+                {{ negate_btn(rule.rhash, 'destination', rule.negate_destination, rule.negate_override_source, target_platform, 'security') | safe }}
+                {% for dst in (rule.destinations or []) %}
+                  {% set _nat = (rule.dst_nats[loop.index0] if rule.dst_nats and loop.index0 < (rule.dst_nats | length) else None) %}
+                  {% set _z = (rule.dst_ip_zones or {}).get(dst) %}
+                  {% if _z %}
+                    <span class="chip {{ zone_cls(_z) }}" style="">{{ dst }}{% if _nat %} <span style="opacity:0.7;">→ {{ _nat }}</span>{% endif %}</span>
+                  {% else %}
+                    <span class="chip wan" style="">{{ dst }}{% if _nat %} <span style="opacity:0.7;">→ {{ _nat }}</span>{% endif %}</span>
+                  {% endif %}
+                {% else %}
+                  <span class="dash">any</span>
+                {% endfor %}
+              </div>
+            </td>
+            {# Merged Service column - see comment in rules_fragment.html. #}
+            <td>
+              {% if rule.ports_list_orig %}
+                <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                  {% for _orig in rule.ports_list_orig %}
+                    <span class="chip any" style="">{{ _orig }}</span>
+                  {% endfor %}
+                </div>
+              {% else %}
+                {% set _proto = rule.proto or '' %}
+                {% set _port  = rule.port_display or '' %}
+                {% if _proto and _port and _port != '-' %}
+                  <span class="chip any" style="">{{ _proto }}/{{ _port }}</span>
+                {% elif _proto %}
+                  <span class="chip any" style="">{{ _proto }}</span>
+                {% elif _port and _port != '-' %}
+                  <span class="chip any" style="">{{ _port }}</span>
+                {% else %}
+                  <span class="dash">-</span>
+                {% endif %}
+              {% endif %}
+            </td>
+            <td>{{ action_badge(rule.action) }}</td>
+            <td class="num" style="color:var(--tx);white-space:nowrap;">
+              {% if rule.hit_count is not none %}{{ "{:,}".format(rule.hit_count) }}{% else %}-{% endif %}
+            </td>
+            <td class="date" style="white-space:nowrap;">
+              {{ rule.last_seen.strftime('%Y-%m-%d %H:%M') if rule.last_seen else '-' }}
+            </td>
+          </tr>
+          {% endfor %}
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+{% elif rulebase == 'nat' %}
+  {# ── NAT rulebase - fw_nat_rules per source device. Accumulate is a
+       no-op here (NAT isn't part of the V1 accumulate pipeline). Layout
+       mirrors Ruleset > NAT (Original / Translated groups) - read-only. ── #}
+  {% if not nat_rules %}
+    <div class="empty">No NAT rules for this source device.</div>
+  {% else %}
+    <div class="mut" style="font-size:11.5px;margin:0 4px 8px;">
+      {{ nat_rules | length }} NAT rule{% if (nat_rules | length) != 1 %}s{% endif %}
+    </div>
+    <div class="twrap" style="margin:0 0 12px;max-height:640px;">
+      <table>
+        <thead>
+          <tr>
+            <th colspan="3"></th>
+            <th colspan="3" style="border-left:1px solid var(--line);">Original</th>
+            <th colspan="3" style="border-left:1px solid var(--line);">Translated</th>
+            <th style="border-left:1px solid var(--line);"></th>
+          </tr>
+          <tr>
+            <th class="num" style="width:48px;">#</th>
+            <th>Name</th>
+            <th style="width:64px;">Type</th>
+            <th style="border-left:1px solid var(--line);">Source</th>
+            <th>Destination</th>
+            <th>Port(s)</th>
+            <th style="border-left:1px solid var(--line);">Source</th>
+            <th>Destination</th>
+            <th>Port(s)</th>
+            <th style="border-left:1px solid var(--line);">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for n in nat_rules %}
+          <tr{% if n.disabled %} style="opacity:0.5;"{% endif %}>
+            <td class="idx num">{{ n.position }}</td>
+            <td style="color:var(--tx);">{{ n.name }}</td>
+            <td>
+              {% if n.nat_type == 'snat' %}<span class="chip dmz">SNAT</span>
+              {% elif n.nat_type == 'dnat' %}<span class="chip wan">DNAT</span>
+              {% else %}<span class="chip any">{{ (n.nat_type or '-') | upper }}</span>{% endif %}
+            </td>
+
+            {# Original group - 3 cols. #}
+            <td style="color:var(--tx2);border-left:1px solid var(--line);">{{ n.orig_src | join(', ') if n.orig_src else 'any' }}</td>
+            <td style="color:var(--tx2);">{{ n.orig_dst | join(', ') if n.orig_dst else 'any' }}</td>
+            <td style="color:var(--tx2);">{{ n.orig_service | join(', ') if n.orig_service else 'any' }}</td>
+
+            {# Translated group - 3 cols. Source for SNAT, Destination + Port
+               for DNAT; the rest stays em-dash. #}
+            <td style="color:var(--tx2);border-left:1px solid var(--line);">
+              {% if n.nat_type == 'snat' and n.trans_src %}
+                {{ n.trans_src.replace('|', ' / ') }}{% if n.trans_src_type %}<span class="dash"> ({{ n.trans_src_type }})</span>{% endif %}
+              {% else %}-{% endif %}
+            </td>
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'dnat' and n.trans_dst %}{{ n.trans_dst }}{% else %}-{% endif %}
+            </td>
+            <td style="color:var(--tx2);">
+              {% if n.nat_type == 'dnat' and n.trans_dst_port %}{{ n.trans_dst_port }}{% else %}-{% endif %}
+            </td>
+
+            <td class="mut" style="border-left:1px solid var(--line);">{{ n.description or '-' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+{% elif rulebase == 'tp' %}
+  {# ── TP rulebase - driver.generate_tp_rules() per configured layer.
+       Only CP targets have TP; others fall through to the empty banner. ── #}
+  {% if target_platform != 'checkpoint' %}
+    <div class="empty">
+      Threat-Prevention is a Check Point concept. Pick a CP target to see it here.
+    </div>
+  {% elif tp_load_error %}
+    <div class="tag bad" style="display:flex;width:auto;padding:8px 12px;border-radius:0;font-size:12px;">
+      Failed to load TP source data: {{ tp_load_error }}
+    </div>
+  {% elif not tp_sections %}
+    <div class="empty">
+      No TP-Layer configs for this target yet.
+      Configure layers under <strong style="color:var(--tx);">Enrichment &raquo; Threat Prevention</strong>.
+    </div>
+  {% else %}
+    {% for section in tp_sections %}
+      <div style="margin-bottom:16px;">
+        <div style="display:flex;align-items:baseline;font-size:11.5px;margin-bottom:6px;padding:0 4px;">
+          <span style="color:var(--tx);font-weight:500;">{{ section.layer_name }}</span>
+          <span class="mut" style="margin-left:8px;">({{ section.strategy }})</span>
+          <span class="mut" style="margin-left:auto;">{{ section.rules | length }} rule{% if (section.rules | length) != 1 %}s{% endif %}</span>
+        </div>
+        {% if section.error %}
+          <div class="tag bad" style="display:flex;width:auto;padding:8px 12px;border-radius:0;font-size:12px;">
+            Error: {{ section.error }}
+          </div>
+        {% elif not section.rules %}
+          <div class="dash" style="padding:8px;font-size:11.5px;">No TP-rules generated for this layer.</div>
+        {% else %}
+          <div class="twrap" style="margin:0;max-height:640px;">
+            <table>
+              <thead>
+                <tr>
+                  <th class="num" style="width:48px;">#</th>
+                  <th>Name</th>
+                  <th>Protected Scope</th>
+                  <th>Action (Profile)</th>
+                  <th>Track</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for rule in section.rules %}
+                <tr>
+                  <td class="idx num">{{ loop.index }}</td>
+                  <td style="color:var(--tx);">{{ rule.name }}</td>
+                  <td style="color:var(--tx2);">{{ (rule['protected-scope'] or []) | join(', ') }}</td>
+                  <td style="color:var(--tx);">{{ rule.action }}</td>
+                  <td style="color:var(--tx2);">{{ rule.track or '-' }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% endif %}
+
+{% endif %}
+
+</div>

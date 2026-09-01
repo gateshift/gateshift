@@ -1,0 +1,59 @@
+name: Bug report
+description: "Gateshift does not do what the documentation says"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **A bug is when Gateshift does not do what the documentation says.**
+        Deliberate boundaries live in `KNOWN_LIMITATIONS.md` - anything beyond
+        those is a feature request. Vendor/version/verbatim-error are required
+        because most defects are vendor-schema drift, and those three fields
+        are what makes them reproducible.
+  - type: input
+    id: vendor
+    attributes:
+      label: Vendor and platform
+      description: e.g. FortiGate (FortiOS), Palo Alto (PAN-OS), Check Point (Mgmt API/Gaia), Cisco ASA/FTD
+      placeholder: FortiGate (FortiOS)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Exact firmware / management version
+      placeholder: FortiOS 7.6.4 build 2731
+    validations:
+      required: true
+  - type: input
+    id: gateshift-version
+    attributes:
+      label: Gateshift release
+      placeholder: "0.9.0"
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Verbatim error / drop reason / push-report line
+      description: Paste the exact text, unedited. Screenshots of text are worse than text.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the documentation led you to expect
+      description: Which documented behavior does this contradict?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Import from ...
+        2. Enrich / Generate ...
+        3. Push to ...
+    validations:
+      required: false
