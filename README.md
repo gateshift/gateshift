@@ -25,11 +25,20 @@ https://github.com/user-attachments/assets/ba927281-4384-41b8-9002-1399fe66783e
 
 ## Install
 
+**Local machine** - UI on http://127.0.0.1:8080
+
 ```
 git clone https://github.com/gateshift/gateshift.git
 cd gateshift
-./install.sh      # UI on http://127.0.0.1:8080
-                  # remote server? ./install.sh --bind 0.0.0.0
+./install.sh
+```
+
+**Remote server** - UI on http://<server-address>:8080
+
+```
+git clone https://github.com/gateshift/gateshift.git
+cd gateshift
+./install.sh --bind 0.0.0.0
 ```
 
 The installer checks the prerequisites, generates strong random credentials
