@@ -8,11 +8,6 @@ Built to make firewall migration and optimization projects easier, faster and mo
 
 https://github.com/user-attachments/assets/ba927281-4384-41b8-9002-1399fe66783e
 
-A complete Check Point to Palo Alto Networks (Panorama) migration, narrated and start to finish, on YouTube:
-
-- [Part 1 - Import and enrichment](https://youtu.be/LYKX6bk2_as)
-- [Part 2 - Push and verification](https://youtu.be/M-ZO3mGTqKQ)
-
 ## What it can do
 
 - Migrate firewall configurations between different vendors and deployment models: standalones / clusters / unmanaged / managed (Enterprise Edition) - hardware / virtual / cloud alike.
