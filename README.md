@@ -2,14 +2,16 @@
 
 **The firewall migration tool.**
 
-Built to make firewall migration and optimization projects easier, faster and more predictable.
+Built to make firewall migration and optimization projects easier, faster and safer.
 
-## Demo
+## See it in action
 
-Demo migrations, start to finish, on YouTube:
+Complete migrations, start to finish, on YouTube:
 
-- Check Point to Palo Alto Networks (Panorama): [Part 1 - Import and enrichment](https://youtu.be/LYKX6bk2_as) / [Part 2 - Push and verification](https://youtu.be/M-ZO3mGTqKQ)
+- [Check Point to Palo Alto Networks (Panorama): Part 1 - Import and enrichment](https://youtu.be/LYKX6bk2_as)
+- [Check Point to Palo Alto Networks (Panorama): Part 2 - Push and verification](https://youtu.be/M-ZO3mGTqKQ)
 - [Palo Alto Networks to FortiGate - single firewalls](https://youtu.be/vA38rwWIaUA)
+- [FortiGate to Check Point - single firewalls](https://youtu.be/1o4KdD5kzVI)
 
 ## What it can do
 
