@@ -149,4 +149,4 @@ Direction, not commitment - entries carry no dates, and feature requests feed th
 
 ## Status
 
-Version 0.9.0 - feature-complete and verified against live appliances across the full cross-vendor matrix. Gateshift remains a private project in active development, not intended for production use; work against lab appliances, not production systems (see the liability section above).
+Version 0.9.2 - feature-complete and verified against live appliances across the full cross-vendor matrix. Gateshift remains a private project in active development, not intended for production use; work against lab appliances, not production systems (see the liability section above).
