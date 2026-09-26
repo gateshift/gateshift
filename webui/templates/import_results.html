@@ -92,12 +92,12 @@
     'zone':          'Zones'
   } %}
   {% for otype, cnt in object_counts.items() %}
-  <span class="tag" style="padding:4px 10px;font-size:11.5px;">
+  <span class="tag" style="padding:4px 10px;font-size:12px;">
     <span style="color:var(--tx);font-weight:600;">{{ cnt }}</span>
     <span style="color:var(--tx2);margin-left:4px;">{{ type_labels.get(otype, otype) }}</span>
   </span>
   {% endfor %}
-  <span class="tag" style="padding:4px 10px;font-size:11.5px;">
+  <span class="tag" style="padding:4px 10px;font-size:12px;">
     <span style="color:var(--tx);font-weight:600;">{{ rules | length }}</span>
     <span style="color:var(--tx2);margin-left:4px;">Security rules</span>
   </span>
@@ -145,12 +145,12 @@
     <span style="color:var(--amber);opacity:0.7;margin-left:8px;">- raw retained for future use; not part of the pipeline today</span>
   </summary>
   <div style="padding:0 14px 12px;">
-    <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
+    <table style="width:100%;font-size:12px;border-collapse:collapse;">
       <thead>
         <tr style="color:var(--amber);opacity:0.75;text-transform:uppercase;letter-spacing:0.07em;">
-          <th style="padding:6px 4px;text-align:left;font-size:10.5px;">Field</th>
-          <th style="padding:6px 4px;text-align:right;font-size:10.5px;width:80px;">Rules</th>
-          <th style="padding:6px 4px;text-align:left;font-size:10.5px;">Sample rule names</th>
+          <th style="padding:6px 4px;text-align:left;font-size:11px;">Field</th>
+          <th style="padding:6px 4px;text-align:right;font-size:11px;width:80px;">Rules</th>
+          <th style="padding:6px 4px;text-align:left;font-size:11px;">Sample rule names</th>
         </tr>
       </thead>
       <tbody>

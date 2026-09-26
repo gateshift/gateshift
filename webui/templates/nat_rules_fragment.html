@@ -43,6 +43,46 @@
   {% else %}
 
   {% if _is_enrichment %}
+    {# ── Hide-NAT consolidation toggle (fgt-nat-hide plan). The flag lives
+         on the SOURCE device; whether it takes effect depends on the target
+         (_nat_consolidation_state) - shown here exactly as the deploy will
+         apply it. ── #}
+    {% if nat_consol is defined and nat_consol and nat_rules %}
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:9px 12px;border:1px solid var(--line);background:var(--bg2);">
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tx);white-space:nowrap;{% if not nat_consol.supported %}opacity:.55;cursor:not-allowed;{% else %}cursor:pointer;{% endif %}">
+        <input type="checkbox" id="nat-consolidate-toggle"
+               {% if nat_consol.flag %}checked{% endif %}
+               {% if not nat_consol.supported %}disabled{% endif %}
+               onchange="natConsolidateToggle(this)"
+               style="accent-color:var(--blue);">
+        Consolidate hide-NAT
+      </label>
+      {% if not nat_consol.supported and nat_consol.hint %}
+      <span class="mut" style="font-size:12px;">{{ nat_consol.hint }}</span>
+      {% elif nat_consol.effective %}
+      <span class="mut" style="font-size:12px;">interface-hide rules sharing an egress are shown and pushed as one rule per egress</span>
+      {% else %}
+      <span class="mut" style="font-size:12px;">combines per-policy hide NAT into one rule per egress - sources will then NAT on all outbound traffic, not only flows of the original rules</span>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% if nat_fold_ui %}
+    {# ── Per-policy NAT fold summary (FGT target in policy NAT mode):
+         one line telling the engineer whether the drop list needs review.
+         Same shared resolver as the push. ── #}
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:9px 12px;border:1px solid var(--line);background:var(--bg2);font-size:12px;color:var(--tx);">
+      <span>Target uses per-policy NAT{% if nat_fold_ui.mode_source == 'observed' %} <span class="mut">(detected)</span>{% endif %}:</span>
+      <span>{{ nat_fold_ui.summary.get('folds', 0) }} rule{{ 's' if nat_fold_ui.summary.get('folds', 0) != 1 }} fold into policy NAT flags</span>
+      <span class="mut">&middot;</span>
+      <span>{{ nat_fold_ui.summary.get('vip', 0) }} become VIPs</span>
+      <span class="mut">&middot;</span>
+      <span{% if nat_fold_ui.summary.get('declared', 0) %} style="color:var(--amber,#d4a017);"{% endif %}>{{ nat_fold_ui.summary.get('declared', 0) }} not pushable</span>
+      {% if nat_fold_ui.summary.get('disabled', 0) %}
+      <span class="mut">&middot;</span>
+      <span class="mut">{{ nat_fold_ui.summary.get('disabled', 0) }} disabled</span>
+      {% endif %}
+    </div>
+    {% endif %}
     {# ── Bulk-Apply panel - schema-driven vendor properties. Always
          visible above the table. Apply stays disabled while no row
          is selected. ── #}
@@ -59,6 +99,29 @@
         <button type="button" onclick="natEnrClearSelection()" class="btn ghost sm">Clear selection</button>
       </div>
       <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
+        {% if _nat_zones_relevant is not defined %}{% set _nat_zones_relevant = target_platform in ('panw', 'fortigate') %}{% endif %}
+        {% if _nat_zones_relevant %}
+        {# Zone bulk - writes the same manual overlay the per-row dropdowns
+           use; '- clear -' reverts the selection to derive/imported. #}
+        <div style="display:flex;flex-direction:column;">
+          <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">Source Zone</label>
+          <select data-natenr-zone="src_zone" class="inp" style="font-size:12px;padding:6px 10px;">
+            <option value="">(no change)</option>
+            <option value="__clear__">- clear -</option>
+            <option value="any">any</option>
+            {% for zn in (zone_names or []) %}<option value="{{ zn }}">{{ zn }}</option>{% endfor %}
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;">
+          <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">Destination Zone</label>
+          <select data-natenr-zone="dst_zone" class="inp" style="font-size:12px;padding:6px 10px;">
+            <option value="">(no change)</option>
+            <option value="__clear__">- clear -</option>
+            <option value="any">any</option>
+            {% for zn in (zone_names or []) %}<option value="{{ zn }}">{{ zn }}</option>{% endfor %}
+          </select>
+        </div>
+        {% endif %}
         {% for f in fields %}
         <div style="display:flex;flex-direction:column;">
           <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">{{ f.label }}</label>
@@ -94,7 +157,7 @@
         </div>
         {% endfor %}
         <button type="button" onclick="natEnrBulkApply()" id="nat-enr-bulk-apply-btn" disabled class="btn primary sm">Apply to selection</button>
-        <span id="nat-enr-bulk-status" class="mut" style="font-size:11.5px;"></span>
+        <span id="nat-enr-bulk-status" class="mut" style="font-size:12px;"></span>
       </div>
     </div>
     {% else %}
@@ -182,13 +245,16 @@
         </tr>
         {% endif %}
         {% for n in nat_rules %}
+        {% set _synth = (n.id is none) %}
         <tr data-nat-id="{{ n.id }}"{% if not _is_enrichment %} data-nat-name="{{ n.name }}"{% endif %}
             {% if n.disabled %} style="opacity:0.5;"{% endif %}>
           <td>
+            {% if not _synth %}
             <input type="checkbox" class="nat-row-sel"
                    style="cursor:pointer;accent-color:var(--green);"
                    data-nid="{{ n.id }}" onchange="natRowToggle({{ n.id }}, this.checked, '{{ mode }}')"
                    aria-label="Select {{ n.name }}">
+            {% endif %}
           </td>
           <td class="idx num">{{ n.position }}</td>
           <td style="color:var(--tx);">
@@ -203,11 +269,41 @@
                     onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx)';"
                     title="Click to rename">{{ n.name }}</span>
             {% endif %}
+            {% if (n.properties or {}).get('consolidated') %}
+            <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:10px;text-transform:uppercase;vertical-align:middle;color:var(--blue);border-color:var(--blue-line);"
+                  title="Consolidated from {{ (n.properties or {}).get('member_count') }} interface-hide rules sharing this egress">
+              consolidated
+            </span>
+            {% endif %}
             {% if (n.properties or {}).get('synthesized') %}
             <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:10px;text-transform:uppercase;vertical-align:middle;"
                   title="Synthesized from a Fortinet security policy (policy.nat=enable) - not an explicit NAT-rulebase entry">
               from policy
             </span>
+            {% endif %}
+            {% if _is_enrichment and nat_fold_ui %}
+              {# Per-policy NAT fold preview: this row's fate on the selected
+                 FGT target (policy NAT mode) - same shared resolver as the
+                 push, so the badge is push truth. #}
+              {% set _fate = nat_fold_ui.fates_by_name.get(n.name or '') %}
+              {% if _fate %}
+                {% if _fate.kind == 'folds' %}
+                <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:10px;vertical-align:middle;color:var(--green);border-color:var(--green);"
+                      title="folds into 'nat enable' on: {{ _fate.rules | join(', ') }}">
+                  &rarr; nat enable on {{ _fate.rules[0] }}{% if _fate.rules|length > 1 %} +{{ _fate.rules|length - 1 }}{% endif %}
+                </span>
+                {% elif _fate.kind == 'vip' %}
+                <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:10px;vertical-align:middle;color:var(--blue);border-color:var(--blue-line);"
+                      title="becomes a firewall VIP object on the target (DNAT works the same in both NAT modes)">
+                  &rarr; VIP
+                </span>
+                {% elif _fate.kind == 'declared' %}
+                <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:10px;vertical-align:middle;"
+                      title="{{ _fate.reason }}">
+                  not pushable
+                </span>
+                {% endif %}
+              {% endif %}
             {% endif %}
           </td>
           <td>
@@ -233,44 +329,64 @@
             {% if _nat_zones_relevant %}
             <td style="border-left:1px solid var(--line);">
               {% set _sz = (n.src_zones[0] if n.src_zones else '') %}
+              {% set _sza = (not _sz) and n.derived_src_zones %}
+              {% if _synth %}
+              <span style="font-size:11px;color:{% if _sza %}var(--amber){% else %}var(--tx2){% endif %};">
+                {%- if _sz %}{{ _sz }}{% elif _sza %}{{ n.derived_src_zones[0] }} (auto){% else %}-{% endif -%}
+              </span>
+              {% else %}
               <select onchange="natZoneSet({{ n.id }}, 'src_zone', this.value)" class="inp"
-                      style="font-size:11px;padding:2px 4px;max-width:120px;color:var(--tx2);">
-                <option value="">-</option>
+                      style="font-size:11px;padding:2px 4px;max-width:120px;color:{% if _sza %}var(--amber){% else %}var(--tx2){% endif %};"
+                      {% if _sza %}title="route-derived - pick a zone to override"{% endif %}>
+                {% if _sza %}<option value="" selected>{{ n.derived_src_zones[0] }} (auto)</option>
+                {% else %}<option value="">-</option>{% endif %}
+                <option value="any" {% if _sz == 'any' %}selected{% endif %}>any</option>
                 {% for zn in (zone_names or []) %}
                 <option value="{{ zn }}" {% if zn == _sz %}selected{% endif %}>{{ zn }}</option>
                 {% endfor %}
-                {% if _sz and _sz not in (zone_names or []) %}<option value="{{ _sz }}" selected>{{ _sz }}</option>{% endif %}
+                {% if _sz and _sz != 'any' and _sz not in (zone_names or []) %}<option value="{{ _sz }}" selected>{{ _sz }}</option>{% endif %}
               </select>
+              {% endif %}
             </td>
             {% endif %}
             <td style="{% if not _nat_zones_relevant %}border-left:1px solid var(--line);{% endif %}color:var(--tx2);{% if n.negate_source %}background:var(--red-fill);{% endif %}">
               <div style="display:flex;align-items:center;gap:4px;">
-                {{ nat_negate_btn(n.id, 'source', n.negate_source, n.negate_override_source, target_platform) | safe }}
+                {% if not _synth %}{{ nat_negate_btn(n.id, 'source', n.negate_source, n.negate_override_source, target_platform) | safe }}{% endif %}
                 <span>{{ n.orig_src | join(', ') if n.orig_src else 'any' }}</span>
               </div>
             </td>
             {% if _nat_zones_relevant %}
             <td>
               {% set _dz = (n.dst_zones[0] if n.dst_zones else '') %}
+              {% set _dza = (not _dz) and n.derived_dst_zones %}
+              {% if _synth %}
+              <span style="font-size:11px;color:{% if _dza %}var(--amber){% else %}var(--tx2){% endif %};">
+                {%- if _dz %}{{ _dz }}{% elif _dza %}{{ n.derived_dst_zones[0] }} (auto){% else %}-{% endif -%}
+              </span>
+              {% else %}
               <select onchange="natZoneSet({{ n.id }}, 'dst_zone', this.value)" class="inp"
-                      style="font-size:11px;padding:2px 4px;max-width:120px;color:var(--tx2);">
-                <option value="">-</option>
+                      style="font-size:11px;padding:2px 4px;max-width:120px;color:{% if _dza %}var(--amber){% else %}var(--tx2){% endif %};"
+                      {% if _dza %}title="route-derived - pick a zone to override"{% endif %}>
+                {% if _dza %}<option value="" selected>{{ n.derived_dst_zones[0] }} (auto)</option>
+                {% else %}<option value="">-</option>{% endif %}
+                <option value="any" {% if _dz == 'any' %}selected{% endif %}>any</option>
                 {% for zn in (zone_names or []) %}
                 <option value="{{ zn }}" {% if zn == _dz %}selected{% endif %}>{{ zn }}</option>
                 {% endfor %}
-                {% if _dz and _dz not in (zone_names or []) %}<option value="{{ _dz }}" selected>{{ _dz }}</option>{% endif %}
+                {% if _dz and _dz != 'any' and _dz not in (zone_names or []) %}<option value="{{ _dz }}" selected>{{ _dz }}</option>{% endif %}
               </select>
+              {% endif %}
             </td>
             {% endif %}
             <td style="color:var(--tx2);{% if n.negate_destination %}background:var(--red-fill);{% endif %}">
               <div style="display:flex;align-items:center;gap:4px;">
-                {{ nat_negate_btn(n.id, 'destination', n.negate_destination, n.negate_override_source, target_platform) | safe }}
+                {% if not _synth %}{{ nat_negate_btn(n.id, 'destination', n.negate_destination, n.negate_override_source, target_platform) | safe }}{% endif %}
                 <span>{{ n.orig_dst | join(', ') if n.orig_dst else 'any' }}</span>
               </div>
             </td>
             <td style="color:var(--tx2);{% if n.negate_service %}background:var(--red-fill);{% endif %}">
               <div style="display:flex;align-items:center;gap:4px;">
-                {{ nat_negate_btn(n.id, 'service', n.negate_service, n.negate_override_source, target_platform) | safe }}
+                {% if not _synth %}{{ nat_negate_btn(n.id, 'service', n.negate_service, n.negate_override_source, target_platform) | safe }}{% endif %}
                 <span>{{ n.orig_service | join(', ') if n.orig_service else 'any' }}</span>
               </div>
             </td>
@@ -306,19 +422,19 @@
                Negate pills target-aware; inlined into the cell. #}
             <td style="color:var(--tx2);border-left:1px solid var(--line);{% if n.negate_source %}background:var(--red-fill);{% endif %}">
               <div style="display:flex;align-items:center;gap:4px;">
-                {{ nat_negate_btn(n.id, 'source', n.negate_source, n.negate_override_source, target_platform) | safe }}
+                {% if not _synth %}{{ nat_negate_btn(n.id, 'source', n.negate_source, n.negate_override_source, target_platform) | safe }}{% endif %}
                 <span>{{ n.orig_src | join(', ') if n.orig_src else 'any' }}</span>
               </div>
             </td>
             <td style="color:var(--tx2);{% if n.negate_destination %}background:var(--red-fill);{% endif %}">
               <div style="display:flex;align-items:center;gap:4px;">
-                {{ nat_negate_btn(n.id, 'destination', n.negate_destination, n.negate_override_source, target_platform) | safe }}
+                {% if not _synth %}{{ nat_negate_btn(n.id, 'destination', n.negate_destination, n.negate_override_source, target_platform) | safe }}{% endif %}
                 <span>{{ n.orig_dst | join(', ') if n.orig_dst else 'any' }}</span>
               </div>
             </td>
             <td style="color:var(--tx2);{% if n.negate_service %}background:var(--red-fill);{% endif %}">
               <div style="display:flex;align-items:center;gap:4px;">
-                {{ nat_negate_btn(n.id, 'service', n.negate_service, n.negate_override_source, target_platform) | safe }}
+                {% if not _synth %}{{ nat_negate_btn(n.id, 'service', n.negate_service, n.negate_override_source, target_platform) | safe }}{% endif %}
                 <span>{{ n.orig_service | join(', ') if n.orig_service else 'any' }}</span>
               </div>
             </td>
@@ -396,7 +512,7 @@
             <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end;">
               <button type="button" onclick="natSubmitAdd()" id="nat-add-submit" disabled class="btn primary sm">Add</button>
               <button type="button" onclick="natHideAddRow()" class="btn ghost sm">Cancel</button>
-              <span id="nat-add-err" class="mut" style="color:var(--amber);font-size:11.5px;margin-left:8px;"></span>
+              <span id="nat-add-err" class="mut" style="color:var(--amber);font-size:12px;margin-left:8px;"></span>
             </div>
           </td>
         </tr>
@@ -426,7 +542,7 @@
       </div>
       <button type="button" onclick="natBulkApply()" id="nat-bulk-apply-btn" disabled class="btn primary sm">Apply</button>
       <button type="button" onclick="natBulkDelete()" class="btn danger sm">Delete selection</button>
-      <span id="nat-bulk-status" class="mut" style="font-size:11.5px;"></span>
+      <span id="nat-bulk-status" class="mut" style="font-size:12px;"></span>
     </div>
   </div>
   {% endif %}

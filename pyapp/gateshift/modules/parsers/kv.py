@@ -43,7 +43,7 @@ def _detect_vendor(d: dict) -> str | None:
         return "fortinet"
     if "logid" in d and "vd" in d:
         return "fortinet"
-    # Checkpoint: product field or origin_sic_name
+    # Check Point: product field or origin_sic_name
     if "product" in d or "origin_sic_name" in d:
         return "checkpoint"
     return None
@@ -94,21 +94,21 @@ def _forti_enrich(d: dict, result: dict):
 
 
 def _checkpoint_enrich(d: dict, result: dict):
-    """Extract Checkpoint-specific fields into the normalised result."""
-    # Checkpoint uses src/dst instead of srcip/dstip
+    """Extract Check Point-specific fields into the normalised result."""
+    # Check Point uses src/dst instead of srcip/dstip
     if not result.get("src_ip") and d.get("src"):
         result["src_ip"] = _pack_ip(d["src"])
     if not result.get("dst_ip") and d.get("dst"):
         result["dst_ip"] = _pack_ip(d["dst"])
-    # Checkpoint port field: s_port/service
+    # Check Point port field: s_port/service
     if result.get("dst_port") is None and d.get("service"):
         result["dst_port"] = _port(d["service"])
     if result.get("src_port") is None and d.get("s_port"):
         result["src_port"] = _port(d["s_port"])
-    # Checkpoint interface direction
+    # Check Point interface direction
     if d.get("ifdir"):
         result["direction"] = "in" if d["ifdir"].lower() == "inbound" else "out"
-    # Checkpoint rule number
+    # Check Point rule number
     if not result.get("rule_id") and d.get("rule"):
         result["rule_id"] = d["rule"]
     if not result.get("rule_name") and d.get("rule_name"):

@@ -14,6 +14,7 @@ import ipaddress
 import json
 import logging
 import re
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Iterator
@@ -25,6 +26,8 @@ from .base import (
     DeployDriver,
     DroppedField,
     StepResult,
+    transport_fail_fast,
+    default_rule_disposition,
     expand_multiproto_services,
     register_driver,
 )
@@ -55,6 +58,12 @@ def _safe_pa_name(name: str) -> str:
     s = _PA_NAME_SAFE_RE.sub("-", name or "")
     s = _PA_NAME_LEAD_RE.sub("", s)
     return s[:_PA_NAME_MAX_LEN] or "obj"
+
+
+# PAN-OS refuses security rules carrying the names of its own predefined
+# default rules ("'intrazone-default' is a reserved name"). _gen_rules
+# renames such source rules with a declared drop-note (M-8).
+_PA_RESERVED_RULE_NAMES = frozenset({"intrazone-default", "interzone-default"})
 
 
 # Suppress InsecureRequestWarning for self-signed certs
@@ -554,6 +563,13 @@ def _paf_r_log(rule, ctx):
 
 
 def _paf_r_profile(rule, ctx):
+    # Fallback clones drop security-profile restrictions along with zones and
+    # App-ID: the profile group/individual profiles reference objects that may
+    # not exist on the target (and would otherwise block/deny at inspection).
+    # The fallback rule is a clean port-scoped allow, so it matches when the
+    # main rule's profile/zone/App-ID context does not line up on the target.
+    if ctx["force_fallback"]:
+        return []
     rule_profile_group = (rule.get("profile_group") or "").strip()
     effective_profile_group = rule_profile_group or ctx["legacy_profile_group"]
     individual_pairs = [
@@ -629,6 +645,26 @@ _PA_SCHEDULE_SENTINELS = {"always", "none"}
 def _paf_r_schedule(rule, ctx):
     v = (rule.get("schedule") or "").strip()
     if not v or v.lower() in _PA_SCHEDULE_SENTINELS:
+        return []
+    # Schedule-skip gate: the object renderer declaredly skips schedules it
+    # cannot express (sentinels, monthly, groups, no-interval imports). A
+    # dangling rule ref would hard-fail the whole set ("schedule is not a
+    # valid reference") - and with revert-on-failure that costs the entire
+    # candidate. Strip the ref DECLARED instead; the rule then runs
+    # always-active, which for an allow rule is MORE permissive - hence the
+    # explicit note (same pattern as the CP driver's pushable_schedules).
+    _pushable = ctx.get("pushable_schedules")
+    if _pushable is not None and v not in _pushable:
+        dropped = ctx.get("dropped")
+        if dropped is not None and not ctx.get("force_fallback"):
+            dropped.append(DroppedField(
+                rule_id=ctx.get("rule_id") or "?", field="schedule",
+                reason=f"schedule {v!r} was skipped by the schedule renderer "
+                       "(not representable on this target)",
+                fallback="rule pushed WITHOUT schedule - always-active "
+                         "(more permissive for allow rules; re-create the "
+                         "schedule on the target if needed)",
+            ))
         return []
     return [_el("schedule", v[:31])]
 
@@ -783,6 +819,38 @@ _API_TIMEOUT_BULK = 600
 # stays as-is. Mirrors checkpoint.py's _CONNECT_TIMEOUT.
 _CONNECT_TIMEOUT = 5
 
+# Transport-level retry (mirrors fortinet.py 489dc1b): a box under load may
+# reset the TLS connection or time out on a single call and be fine seconds
+# later - one flaky call must not kill a whole push. API-level errors are
+# never retried here. Idempotency across the panw verbs: set=merge,
+# edit=replace, import=overwrite, delete tolerates not-found, op is used
+# for reads + revert (idempotent); rename carries its own retry-ambiguity
+# handling at the call wrapper.
+_RETRY_BACKOFF = (5, 15, 30, 60, 90)
+
+
+def _post_api_retry(url: str, *, data: dict, headers: dict, timeout,
+                    files=None, params=None):
+    attempt = 0
+    while True:
+        try:
+            return requests.post(url, data=data, headers=headers,
+                                 files=files, params=params,
+                                 verify=False, timeout=timeout)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout):
+            if transport_fail_fast():
+                raise          # interactive path - no push-grade backoff
+            if attempt >= len(_RETRY_BACKOFF):
+                raise
+            logging.warning(
+                "panw push: connection failure on %s (%s) - retrying in %ss",
+                url.split("?")[0],
+                (data or {}).get("action") or (data or {}).get("type") or "-",
+                _RETRY_BACKOFF[attempt])
+            time.sleep(_RETRY_BACKOFF[attempt])
+            attempt += 1
+
 
 def _api_url(device: dict) -> str:
     ip = device.get("mgmt_ip") or "127.0.0.1"
@@ -792,7 +860,7 @@ def _api_url(device: dict) -> str:
 
 def _api_set(base_url: str, api_key: str, xpath: str, element: str) -> str:
     """PAN-OS API: set (merge/create) config at xpath."""
-    resp = requests.post(
+    resp = _post_api_retry(
         f"{base_url}/api/",
         data={
             "type": "config",
@@ -801,7 +869,6 @@ def _api_set(base_url: str, api_key: str, xpath: str, element: str) -> str:
             "element": element,
         },
         headers={"X-PAN-KEY": api_key},
-        verify=False,
         timeout=(_CONNECT_TIMEOUT, _API_TIMEOUT_BULK),
     )
     resp.raise_for_status()
@@ -815,7 +882,7 @@ def _api_set(base_url: str, api_key: str, xpath: str, element: str) -> str:
 def _pa_port_spec(port) -> str:
     """Normalize a port spec to PAN-OS form.
 
-    CheckPoint expresses ports as COMPARISONS ('>1023', '<514', '>=1024'),
+    Check Point expresses ports as COMPARISONS ('>1023', '<514', '>=1024'),
     which PA rejects - it wants a port, a range or a comma list. Translate
     those to explicit ranges (QA finding, CP→PA); 'any' becomes the full
     range, everything else passes through.
@@ -883,10 +950,12 @@ def _panw_set_hint(msg: str) -> str:
     m = (msg or "").lower()
     if ("is not an allowed keyword" in m or "is not a valid reference" in m) \
             and "rulebase" in m:
-        return (" - the target still has rules referencing the zones being "
-                "replaced. Push the Policy strand first (it wipes the target "
-                "rulebase), or clear the rulebase on the target, then re-push "
-                "Network.")
+        # No "push Policy first" advice here anymore: that escape relied on
+        # a FAILED policy push leaving its rulebase wipe behind, which the
+        # revert-on-failure wrapper now undoes by design.
+        return (" - the target still has COMMITTED rules referencing the "
+                "zones being replaced. Clear the conflicting rulebase on "
+                "the target (and commit), then re-push Network.")
     return ""
 
 
@@ -895,7 +964,7 @@ def _api_edit(base_url: str, api_key: str, xpath: str, element: str) -> str:
     member-lists (union) - edit replaces the whole node, which is what a
     field-patch needs so a changed <source>/<service>/… becomes the new value, not
     the union of old+new. (Optimization O-2 field-patch.)"""
-    resp = requests.post(
+    resp = _post_api_retry(
         f"{base_url}/api/",
         data={
             "type": "config",
@@ -904,7 +973,6 @@ def _api_edit(base_url: str, api_key: str, xpath: str, element: str) -> str:
             "element": element,
         },
         headers={"X-PAN-KEY": api_key},
-        verify=False,
         timeout=(_CONNECT_TIMEOUT, _API_TIMEOUT_BULK),
     )
     resp.raise_for_status()
@@ -925,10 +993,10 @@ def _api_import(base_url: str, api_key: str, category: str, cert_name: str,
               "certificate-name": cert_name, "format": fmt, "key": api_key}
     if passphrase is not None:
         params["passphrase"] = passphrase
-    resp = requests.post(
-        f"{base_url}/api/", params=params,
+    resp = _post_api_retry(
+        f"{base_url}/api/", data={}, headers={}, params=params,
         files={"file": ("cert.pem", file_bytes)},
-        verify=False, timeout=(_CONNECT_TIMEOUT, _API_TIMEOUT_BULK),
+        timeout=(_CONNECT_TIMEOUT, _API_TIMEOUT_BULK),
     )
     resp.raise_for_status()
     root = ET.fromstring(resp.text)
@@ -940,7 +1008,7 @@ def _api_import(base_url: str, api_key: str, category: str, cert_name: str,
 
 def _api_delete(base_url: str, api_key: str, xpath: str) -> str:
     """PAN-OS API: delete config at xpath."""
-    resp = requests.post(
+    resp = _post_api_retry(
         f"{base_url}/api/",
         data={
             "type": "config",
@@ -948,7 +1016,6 @@ def _api_delete(base_url: str, api_key: str, xpath: str) -> str:
             "xpath": xpath,
         },
         headers={"X-PAN-KEY": api_key},
-        verify=False,
         timeout=(_CONNECT_TIMEOUT, _API_TIMEOUT_BULK),
     )
     resp.raise_for_status()
@@ -966,7 +1033,7 @@ def _api_delete(base_url: str, api_key: str, xpath: str) -> str:
 def _api_rename(base_url: str, api_key: str, xpath: str, new_name: str) -> str:
     """PAN-OS API: rename the config node at xpath. action=rename updates in-config references to
     the old name, so a device-group / template rename is a single atomic op."""
-    resp = requests.post(
+    resp = _post_api_retry(
         f"{base_url}/api/",
         data={
             "type": "config",
@@ -975,13 +1042,35 @@ def _api_rename(base_url: str, api_key: str, xpath: str, new_name: str) -> str:
             "newname": new_name,
         },
         headers={"X-PAN-KEY": api_key},
-        verify=False,
         timeout=(_CONNECT_TIMEOUT, _API_TIMEOUT_BULK),
     )
     resp.raise_for_status()
     root = ET.fromstring(resp.text)
     if root.attrib.get("status") != "success":
         msg = root.findtext("msg") or root.findtext(".//line") or resp.text[:300]
+        # Retry ambiguity: rename is the one non-idempotent verb. If the
+        # connection dropped AFTER the box applied it, the retried call
+        # fails with not-found on the OLD xpath - check whether the NEW
+        # name is already in place before declaring failure.
+        if "not found" in msg.lower() or "does not exist" in msg.lower():
+            new_xpath = re.sub(r"entry\[@name='[^']*'\](?!.*entry\[@name=)",
+                               f"entry[@name='{new_name}']", xpath)
+            if new_xpath != xpath:
+                try:
+                    chk = _post_api_retry(
+                        f"{base_url}/api/",
+                        data={"type": "config", "action": "get",
+                              "xpath": new_xpath},
+                        headers={"X-PAN-KEY": api_key},
+                        timeout=(_CONNECT_TIMEOUT, 30),
+                    )
+                    cr = ET.fromstring(chk.text)
+                    res = cr.find("result")
+                    if (cr.attrib.get("status") == "success"
+                            and res is not None and len(res)):
+                        return "success"
+                except Exception:
+                    pass
         raise RuntimeError(f"PAN-OS rename failed: {msg}")
     return "success"
 
@@ -991,6 +1080,41 @@ def _api_rename(base_url: str, api_key: str, xpath: str, new_name: str) -> str:
 _DEV   = "/config/devices/entry[@name='localhost.localdomain']"
 _VSYS  = f"{_DEV}/vsys/entry[@name='vsys1']"
 _NET   = f"{_DEV}/network"
+
+
+def _scope_xpath(device: dict, xpath: str) -> str:
+    """Rewrite a firewall-shaped config xpath to a Panorama SCOPE's root.
+
+    No ``pano_scope`` marker on the device dict = identity (the normal
+    firewall case). Otherwise: template/template-stack scopes host the
+    network + vsys(zone) subtrees under their own config/devices root;
+    device-groups host the vsys-shaped policy/object subtrees directly;
+    ``shared`` maps the vsys subtree to /config/shared. Reading a subtree
+    the scope kind does not carry lands on a nonexistent node, which
+    ``_api_get`` already treats as an empty result - honest emptiness,
+    not an error (a device-group has no /network; a template no address
+    objects)."""
+    sc = device.get("pano_scope") or {}
+    stype, name = sc.get("type"), sc.get("name")
+    if not stype or not name:
+        return xpath
+    if stype in ("template", "template-stack"):
+        root = (f"{_DEV}/{stype}/entry[@name='{name}']"
+                "/config/devices/entry[@name='localhost.localdomain']")
+        if xpath.startswith(_VSYS):
+            return root + "/vsys/entry[@name='vsys1']" + xpath[len(_VSYS):]
+        if xpath.startswith(_DEV):
+            return root + xpath[len(_DEV):]
+        return xpath
+    if stype == "device-group":
+        if xpath.startswith(_VSYS):
+            return f"{_DEV}/device-group/entry[@name='{name}']" + xpath[len(_VSYS):]
+        return xpath
+    if stype == "shared":
+        if xpath.startswith(_VSYS):
+            return "/config/shared" + xpath[len(_VSYS):]
+        return xpath
+    return xpath
 
 
 # Direct vs Panorama-managed push: the connection + xpath re-rooting are driver
@@ -1058,16 +1182,23 @@ class PanwDriver(DeployDriver):
     # ── Discover (Verarbeitung-stage input - see project_network_strand.md) ──
 
     def _api_get(self, device: dict, xpath: str) -> ET.Element:
-        """PAN-OS API: get config at xpath. Returns the <result> Element."""
+        """PAN-OS API: get config at xpath. Returns the <result> Element.
+
+        Scope extension point: with a ``pano_scope`` marker on the device
+        dict (injected only by the manager-target discover loader) the
+        firewall-shaped xpath is rewritten to that Panorama scope's config
+        root, so every read-only ``list_target_*`` works unchanged against
+        a scope. Deploy paths load the device without the marker - push
+        xpaths are never rewritten here."""
+        xpath = _scope_xpath(device, xpath)
         base_url = _api_url(device)
         api_key = device.get("api_key") or ""
         if not api_key:
             raise RuntimeError("No API key configured for target")
-        resp = requests.post(
+        resp = _post_api_retry(
             f"{base_url}/api/",
             data={"type": "config", "action": "get", "xpath": xpath},
             headers={"X-PAN-KEY": api_key},
-            verify=False,
             timeout=(_CONNECT_TIMEOUT, 30),
         )
         resp.raise_for_status()
@@ -1079,7 +1210,12 @@ class PanwDriver(DeployDriver):
                 return ET.Element("result")
             detail = root.findtext("msg") or root.findtext(".//line") or resp.text[:300]
             raise RuntimeError(f"PAN-OS get {xpath} failed: {detail}")
-        return root.find("result") or ET.Element("result")
+        # NB: `find(...) or fallback` is WRONG here - an Element holding only
+        # text/CDATA (no child elements, e.g. a system-state op result) is
+        # falsy in ElementTree, so `or` would discard the real result. Test
+        # identity instead.
+        _res = root.find("result")
+        return _res if _res is not None else ET.Element("result")
 
     def _api_op(self, device: dict, cmd: str) -> ET.Element:
         """PAN-OS API: run an op-cmd. Returns the <result> Element.
@@ -1088,15 +1224,18 @@ class PanwDriver(DeployDriver):
         aren't yet present in /network/interface (so the Interface-Mapping
         dropdown can offer unconfigured ports as targets).
         """
+        if device.get("pano_scope"):
+            # A Panorama scope has no hardware of its own - the op would
+            # enumerate the Panorama appliance's ports. Empty, not wrong.
+            return ET.Element("result")
         base_url = _api_url(device)
         api_key = device.get("api_key") or ""
         if not api_key:
             raise RuntimeError("No API key configured for target")
-        resp = requests.post(
+        resp = _post_api_retry(
             f"{base_url}/api/",
             data={"type": "op", "cmd": cmd},
             headers={"X-PAN-KEY": api_key},
-            verify=False,
             timeout=(_CONNECT_TIMEOUT, 30),
         )
         resp.raise_for_status()
@@ -1104,7 +1243,12 @@ class PanwDriver(DeployDriver):
         if root.attrib.get("status") != "success":
             detail = root.findtext("msg") or root.findtext(".//line") or resp.text[:300]
             raise RuntimeError(f"PAN-OS op failed: {detail}")
-        return root.find("result") or ET.Element("result")
+        # NB: `find(...) or fallback` is WRONG here - an Element holding only
+        # text/CDATA (no child elements, e.g. a system-state op result) is
+        # falsy in ElementTree, so `or` would discard the real result. Test
+        # identity instead.
+        _res = root.find("result")
+        return _res if _res is not None else ET.Element("result")
 
     def _resolve_active_node(self, device: dict) -> dict:
         """For an HA pair, return the device dict of the ACTIVE member.
@@ -1300,21 +1444,23 @@ class PanwDriver(DeployDriver):
         # Hardware ports: /network/interface only lists ports that have been
         # added to the layer3 config. The Interface-Mapping dropdown also
         # needs unconfigured-but-physically-present ports so the user can
-        # target them in a push. ``show interface "hardware"`` enumerates
-        # the chassis. Skip silently if op-cmd is unavailable (e.g. CN-series
-        # VM that doesn't expose hardware) - the config-derived list still
-        # works.
+        # target them in a push. `show interface hardware` (and `all`/`logical`)
+        # only return ports that ALREADY carry config, so unconfigured chassis
+        # ports never surface there. The dataplane's physical port list lives
+        # in system-state under sys.s<slot>.p<port>.phy (one line per port,
+        # the same source the GUI reads); slot/port map to ethernet<slot>/<port>.
+        # Skip silently if op-cmd is unavailable (e.g. CN-series VM that doesn't
+        # expose the state) - the config-derived list still works.
         try:
-            hw_result = self._api_op(device, "<show><interface>hardware</interface></show>")
+            state = self._api_op(
+                device,
+                "<show><system><state><filter>sys.s*.p*.phy</filter>"
+                "</state></system></show>")
+            blob = "".join(state.itertext())
             seen = {e["name"] for e in out}
-            hw_root = hw_result.find("hw") or hw_result
-            for entry in hw_root.findall("entry"):
-                hname = (entry.findtext("name") or "").strip()
-                if not hname or hname in seen:
-                    continue
-                # Filter to ethernet*/aeN - skip management / dataplane-internal
-                # interfaces that aren't user-assignable as layer3 targets.
-                if not (hname.startswith("ethernet") or hname.startswith("ae")):
+            for slot, port in re.findall(r"sys\.s(\d+)\.p(\d+)\.phy", blob):
+                hname = f"ethernet{slot}/{port}"
+                if hname in seen:
                     continue
                 out.append({
                     "name": hname,
@@ -1322,6 +1468,7 @@ class PanwDriver(DeployDriver):
                     "ip_addresses": [],
                     "zone": None,
                     "description": None,
+                    "enabled": False,
                 })
                 seen.add(hname)
         except Exception:
@@ -1574,11 +1721,10 @@ class PanwDriver(DeployDriver):
         # and union the names, else shared groups/profiles are invisible to the
         # catalog and look "missing" even though the target has them.
         def _names_at(xpath: str, cat: str) -> list[str]:
-            resp = requests.post(
+            resp = _post_api_retry(
                 f"{base_url}/api/",
                 data={"type": "config", "action": "get", "xpath": xpath},
                 headers={"X-PAN-KEY": api_key},
-                verify=False,
                 timeout=(_CONNECT_TIMEOUT, 30),
             )
             resp.raise_for_status()
@@ -1649,11 +1795,10 @@ class PanwDriver(DeployDriver):
             raise RuntimeError("No API key configured for target")
 
         def _post(data: dict[str, str], label: str) -> ET.Element:
-            resp = requests.post(
+            resp = _post_api_retry(
                 f"{base_url}/api/",
                 data=data,
                 headers={"X-PAN-KEY": api_key},
-                verify=False,
                 timeout=(_CONNECT_TIMEOUT, 120),  # predefined-app dump is ~13 MB
             )
             resp.raise_for_status()
@@ -1743,11 +1888,10 @@ class PanwDriver(DeployDriver):
             raise RuntimeError("No API key configured for target")
 
         def _fetch(xpath: str, scope: str) -> list[dict]:
-            resp = requests.post(
+            resp = _post_api_retry(
                 f"{base_url}/api/",
                 data={"type": "config", "action": "get", "xpath": xpath},
                 headers={"X-PAN-KEY": api_key},
-                verify=False,
                 timeout=(_CONNECT_TIMEOUT, 30),
             )
             resp.raise_for_status()
@@ -1867,6 +2011,7 @@ class PanwDriver(DeployDriver):
         nat_rules: list[dict],
         settings: dict[str, str],
         tp_configs: list[dict] = (),
+        imported_tp: list[dict] = (),  # CP-only source TP rows; ignored here
         nat_vips: list[dict] = (),
         nat_ippools: list[dict] = (),
         tags: list[dict] = (),
@@ -1884,7 +2029,7 @@ class PanwDriver(DeployDriver):
         del active_routes
         # Forti-specific NAT-object scopes - PA has a native NAT-rulebase,
         # so VIPs/IP-Pools aren't a separate concern here. Dropped silently.
-        del tp_configs
+        del tp_configs, imported_tp
         # A Forti VIP is DUAL-purpose: its DNAT is synthesized into a NAT rule,
         # but the VIP NAME is also used as a policy DESTINATION. PA has no VIP
         # object, so materialize each as an address on its external IP - the
@@ -2003,7 +2148,9 @@ class PanwDriver(DeployDriver):
         sections["Service Groups"] = self._gen_service_groups(service_groups)
         sections["Tags"] = self._gen_tag_objects(list(tags or []), dropped)
         sections["URL Categories"] = self._gen_url_categories(list(url_categories or []), dropped)
-        sections["Schedules"] = self._gen_schedules(list(schedules or []), dropped)
+        _pushable_schedules: set[str] = set()
+        sections["Schedules"] = self._gen_schedules(
+            list(schedules or []), dropped, pushable_out=_pushable_schedules)
         # Zone-slot sanitation (invariant I1 for zones): an interface-based
         # SOURCE (FortiGate) lands srcintf/dstintf tokens in the rule/NAT zone
         # slots; a stale or unresolved token would render as a literal zone
@@ -2051,7 +2198,7 @@ class PanwDriver(DeployDriver):
 
         sections["Security Rules"] = self._gen_rules(
             rules, settings, dropped, addr_lookup, svc_lookup, dropped_l3_svcs,
-            _pushable_addrs,
+            _pushable_addrs, pushable_schedules=_pushable_schedules,
         )
         _ext_zone = next((str(z.get("name") or z.get("zone_name") or "")
                           for z in (zones or [])
@@ -2268,7 +2415,7 @@ class PanwDriver(DeployDriver):
 
         PAN-OS tunnel interfaces are ALWAYS units of the `tunnel` container
         (tunnel.1, tunnel.2, …); FortiOS names them after the phase1
-        ('gfgt-s2s-1'), CheckPoint has no tunnel iface at all. Without this
+        ('gfgt-s2s-1'), Check Point has no tunnel iface at all. Without this
         map the interface renderer drops the odd name and the ipsec-tunnel
         that references it fails with "tunnel-interface is not a valid
         reference" (QA finding, Forti→PA). Counterpart of fortinet's
@@ -2859,7 +3006,8 @@ class PanwDriver(DeployDriver):
         return weekly, daily, non_rec, bad
 
     def _gen_schedules(self, schedules: list[dict],
-                        dropped: list[DroppedField] | None = None) -> str:
+                        dropped: list[DroppedField] | None = None,
+                        pushable_out: set[str] | None = None) -> str:
         """Generate PAN-OS <schedule> XML aus agnostic schedule-Object-Dicts.
 
         Schedule cross-vendor V1: prefers value.pa_* slots (lossless
@@ -2911,6 +3059,10 @@ class PanwDriver(DeployDriver):
                         fallback="object skipped at push",
                     ))
                 continue
+            if pushable_out is not None:
+                # SOURCE name - rule refs compare in source form, never the
+                # sanitized/truncated emit form (schedule-skip gate).
+                pushable_out.add(name)
             entry = ET.SubElement(root, "entry", name=name[:31])
             st = ET.SubElement(entry, "schedule-type")
             if weekly or daily:
@@ -2979,16 +3131,18 @@ class PanwDriver(DeployDriver):
                    addr_lookup: dict[str, str],
                    svc_lookup: dict[tuple[str, str], str],
                    dropped_l3_svcs: set[str],
-                   pushable_addrs: set[str] | None = None) -> str:
+                   pushable_addrs: set[str] | None = None,
+                   pushable_schedules: set[str] | None = None) -> str:
         prefix = settings.get("rule_prefix", "Gateshift-")
         legacy_profile_group = settings.get("security_profile_group", "").strip()
         log_fwd = settings.get("log_forwarding", "").strip()
         tag = settings.get("tag", "").strip()
         default_app = settings.get("default_app", "any").strip() or "any"
-        # Fallback ruleset: clone every rule below the main set with zones AND
-        # application forced to 'any'. The concrete service (port) stays - port
-        # boundary preserved, zone + App-ID restrictions fall away. Lets rules
-        # match even when the target's zone topology or App-ID detection differs
+        # Fallback ruleset: clone every rule below the main set with zones,
+        # application AND security profiles stripped. The concrete service
+        # (port) stays - port boundary preserved, while zone + App-ID +
+        # profile restrictions fall away. Lets rules match even when the
+        # target's zone topology, App-ID detection or profile objects differ
         # from the source's. Clones carry a '-fb' name suffix.
         append_fallback = _truthy(settings.get("append_fallback_ruleset", "false"))
 
@@ -2997,6 +3151,19 @@ class PanwDriver(DeployDriver):
 
         def emit_rule(i: int, rule: dict, force_fallback: bool, name_suffix: str = "") -> None:
             rule_id = str(rule.get("rule_name") or rule.get("id") or f"#{i+1}")
+            # Default-policy fidelity (deploy.base.default_rule_disposition):
+            # a pristine default matching PA's own built-ins is skipped
+            # (declared once, on the original pass); modified ones render as
+            # explicit rules incl. their rule-type below.
+            _disp, _dnote = default_rule_disposition(rule, "panw")
+            if _disp in ("skip", "drop"):
+                if not force_fallback:
+                    dropped.append(DroppedField(
+                        rule_id=rule_id, field="default_rule",
+                        reason=_dnote,
+                        fallback=("not pushed" if _disp == "skip" else "dropped"),
+                    ))
+                return
             if not force_fallback:
                 # Only flag dropped fields once (on the original pass).
                 for fld in _UNSUPPORTED_RULE_FIELDS:
@@ -3009,6 +3176,20 @@ class PanwDriver(DeployDriver):
             rule_name = _safe_pa_name(rule.get("rule_name") or f"{prefix}{i+1:03d}")
             if name_suffix:
                 rule_name = _safe_pa_name(f"{rule_name}{name_suffix}")
+            # PAN-OS reserves its default-rule names. A SOURCE rule can
+            # legitimately carry one - PA defaults that travelled through
+            # another vendor re-import as ordinary rules (matrix finding
+            # M-8, CP->PA) - and the whole rulebase set then fails with
+            # "'intrazone-default' is a reserved name". Rename declared;
+            # the rule's content pushes unchanged.
+            if rule_name in _PA_RESERVED_RULE_NAMES:
+                _renamed = _safe_pa_name(f"{rule_name}-src")
+                dropped.append(DroppedField(
+                    rule_id=rule_id, field="rule_name",
+                    reason=f"{rule_name!r} is a reserved rule name on PAN-OS",
+                    fallback=f"renamed to {_renamed!r}",
+                ))
+                rule_name = _renamed
             base = rule_name
             if base in seen_names:
                 seen_names[base] += 1
@@ -3018,6 +3199,13 @@ class PanwDriver(DeployDriver):
             if rule_name not in seen_names:
                 seen_names[rule_name] = 0
             entry = ET.SubElement(root, "entry", name=rule_name)
+            # rule-type fidelity: intrazone/interzone-typed source rules
+            # (captured at import in raw_extras.rule_type, exposed by the
+            # loader as pa_rule_type) previously pushed as 'universal' -
+            # a silent semantic change. Emit the element when non-default.
+            _rtype = (rule.get("pa_rule_type") or "").strip().lower()
+            if _rtype in ("intrazone", "interzone"):
+                ET.SubElement(entry, "rule-type").text = _rtype
             ctx = {
                 "force_fallback": force_fallback, "rule_id": rule_id,
                 "default_app": default_app, "tag": tag, "log_fwd": log_fwd,
@@ -3025,6 +3213,7 @@ class PanwDriver(DeployDriver):
                 "addr_lookup": addr_lookup, "svc_lookup": svc_lookup,
                 "dropped_l3_svcs": dropped_l3_svcs, "dropped": dropped,
                 "pushable_addrs": pushable_addrs,
+                "pushable_schedules": pushable_schedules,
             }
             _prepare_rule_render(rule, ctx)
             for _build in _PA_RULE_FIELDS:
@@ -3097,7 +3286,7 @@ class PanwDriver(DeployDriver):
             _member_list(from_el, n.get("src_zones") or ["any"])
 
             # PAN-OS NAT <to> takes a REAL zone - unlike a security rule it
-            # rejects 'any'. Sources without a NAT destination zone (CheckPoint
+            # rejects 'any'. Sources without a NAT destination zone (Check Point
             # models NAT zone-free) fall back to the zone flagged external,
             # which is the egress a SNAT/DNAT actually targets (QA finding).
             _dz = [z for z in (n.get("dst_zones") or []) if z and z != "any"]
@@ -3677,17 +3866,24 @@ class PanwDriver(DeployDriver):
     # Strand assigns the step to either the Policy or the Network push.
     # Zones moved to 'network' per Migration-Note #1 - Network-Strang owns
     # zone definition + interface binding + zone-object push.
+    # Rulebase deletes target the PARENT node (rulebase/security, not
+    # .../rules): deleting only the rules child leaves an EMPTY container
+    # (<decryption/>) behind, which PAN-OS accepts at commit but refuses
+    # to load back - 'revert config' then fails with "Schema verification
+    # failed: rulebase -> decryption is missing 'rules'" exactly when
+    # revert-on-failure needs it (matrix finding M-9, CP->PA). An absent
+    # node is the valid fresh-box state; the set phase recreates the path.
     _PUSH_STEPS = [
-        ("Security Rules",  f"{_VSYS}/rulebase/security/rules", f"{_VSYS}/rulebase/security", "Security Rules",  "policy"),
-        ("NAT Rules",       f"{_VSYS}/rulebase/nat/rules",      f"{_VSYS}/rulebase/nat",      "NAT Rules",       "policy"),
+        ("Security Rules",  f"{_VSYS}/rulebase/security",       f"{_VSYS}/rulebase/security", "Security Rules",  "policy"),
+        ("NAT Rules",       f"{_VSYS}/rulebase/nat",            f"{_VSYS}/rulebase/nat",      "NAT Rules",       "policy"),
         # PBF + Decryption are <rulebase>s that REFERENCE address/service objects (source/dest/
         # service), so they must push AFTER objects+groups exist. Push-phase is bottom-up over this
         # list → keeping them HIGH (with Security/NAT) pushes them LATE (post-objects) and deletes
         # them EARLY (pre-objects). Their agnostic rule is edited in other tabs, but the push rides
         # the policy strand. (Phase 3/5). Prior position (bottom, near network) pushed them BEFORE
         # objects → a wipe+set / fresh-scope push failed on 'object is not an allowed keyword'.
-        ("PBF Rules",       f"{_VSYS}/rulebase/pbf/rules",      f"{_VSYS}/rulebase/pbf",       "PBF Rules",      "policy"),
-        ("Decryption Rules", f"{_VSYS}/rulebase/decryption/rules", f"{_VSYS}/rulebase/decryption", "Decryption Rules", "policy"),
+        ("PBF Rules",       f"{_VSYS}/rulebase/pbf",            f"{_VSYS}/rulebase/pbf",       "PBF Rules",      "policy"),
+        ("Decryption Rules", f"{_VSYS}/rulebase/decryption",    f"{_VSYS}/rulebase/decryption", "Decryption Rules", "policy"),
         ("Address Groups",  f"{_VSYS}/address-group",           f"{_VSYS}",                    "Address Groups", "policy"),
         ("Service Groups",  f"{_VSYS}/service-group",           f"{_VSYS}",                    "Service Groups", "policy"),
         ("Address Objects", f"{_VSYS}/address",                 f"{_VSYS}",                    "Address Objects","policy"),
@@ -3770,7 +3966,107 @@ class PanwDriver(DeployDriver):
         device-group / template."""
         return xpath
 
+    # Steps whose names start with these prefixes MODIFY the target's
+    # candidate config (the delete-/set-phase naming convention of
+    # _push_impl). The revert-on-failure wrapper arms itself on the first
+    # such step: a failure BEFORE any modifying step must NOT revert -
+    # PAN-OS only offers a whole-candidate revert, and discarding an
+    # operator's unrelated pending edits over an auth/validate failure
+    # would be worse than doing nothing.
+    _MODIFYING_STEP_PREFIXES = ("Delete ", "Push ")
+
     def push(
+        self,
+        *,
+        device: dict,
+        config: dict[str, str],
+        strand: str = "policy",
+        skip_sections: set[str] | None = None,
+        mgmt_override: bool = False,
+        vpn_certs: dict | None = None,
+        merge: bool = False,
+    ) -> Iterator[StepResult]:
+        """Revert-on-failure wrapper around _push_impl (the CP analog is the
+        driver's discard-session in its finally): a push that dies mid-way
+        leaves the candidate PARTIALLY wiped - the wholesale node-deletes
+        bypass PAN-OS' reference checks, so every follow-up push fails on
+        cryptic dangling-reference errors ("'X' is not a valid reference")
+        until someone reverts by hand. After the modify phase has begun, any
+        failed step (or exception out of the impl) triggers an op
+        'revert config' and reports it as an extra push-log step. Success
+        never reverts - a completed push intentionally leaves the candidate
+        uncommitted for the operator's commit.
+
+        V1 scope: direct-firewall targets only. A Panorama candidate is
+        shared across device-groups/admins, so a whole-candidate revert is
+        too broad there (partial-by-admin revert = follow-up)."""
+        armed = False
+        failed = False
+        inner = self._push_impl(
+            device=device, config=config, strand=strand,
+            skip_sections=skip_sections, mgmt_override=mgmt_override,
+            vpn_certs=vpn_certs, merge=merge)
+        try:
+            for result in inner:
+                if result.step.startswith(self._MODIFYING_STEP_PREFIXES):
+                    armed = True
+                if not result.success:
+                    failed = True
+                yield result
+        except Exception as e:
+            # Surface as a failed step instead of re-raising: the worker
+            # marks the job failed either way, and returning normally lets
+            # the revert step below still reach the push log.
+            failed = True
+            yield StepResult(step="push", success=False,
+                             detail=f"push aborted: {e}")
+        finally:
+            inner.close()
+        if failed and armed and not self._deploy_ctx(device)["panorama"]:
+            yield self._revert_candidate(device)
+
+    def _revert_candidate(self, device: dict) -> StepResult:
+        """op 'revert config' against the target (active HA member), so a
+        failed push leaves a consistent candidate behind. Reported as a
+        non-fatal step either way - the original push failure stays the
+        primary error."""
+        try:
+            device = self._resolve_active_node(device)
+        except Exception:
+            pass    # revert against the registered node is better than none
+        try:
+            res = self._api_op(device, "<revert><config/></revert>")
+            msg = (res.findtext(".//line") or res.findtext(".//msg") or "").strip()
+            return StepResult(
+                step="revert candidate", success=True,
+                detail="push failed mid-way - reverted the candidate to the "
+                       "running config so follow-up pushes start from a "
+                       f"consistent state ({msg or 'reverted'}). Note: this "
+                       "discards ALL uncommitted candidate changes on the "
+                       "target - including a previously pushed but "
+                       "uncommitted Network strand. If your Network push "
+                       "was not committed yet, push Network again before "
+                       "retrying this strand.")
+        except Exception as e:
+            hint = ""
+            if "schema verification failed" in str(e).lower():
+                # Known cause: an EMPTY rulebase container (e.g. a bare
+                # <decryption/> left by a pre-M-9 wipe) sits in the RUNNING
+                # config - commit accepted it, but revert refuses to load
+                # it back. One successful full push + commit rewrites the
+                # node and clears the condition.
+                hint = (" Known cause: an earlier push left an empty "
+                        "rulebase node in the committed config; a "
+                        "successful full push followed by a commit "
+                        "clears it.")
+            return StepResult(
+                step="revert candidate", success=True,
+                detail=f"could not revert the candidate ({e}) - the target "
+                       "may keep a partially-wiped candidate. Re-run a full "
+                       "push, or revert manually before making other "
+                       f"changes on the device.{hint}")
+
+    def _push_impl(
         self,
         *,
         device: dict,
@@ -3872,6 +4168,146 @@ class PanwDriver(DeployDriver):
                            "trust cert is not configured' - provision the cert "
                            "before committing. Gateshift never migrates key "
                            "material.")
+
+        # ── Target-version crypto normalization ──
+        # DH groups 15/16/21 exist since PAN-OS 10.2; an older target rejects
+        # them at set-time ("dh-group 'group21' is not an allowed keyword"),
+        # aborting the network push at its FIRST set step (crypto pushes
+        # bottom-up before everything else). Downgrade to the nearest
+        # supported group (15/16 → 14, MODP; 21 → 20, ECP) and report -
+        # same downgrade contract as CP Track levels vs missing blades.
+        _CRYPTO_SECTIONS = ("IKE Crypto Profiles", "IPSec Crypto Profiles")
+        _DH_102_ONLY = ("group15", "group16", "group21")
+        if (strand == "network" and not ctx["panorama"]
+                and any(k in _CRYPTO_SECTIONS for _, _, _, k in active)
+                and any(g in (config.get(k) or "")
+                        for k in _CRYPTO_SECTIONS for g in _DH_102_ONLY)):
+            try:
+                _info = self._api_op(
+                    device, "<show><system><info></info></system></show>")
+                _ver = (_info.findtext(".//sw-version") or "").strip()
+                _mm = tuple(int(x) for x in _ver.split(".")[:2])
+            except Exception:
+                _mm = None      # can't read the version → don't rewrite
+            if _mm is not None and _mm < (10, 2):
+                _swaps = {"group15": "group14", "group16": "group14",
+                          "group21": "group20"}
+
+                def _swap_dh(xml_str: str) -> tuple[str, int]:
+                    root = ET.fromstring(f"<r>{xml_str}</r>")
+                    n = 0
+                    for dg in root.iter("dh-group"):
+                        members = dg.findall("member")
+                        if members:
+                            seen: set[str] = set()
+                            out: list[str] = []
+                            for m in members:
+                                v0 = (m.text or "").strip()
+                                v1 = _swaps.get(v0, v0)
+                                if v1 != v0:
+                                    n += 1
+                                if v1 and v1 not in seen:
+                                    seen.add(v1)
+                                    out.append(v1)
+                            for m in members:
+                                dg.remove(m)
+                            for v in out:
+                                ET.SubElement(dg, "member").text = v
+                        else:
+                            v0 = (dg.text or "").strip()
+                            v1 = _swaps.get(v0, v0)
+                            if v1 != v0:
+                                dg.text = v1
+                                n += 1
+                    inner = "".join(
+                        ET.tostring(c, encoding="unicode") for c in root)
+                    return inner, n
+
+                _n_swapped = 0
+                for _k in _CRYPTO_SECTIONS:
+                    if config.get(_k):
+                        _new_xml, _n = _swap_dh(config[_k])
+                        if _n:
+                            config[_k] = _new_xml
+                            _n_swapped += _n
+                if _n_swapped:
+                    yield StepResult(
+                        step="normalize crypto for target version",
+                        success=True,
+                        detail=f"PAN-OS {_ver} supports DH groups 15/16/21 "
+                               f"only from 10.2 - downgraded {_n_swapped} "
+                               "reference(s) (15/16 → 14, 21 → 20)")
+
+        # ── Target-catalog application normalization ──
+        # Cross-vendor sources carry their own app-control names ('Web
+        # Browsing' on Forti); PAN-OS rejects an unknown application at
+        # set-time, aborting the rulebase push. Resolve every rule app-ref
+        # against the target's LIVE catalog: exact match kept, normalized
+        # match (case / space / underscore → dash) rewritten to the catalog
+        # spelling, unresolvable refs pruned + reported (the rule falls back
+        # to its service scope; an emptied list becomes 'any'). Sentinels
+        # ('any', 'application-default') pass through untouched.
+        if (strand == "policy" and not ctx["panorama"]
+                and config.get("Security Rules")
+                and any(k == "Security Rules" for _, _, _, k in active)):
+            try:
+                _cat = self.list_applications(device=device)
+                _app_names = {(e.get("name") or "")
+                              for b in _cat.values() for e in b}
+                _app_names.discard("")
+            except Exception as e:
+                _app_names = None
+                yield StepResult(
+                    step="normalize applications", success=True,
+                    detail=f"could not read the target app catalog ({e}) - "
+                           "application refs pushed verbatim")
+            if _app_names:
+                def _app_key(v: str) -> str:
+                    return v.lower().replace(" ", "-").replace("_", "-")
+                _by_key = {_app_key(n): n for n in _app_names}
+                _renamed = _pruned = 0
+                _gone: list[str] = []
+                _sr_root = ET.fromstring(f"<r>{config['Security Rules']}</r>")
+                for _app_el in _sr_root.iter("application"):
+                    _members = _app_el.findall("member")
+                    if not _members:
+                        continue
+                    _kept: list[str] = []
+                    for _m in _members:
+                        _v = (_m.text or "").strip()
+                        if (not _v or _v in ("any", "application-default")
+                                or _v in _app_names):
+                            if _v:
+                                _kept.append(_v)
+                            continue
+                        _hit = _by_key.get(_app_key(_v))
+                        if _hit:
+                            _kept.append(_hit)
+                            _renamed += 1
+                        else:
+                            _pruned += 1
+                            if len(_gone) < 5 and _v not in _gone:
+                                _gone.append(_v)
+                    _seen: set[str] = set()
+                    _kept = [x for x in _kept
+                             if not (x in _seen or _seen.add(x))]
+                    for _m in _members:
+                        _app_el.remove(_m)
+                    for _v in (_kept or ["any"]):
+                        ET.SubElement(_app_el, "member").text = _v
+                if _renamed or _pruned:
+                    config["Security Rules"] = "".join(
+                        ET.tostring(c, encoding="unicode")
+                        for c in _sr_root)
+                    yield StepResult(
+                        step="normalize applications", success=True,
+                        detail=f"target app catalog: {_renamed} ref(s) "
+                               "renamed to the catalog spelling, "
+                               f"{_pruned} unresolvable ref(s) pruned"
+                               + (f" (e.g. {', '.join(_gone)})" if _gone
+                                  else "")
+                               + " - affected rules fall back to their "
+                                 "service scope")
 
         # ── Delete phase (top-down order) ── skipped in ADDITIVE-MERGE mode: no wipe, so the SET
         # phase below merges the source entries into the dest's EXISTING config (PA set = union; a

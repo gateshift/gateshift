@@ -99,6 +99,10 @@ services:
       # Docker API. This grants the container root-equivalent control of the
       # host's Docker daemon.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Log-capture upload target (Devices > Add device > Log source):
+      # uploaded syslog captures land next to the live-received files, the
+      # ingest reads the same directory through the python sidecar.
+      - ./syslog-ng/logs:/ingest-logs
     command: ["sh", "-c", "tailwindcss -c tailwind.config.js -i ./styles/input.css -o ./static/app.css --minify && uvicorn main:app --host 0.0.0.0 --port 8080"]
 
   syslog:

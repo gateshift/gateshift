@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Iterable, Sequence
 
-# A raw vendor UID that survived import as if it were a name. CheckPoint
+# A raw vendor UID that survived import as if it were a name. Check Point
 # emits these for group members whose object was deleted or isn't visible
 # to the API user; the collector keeps the reference faithfully rather than
 # inventing one. Optional 's_'/'_' prefix: _safe_name() sanitising can add

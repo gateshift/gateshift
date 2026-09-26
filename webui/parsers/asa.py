@@ -1213,7 +1213,7 @@ def parse_routes(text: str) -> dict:
 #   - source static A B + no destination + no svc   → static (1:1)
 #   - source static A B + destination static C D    → static if A==B (pure
 #     dnat with src-match), else dnat (NAT44 with src-rewrite)
-#   - Object-NAT static MAPPED                      → dnat
+#   - Object-NAT static MAPPED                      → static (bidirectional 1:1)
 #   - Object-NAT dynamic …|interface                → snat
 #
 # Position-ordering is parse-order, twice-NAT first, then object-NAT
@@ -1356,7 +1356,14 @@ def _parse_object_nat_child(child: str, drops: dict) -> dict | None:
     mode = toks[2]
     if mode == "static":
         mapped = toks[3]
-        nat_type = "dnat"
+        # Object static NAT is BIDIRECTIONAL 1:1 (the object holds the real
+        # address, `static <MAPPED>` maps it to the public one) - the row
+        # shape below is source-side (orig_src=object, trans_src=mapped), so
+        # the agnostic type is 'static', NOT 'dnat'. Labeling it dnat made
+        # every renderer look for a trans_dst that never existed and drop
+        # the rule as an empty husk (found 2026-09-18; renderers already
+        # carry static paths: CP method=static, Forti VIP, PA static-ip).
+        nat_type = "static"
         trans_src_type = ("interface-address" if mapped == "interface"
                           else "static-ip")
     elif mode == "dynamic":

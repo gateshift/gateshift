@@ -36,7 +36,7 @@ _FORTI_CMDB_PATH = {
     "service": "firewall.service/custom", "service_group": "firewall.service/group",
 }
 
-# Well-known CheckPoint PREDEFINED/system objects that get imported as ordinary
+# Well-known Check Point PREDEFINED/system objects that get imported as ordinary
 # address objects (they pass the read-only import filter) yet are referenced by CP
 # subsystems Gateshift does NOT model (Office Mode, Remote Access, system rules) - and
 # CP does not reliably block deleting them (the Office-Mode pool deletes with only a
@@ -122,7 +122,7 @@ def find_unused_objects(conn, device_id):
         before = len(unused)
         unused = [u for u in unused if u["name"] not in predefined]
         if len(unused) < before:
-            label = "CheckPoint" if platform == "checkpoint" else "FortiOS"
+            label = "Check Point" if platform == "checkpoint" else "FortiOS"
             warnings.append(f"{before - len(unused)} {label} predefined/system "
                             "object(s) withheld from deletion.")
 

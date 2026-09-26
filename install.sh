@@ -28,8 +28,18 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 
 command -v docker >/dev/null 2>&1 \
     || fail "docker is not installed - see https://docs.docker.com/engine/install/"
-docker info >/dev/null 2>&1 \
-    || fail "cannot talk to the Docker daemon - is it running, and may your user use it?"
+# Distinguish "daemon down" from "no permission" - the latter has a concrete
+# fix the user shouldn't have to guess. (Capture instead of piping to grep:
+# pipefail would keep docker's exit status even when grep matches.)
+if ! _docker_info_err="$(docker info 2>&1)"; then
+    if grep -qi 'permission denied' <<<"$_docker_info_err"; then
+        fail "cannot talk to the Docker daemon: permission denied.
+       Run this installer as root, or add your user to the 'docker' group:
+           sudo usermod -aG docker \$USER
+       then log out and back in (group membership needs a fresh session)."
+    fi
+    fail "cannot talk to the Docker daemon - is it running?"
+fi
 docker compose version >/dev/null 2>&1 \
     || fail "the Docker Compose plugin (v2) is missing - see https://docs.docker.com/compose/install/"
 command -v openssl >/dev/null 2>&1 \

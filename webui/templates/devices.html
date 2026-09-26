@@ -50,13 +50,32 @@
   </div>
   {% endif %}
 {% endmacro %}
-{{ flash('ok',   'Collected:',     collected) }}
-{{ flash('bad',  'Collect error:', collect_error) }}
-{{ flash('warn', 'Collect note:',  collect_warning) }}
-{{ flash('bad',  'Import error:',  import_error) }}
-{{ flash('warn', 'Import note:',   import_warning) }}
-{{ flash('ok',   'Imported:',      imported) }}
+{# Import/collect RESULTS live in the Log panel below (one log); the
+   banners that remain are form feedback + navigation notes. #}
+{{ flash('bad',  'Error:',      form_error) }}
+{{ flash('ok',   'Discovered:', discovered) }}
 {{ flash('warn', 'No data:',       no_data ~ ' has nothing imported yet - import config or logs first.' if no_data else '') }}
+
+{# Flash params travel in the URL (deliberate: GET handlers stay read-only).
+   Strip them after the first render so reload/tab-restore/bookmark do not
+   replay a stale banner over a state the DB no longer has. #}
+<script>
+  (function () {
+    try {
+      var u = new URL(window.location.href);
+      var flashParams = ['form_error', 'discovered',
+                         'no_data', 'discover_empty'];
+      var had = false;
+      flashParams.forEach(function (p) {
+        if (u.searchParams.has(p)) { u.searchParams.delete(p); had = true; }
+      });
+      if (had) {
+        var qs = u.searchParams.toString();
+        history.replaceState(null, '', u.pathname + (qs ? '?' + qs : '') + u.hash);
+      }
+    } catch (e) { /* cosmetic - never break the page */ }
+  })();
+</script>
 
 {# ── Device table ── #}
 {% if devices %}
@@ -114,7 +133,7 @@
           }.get(d.platform, 'Unknown') %}
           {# Neutral grey label - the vendor colour lives on the host-name
              button (the action). #}
-          <span style="color:var(--tx2);font-size:12.5px;">{{ _pl_label }}</span>
+          <span style="color:var(--tx2);font-size:12px;">{{ _pl_label }}</span>
           {% if d.managed_hint %}
           {# Direct registration of a MANAGER-managed box - vendor-specific caveat:
              PA: the direct import sees only the LOCAL layer (Panorama-pushed DG policy +
@@ -149,19 +168,19 @@
                  scopes); the hostname enters the device context, the header DG/template dropdowns
                  switch scopes. #}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
-                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Discovering scopes from {{ d.host_name }}…');">
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Discovering scopes from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}">{{ _import_label }}</button>
               </form>
             {% elif d.has_api and d.platform == 'panw' %}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
-                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…');">
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}">{{ _import_label }}</button>
               </form>
             {% elif d.has_api and d.platform == 'checkpoint' %}
               {# import handles all CP kinds: a wizard-pinned gateway reads its package; a plain
                  management server auto-detects an MDS (or SmartCenter) and fans into scopes. #}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
-                    onsubmit="return confirmReimport(this, {{ d.id }}, '{{ 'Discovering scopes' if d.device_kind == 'manager-source' else 'Importing config' }} from {{ d.host_name }}…');">
+                    onsubmit="return confirmReimport(this, {{ d.id }}, '{{ 'Discovering scopes' if d.device_kind == 'manager-source' else 'Importing config' }} from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}"{% if d.cp_import_pkg %} title="package: {{ d.cp_import_pkg }}"{% endif %}>{{ _import_label }}</button>
               </form>
               {% if d.cp_import_pkg and d.cp_is_legacy %}
@@ -172,19 +191,19 @@
               <span class="dash" style="font-style:italic;" title="No Mgmt-API key configured">no API key</span>
             {% elif d.platform == 'asa' %}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
-                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Parsing stored ASA config for {{ d.host_name }}…');">
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Parsing stored ASA config for {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}" title="Re-parse stored running-config (no re-upload)">{{ _import_label }}</button>
               </form>
             {% elif d.has_api and d.platform == 'fortigate' %}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
-                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…');">
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}">{{ _import_label }}</button>
               </form>
             {% elif d.platform == 'fortigate' %}
               <span class="dash" style="font-style:italic;" title="No API key configured">no API key</span>
             {% elif d.has_api and d.platform == 'firepower' %}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
-                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…');">
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}">{{ _import_label }}</button>
               </form>
             {% elif d.platform == 'firepower' %}
@@ -351,6 +370,18 @@
     </tbody>
   </table>
 </div>
+
+{# One log (fw_deploy_jobs): the registry shows the GLOBAL view - imports,
+   collects, generates, pushes, pipeline runs of every device. Rows always
+   name their device; widget shared with the Deploy tab (gs-log.js). #}
+<div style="margin:18px 20px 22px;">
+  <div class="mut" style="font-size:11px;margin-bottom:6px;">Log</div>
+  <div id="push-history-list" style="border:1px solid var(--line);background:var(--bg2);padding:8px 10px;max-height:420px;overflow:auto;font-size:12px;"></div>
+</div>
+<script src="/static/gs-log.js?v={{ static_version or '0' }}"></script>
+<script>document.addEventListener('DOMContentLoaded', function () {
+  if (window.loadPushHistory) loadPushHistory();
+});</script>
 {% else %}
 <div class="empty" style="margin:6px 20px 22px;background:var(--bg1);border:1px solid var(--line);border-radius:0;">
   No devices registered yet.
@@ -382,10 +413,10 @@
           {% for val, label in platform_labels.items() if val not in ('checkpoint', 'opnsense') %}
           <option value="{{ val }}">{{ label }}</option>
           {% endfor %}
-          <option value="checkpoint_gw">Check Point Gateway</option>
+          <option value="checkpoint_gw">Check Point (Single Gateway)</option>
           {# Mgmt/MDS renders in CE too - selecting it there shows the EE hint
              (same conversion message the Panorama/FMG import detection gives). #}
-          <option value="checkpoint">Check Point Mgmt / MDS</option>
+          <option value="checkpoint">Check Point (SMS / MDS)</option>
           <option value="logsource">Log source (OPNsense) - discover from logs</option>
         </select>
       </div>
@@ -394,9 +425,9 @@
          conversion hint the Panorama/FMG import detection gives. #}
       {% if not manager_ui %}
       <div id="cp-ee-hint" class="tag" style="display:none;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:11px;line-height:1.55;">
-        Connecting a Check Point management server (SmartCenter or MDS) as a migration
-        source (domains + policy packages) needs the Enterprise module. A single gateway
-        can be added via the "Check Point Gateway" entry.
+        Connecting a Check Point management server (SmartCenter or MDS) needs the
+        Enterprise module. A single gateway can be added via the
+        "Check Point (Single Gateway)" entry.
       </div>
       {% endif %}
 
@@ -530,6 +561,21 @@
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
           <button type="button" onclick="closeAddModal()" class="btn ghost sm">Cancel</button>
           <button type="submit" class="btn primary sm">Discover from logs</button>
+        </div>
+      </form>
+      {# Capture upload - the UI alternative to copying files into
+         syslog-ng/logs/ by hand. Own multipart form (sibling pattern of
+         the ASA uploader); the endpoint pre-checks the format, places the
+         file next to the live-received logs and runs discover. #}
+      <form method="post" action="/devices/logs/upload" enctype="multipart/form-data"
+            style="display:flex;flex-direction:column;gap:10px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"
+            onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Uploading…';">
+        <div class="mut" style="font-size:11px;">…or upload a syslog capture file - it is placed next to the
+          live-received logs and scanned right away.</div>
+        <input type="file" name="log_file" required accept=".log,.txt,text/plain"
+               class="inp" style="font-size:11px;padding:6px;">
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button type="submit" class="btn primary sm">Upload &amp; discover</button>
         </div>
       </form>
     </div>

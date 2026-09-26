@@ -105,32 +105,31 @@ fail silently - where a limit applies, Gateshift blocks or warns explicitly.
 
 ## Rulebase installation
 
-- **Check Point refuses to install shadowed rules ("Rule X conflicts with
-  Rule Y").** Policy verification rejects a rulebase in which an earlier,
-  broader rule makes later rules unreachable - PAN-OS and FortiOS install
-  such rulebases silently. This surfaces on migrations whose source
+- **Check Point refuses to install conflicting rules ("Rule X conflicts
+  with Rule Y").** Policy verification rejects a rulebase with rule
+  conflicts - fully shadowed rules as well as PARTIAL overlaps where an
+  earlier rule already decides part of a later rule's traffic. PAN-OS
+  and FortiOS install such rulebases silently. This surfaces on migrations whose source
   legitimately contains dead rules: an ASA config concatenates per-interface
   ACLs into one flat rulebase (each ACL's broad permits and deny-all tails
   then shadow the following ACL blocks), and shadowed entries are faithful
   imports - they were equally dead on the source.
-  *Workaround:* disable the flagged rules in the Ruleset (they are
-  unreachable by definition, so this does not change effective behavior
-  within their own block) and push again; verification may report further
-  pairs in a second round. Review cross-ACL fall-through afterwards - with
-  a per-interface deny-all disabled, traffic can reach the following
-  block's rules on the flat rulebase.
+  *Mitigation (built in):* the Ruleset > Security tab has a "Shadowed"
+  filter that finds rules made unreachable by an earlier, broader rule
+  (following the selected target's semantics - Check Point is zoneless),
+  shows who shadows whom, and lets you disable or delete the selection
+  before pushing. Disabling is safe: the rules are unreachable by
+  definition, so effective behavior does not change within their own
+  block. After every Check Point policy publish, Gateshift additionally
+  runs the target's own policy verification and reports the rules Check
+  Point names by name in the push log - that list is the authority for
+  installability and includes the partial-overlap conflicts the
+  Shadowed filter deliberately does not flag. Review cross-ACL fall-through after
+  disabling - with a per-interface deny-all disabled, traffic can reach
+  the following block's rules on the flat rulebase.
 
 ## Rules referencing skipped resources
 
-- **FortiGate target: a zone whose member interfaces are all
-  deploy-skipped is dropped from the push, but rules referencing that
-  zone are still emitted** and fail on the box (error -651) - typical for
-  ASA sources with ACLs on tunnel interfaces (ASA VPN is not parsed, so
-  the tunnel interface can never exist on the target).
-  *Workaround:* push the network strand, then create the zone empty on
-  the FortiGate (a zone without interfaces is valid), then push the
-  policy strand. Creating it before the network push does not work - the
-  push wipes it again.
 - **Interface names are pushed as-is.** A source interface name that is
   invalid on the target platform (for example `eth0` pushed to PAN-OS)
   fails the interface push step. Rename source interfaces to target-valid

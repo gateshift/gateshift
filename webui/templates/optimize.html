@@ -14,7 +14,7 @@
   </div>
   <p class="dash" style="margin:0 0 18px;font-size:13px;line-height:1.5;">
     Gateshift finds objects <b>nothing references</b> (safe to delete), you curate, and it deletes the
-    selected ones - on PAN-OS the <b>candidate</b> config (commit/revert on the box); on CheckPoint
+    selected ones - on PAN-OS the <b>candidate</b> config (commit/revert on the box); on Check Point
     staged in a Mgmt session you <b>Publish or Discard</b> here; on FortiGate deleted <b>LIVE</b> (a
     full-config backup is taken first - FortiOS has no candidate/undo). Each apply re-validates so a
     still-referenced object can never be deleted.
@@ -44,9 +44,9 @@
       </div>
     </div>
 
-    <!-- CheckPoint: staged deletes held on a Mgmt session, pending publish/discard -->
+    <!-- Check Point: staged deletes held on a Mgmt session, pending publish/discard -->
     <div id="pending-wrap" style="display:none;margin-top:16px;padding:14px;border:1px solid var(--green);border-radius:0;background:var(--bg1);">
-      <b>Staged on a CheckPoint session - not live yet</b>
+      <b>Staged on a Check Point session - not live yet</b>
       <div id="pending-list" class="dash" style="font-size:12px;margin:8px 0;line-height:1.5;"></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <button class="btn primary sm" onclick="optResolve('publish')">Publish (commit)</button>
@@ -93,7 +93,7 @@ async function optApply(){
   if(!sel.length){ (window.showToast||alert)('Nothing selected'); return; }
   const isCP = OPT_PLATFORM==='checkpoint', isFG = OPT_PLATFORM==='fortigate';
   const q = isCP
-    ? `Stage delete of ${sel.length} object(s) on a CheckPoint session?\nNothing goes live until you Publish.`
+    ? `Stage delete of ${sel.length} object(s) on a Check Point session?\nNothing goes live until you Publish.`
     : isFG
     ? `Delete ${sel.length} object(s) LIVE on the FortiGate?\nFortiOS has no candidate/undo - a full-config backup is taken first (downloadable). Proceed?`
     : `Delete ${sel.length} object(s) on the CANDIDATE config?\n(reversible - commit or revert on the box)`;
@@ -130,7 +130,7 @@ async function optApply(){
     setTimeout(optAnalyze, 600);
   }
 }
-async function optResolve(action){   // 'publish' | 'discard' (CheckPoint)
+async function optResolve(action){   // 'publish' | 'discard' (Check Point)
   const ps=document.getElementById('pending-status'); ps.textContent = action==='publish'?'Publishing…':'Discarding…';
   let d;
   try { d = await (await fetch(`/optimize/${OPT_DEV}/${action}`,{method:'POST'})).json(); }

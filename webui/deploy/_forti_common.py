@@ -1455,14 +1455,14 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
             p1["interface"] = v["local_interface"]
         else:
             # FortiOS phase1-interface REQUIRES a local egress interface
-            # (errcode -651 "Attribute 'interface' MUST be set"). A CheckPoint
+            # (errcode -651 "Attribute 'interface' MUST be set"). A Check Point
             # source is community-based and carries none, so skip the tunnel
             # with a clear, actionable warning instead of pushing an invalid
             # phase1 - the operator sets it per tunnel in the VPN tab.
             dropped.append(DroppedField(
                 rule_id=name, field="interface",
                 reason="FortiGate phase1 needs a local egress interface; the "
-                       "source carries none (e.g. CheckPoint communities)",
+                       "source carries none (e.g. Check Point communities)",
                 fallback="set the Local IF for this tunnel in the VPN tab"))
             continue
         ptype = v.get("peer_type") or "ip"

@@ -65,6 +65,14 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx); font-family: var(--sans); font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+
+/* Tailwind's text utilities assume a 16px rem base; ours is 12px, which
+   silently rendered text-xs at 9px and text-sm at 10.5px. Pin them to the
+   integer px scale. (html-prefixed: app.css loads later at equal
+   specificity and would win otherwise.) */
+html .text-xs { font-size: 11px; line-height: 1.45; }
+html .text-sm { font-size: 12px; line-height: 1.45; }
+html .text-base { font-size: 13px; line-height: 1.45; }
 #root { min-height: 100vh; }
 .app { min-width: 900px; display: flex; flex-direction: column; min-height: 100vh; }
 ::-webkit-scrollbar { height: 11px; width: 11px; }
@@ -241,8 +249,8 @@ td.num, th.num { text-align: right; }
 
 /* profiles - 10px, tertiary, space-separated text */
 .prof { display: inline-flex; gap: 6px; }
-.pp { font-size: 10px; font-weight: 400; letter-spacing: 0.02em; padding: 0; border-radius: 0; border: none; color: var(--tx3); }
-.pp.on { color: var(--tx2); background: none; }
+.pp { font-size: 10px; font-weight: 400; letter-spacing: 0.02em; padding: 0; border-radius: 0; border: none; color: var(--tx3); opacity: 0.38; }
+.pp.on { color: var(--tx2); background: none; opacity: 1; }
 
 /* status dot - the one place radius survives */
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }

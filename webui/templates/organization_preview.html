@@ -27,7 +27,7 @@
        Hits, Last Seen) + 2 when zones are visible. Used for group-header
        colspan + empty-state. #}
     {% set _ncols = 10 if target_zone_native else 8 %}
-    <div class="mut" style="font-size:11.5px;margin:0 4px 8px;">
+    <div class="mut" style="font-size:12px;margin:0 4px 8px;">
       {{ total | default(0) }} rule{{ 's' if (total | default(0)) != 1 else '' }}
       {% if accumulate %}&middot; accumulated{% endif %}
       {% if group_by != 'device' %} &middot; grouped by {{ group_by | replace('_', ' ') }}{% endif %}
@@ -97,7 +97,7 @@
                 {% else %}
                   <span class="dash">-</span>
                 {% endfor %}
-                {% if _zovr_manual %}<span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);" title="Manual override">M</span>{% endif %}
+                {% if _zovr_manual %}<span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);" title="Manual override">M</span>{% endif %}
               </div>
             </td>
             {% endif %}
@@ -133,7 +133,7 @@
                 {% else %}
                   <span class="dash">-</span>
                 {% endfor %}
-                {% if _zovr_manual %}<span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);" title="Manual override">M</span>{% endif %}
+                {% if _zovr_manual %}<span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);" title="Manual override">M</span>{% endif %}
               </div>
             </td>
             {% endif %}
@@ -199,7 +199,7 @@
   {% if not nat_rules %}
     <div class="empty">No NAT rules for this source device.</div>
   {% else %}
-    <div class="mut" style="font-size:11.5px;margin:0 4px 8px;">
+    <div class="mut" style="font-size:12px;margin:0 4px 8px;">
       {{ nat_rules | length }} NAT rule{% if (nat_rules | length) != 1 %}s{% endif %}
     </div>
     <div class="twrap" style="margin:0 0 12px;max-height:640px;">
@@ -281,7 +281,7 @@
   {% else %}
     {% for section in tp_sections %}
       <div style="margin-bottom:16px;">
-        <div style="display:flex;align-items:baseline;font-size:11.5px;margin-bottom:6px;padding:0 4px;">
+        <div style="display:flex;align-items:baseline;font-size:12px;margin-bottom:6px;padding:0 4px;">
           <span style="color:var(--tx);font-weight:500;">{{ section.layer_name }}</span>
           <span class="mut" style="margin-left:8px;">({{ section.strategy }})</span>
           <span class="mut" style="margin-left:auto;">{{ section.rules | length }} rule{% if (section.rules | length) != 1 %}s{% endif %}</span>
@@ -291,7 +291,7 @@
             Error: {{ section.error }}
           </div>
         {% elif not section.rules %}
-          <div class="dash" style="padding:8px;font-size:11.5px;">No TP-rules generated for this layer.</div>
+          <div class="dash" style="padding:8px;font-size:12px;">No TP-rules generated for this layer.</div>
         {% else %}
           <div class="twrap" style="margin:0;max-height:640px;">
             <table>

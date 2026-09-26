@@ -8,10 +8,9 @@ vendor knobs that don't fit into a top-level column. Mirrors
 `webui/nat_schemas.py` and `webui/zone_schemas.py` - see
 [[feedback_vendor_properties_schema_driven]].
 
-Currently no per-iface vendor properties land here. The infrastructure
-(properties JSON column, schema_for / coerce_value helpers, JSON_MERGE_PATCH
-in /interfaces/<id>/update, toggleIfaceProperty JS) stays so the next
-per-iface vendor knob plugs in as a single SCHEMA entry.
+The infrastructure (properties JSON column, schema_for / coerce_value
+helpers, JSON_MERGE_PATCH in /interfaces/<id>/update, toggleIfaceProperty
+JS) lets each per-iface vendor knob plug in as a single SCHEMA entry.
 """
 
 # Field-type vocabulary (mirrors nat_schemas / zone_schemas):
@@ -20,7 +19,16 @@ per-iface vendor knob plugs in as a single SCHEMA entry.
 #   enum    - pick from fixed `options`
 
 SCHEMA: dict[str, dict] = {
-    "panw":       {"fields": []},
+    "panw": {"fields": [
+        # PAN-OS link mode of the port (deployment mode, not the structural
+        # iface_type): collected from the interface config's mode container
+        # (layer3/layer2/...); sub-interfaces inherit the parent's mode.
+        # Read-back only for now - the PA interface renderer derives layer3
+        # from the IP shape and does not yet consume this slot on push.
+        {"key": "pa_link_mode", "label": "Link Mode", "type": "enum",
+         "options": ["layer3", "layer2", "virtual-wire", "tap",
+                     "ha", "decrypt-mirror", "log-card"]},
+    ]},
     "checkpoint": {"fields": []},
     "fortigate":  {"fields": []},
     "firepower":  {"fields": []},

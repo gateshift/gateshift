@@ -14,9 +14,133 @@ DeployDriver.  The driver is responsible for:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import threading
 from abc import ABC, abstractmethod
 from typing import Any, Iterator
+
+# ── Transport retry context ─────────────────────────────────────
+#
+# The drivers' HTTP helpers retry connection-level failures with a long
+# push-grade backoff (up to minutes total) - right for a push, wrong for an
+# interactive request: a probe/validation/catalog read against a dead box
+# stalled the whole app for the length of the backoff chain (fgt-lab find,
+# 2026-09-22). Interactive entry points wrap driver calls in
+# `fail_fast_transport()`; the helpers consult `transport_fail_fast()` and
+# skip the long backoff for that thread.
+
+_TRANSPORT_CTX = threading.local()
+
+
+@contextlib.contextmanager
+def fail_fast_transport():
+    """Within this context, driver transport helpers fail fast instead of
+    retrying with the push backoff profile. Thread-local, reentrant."""
+    prev = getattr(_TRANSPORT_CTX, "fail_fast", False)
+    _TRANSPORT_CTX.fail_fast = True
+    try:
+        yield
+    finally:
+        _TRANSPORT_CTX.fail_fast = prev
+
+
+def _default_rule_pristine(rule: dict) -> bool:
+    """Is a marked default rule still in its canonical shape (no narrowing,
+    no logging enrichment, enabled)? Only then may it be skipped as
+    'matches the target built-in'. gs-side enrichment (logging/track/
+    schedule/identity/apps) and import-side PA log tweaks
+    (default_rule_log_mods) force the EXPRESS path so the modification
+    actually lands on the target."""
+    def _any(v):
+        vals = [x for x in (v or []) if x and str(x).lower() != "any"]
+        return not vals
+    if rule.get("disabled"):
+        return False
+    if rule.get("default_rule_log_mods"):
+        return False
+    if not (_any(rule.get("sources")) and _any(rule.get("destinations"))
+            and _any(rule.get("services"))):
+        return False
+    if (rule.get("schedule") or rule.get("source_identities")
+            or (rule.get("application") or "").strip() not in ("", "any")
+            or rule.get("negate_source") or rule.get("negate_destination")
+            or rule.get("negate_service")):
+        return False
+    if (rule.get("log_forwarding") or rule.get("log_traffic")
+            or rule.get("log_start") or rule.get("track_type")):
+        return False
+    return True
+
+
+# Effective default split per platform: FGT and PA both ship
+# interzone-deny + intrazone-allow; CP's Cleanup denies everything
+# (zoneless); ASA's implicit deny is per-ACL (intrazone n/a).
+_DENY_DEFAULTS = {"fgt-implicit-deny", "asa-implicit-deny", "pa-interzone"}
+
+
+def default_rule_disposition(rule: dict, target_platform: str):
+    """Classify a marked vendor-default rule for this target.
+
+    Returns (disposition, note): disposition is None (not a default rule -
+    render normally), 'skip' (target enforces the same behavior built-in),
+    'express' (push as an explicit rule so the - possibly modified -
+    behavior lands verbatim) or 'drop' (inexpressible; declared).
+
+    The equivalence table is deliberately conservative: only PRISTINE
+    defaults may be skipped; anything modified is expressed so what you
+    see in Gateshift is what the target enforces.
+    """
+    kind = (rule.get("default_rule_kind") or "").strip()
+    if not kind:
+        return None, ""
+    pristine = _default_rule_pristine(rule)
+    action = (rule.get("action") or "").lower()
+    deny = action in ("deny", "drop", "reject")
+
+    if kind in _DENY_DEFAULTS and deny and pristine:
+        if target_platform == "fortigate":
+            return "skip", ("matches the target's built-in Implicit Deny - "
+                            "not pushed")
+        if target_platform == "checkpoint":
+            return "skip", ("matches the target's Cleanup rule (drop all) - "
+                            "not pushed")
+        if target_platform == "panw":
+            return "skip", ("matches the target's interzone-default (deny) - "
+                            "not pushed")
+    if kind == "cp-cleanup" and deny and pristine:
+        if target_platform == "checkpoint":
+            return "skip", ("target keeps its own Cleanup rule - not pushed "
+                            "twice")
+        # CP denied EVERYTHING (zoneless); FGT/PA defaults allow intrazone -
+        # express an explicit deny-all so the CP semantics land verbatim.
+        return "express", ("expressed explicitly: the source denied all "
+                           "traffic (Cleanup), the target's built-in default "
+                           "allows intrazone")
+    if kind == "pa-intrazone" and action == "allow" and pristine:
+        if target_platform == "panw":
+            return "skip", ("matches the target's intrazone-default (allow) - "
+                            "not pushed")
+        if target_platform == "fortigate":
+            return "skip", ("matches FortiOS zone behavior (intrazone allow "
+                            "by default) - not pushed")
+        if target_platform == "checkpoint":
+            return "drop", ("intrazone-allow is not expressible on a zoneless "
+                            "target - review: traffic between same-zone "
+                            "networks is handled by the rules above / Cleanup")
+    if kind == "pa-intrazone" and target_platform in ("fortigate", "checkpoint"):
+        # modified intrazone default - no generic intrazone rule type there
+        return "drop", ("modified intrazone-default is not expressible on "
+                        "this target - re-create the intent manually "
+                        "(FortiGate: per-zone intrazone flag)")
+    # Everything else (modified deny-defaults, modified pa defaults on PA,
+    # unusual actions): push explicitly so the modification lands.
+    return "express", ("vendor default pushed as an explicit rule so its "
+                       "(modified) behavior lands verbatim")
+
+
+def transport_fail_fast() -> bool:
+    return bool(getattr(_TRANSPORT_CTX, "fail_fast", False))
 
 
 @dataclasses.dataclass

@@ -21,6 +21,7 @@ import ipaddress
 import json
 import logging
 import re
+import time
 import urllib.parse
 from typing import Iterator
 
@@ -32,6 +33,8 @@ from .base import (
     DeployDriver,
     DroppedField,
     StepResult,
+    transport_fail_fast,
+    default_rule_disposition,
     error_hint,
     register_driver,
 )
@@ -435,31 +438,63 @@ def _resp_unwrap(resp) -> dict:
     return body
 
 
+# FortiOS 7.6 on AWS can wedge or crashloop its admin httpsd under rapid
+# config-object creation (seen live 2026-09-13: two fresh 7.6.7 boxes lost
+# mgmt HTTPS mid VPN-phase1 push - connection refused, then TLS resets,
+# while the box itself stayed healthy over SSH). Connection-LEVEL failures
+# are therefore retried with backoff until the daemon respawns; HTTP/API
+# errors are NOT retried, so push semantics stay unchanged (a retried but
+# already-applied POST surfaces as -5 and takes the existing PUT fallback).
+_RETRY_BACKOFF = (5, 15, 30, 60, 90)
+
+
+def _request_retry(method: str, url: str, *, headers: dict, verify: bool,
+                   timeout, data=None):
+    attempt = 0
+    while True:
+        try:
+            return requests.request(method, url, headers=headers, data=data,
+                                    verify=verify, timeout=timeout)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout):
+            if transport_fail_fast():
+                raise          # interactive path - no push-grade backoff
+            if attempt >= len(_RETRY_BACKOFF):
+                raise
+            logging.warning("forti push: connection failure on %s %s - "
+                            "retrying in %ss", method, url.split("?")[0],
+                            _RETRY_BACKOFF[attempt])
+            time.sleep(_RETRY_BACKOFF[attempt])
+            attempt += 1
+
+
 def _post(base: str, token: str, path: str, vdom: str, body: dict, verify: bool) -> dict:
     url = f"{base}{path}?vdom={vdom}"
-    resp = requests.post(url, headers=_api_headers(token),
-                         data=json.dumps(body), verify=verify, timeout=(_CONNECT_TIMEOUT, 30))
+    resp = _request_retry("POST", url, headers=_api_headers(token),
+                          data=json.dumps(body), verify=verify,
+                          timeout=(_CONNECT_TIMEOUT, 30))
     return _resp_unwrap(resp)
 
 
 def _put(base: str, token: str, path: str, vdom: str, body: dict, verify: bool) -> dict:
     url = f"{base}{path}?vdom={vdom}"
-    resp = requests.put(url, headers=_api_headers(token),
-                        data=json.dumps(body), verify=verify, timeout=(_CONNECT_TIMEOUT, 30))
+    resp = _request_retry("PUT", url, headers=_api_headers(token),
+                          data=json.dumps(body), verify=verify,
+                          timeout=(_CONNECT_TIMEOUT, 30))
     return _resp_unwrap(resp)
 
 
 def _delete(base: str, token: str, path: str, vdom: str, verify: bool) -> dict:
     url = f"{base}{path}?vdom={vdom}"
-    resp = requests.delete(url, headers=_api_headers(token),
-                           verify=verify, timeout=(_CONNECT_TIMEOUT, 30))
+    resp = _request_retry("DELETE", url, headers=_api_headers(token),
+                          verify=verify, timeout=(_CONNECT_TIMEOUT, 30))
     return _resp_unwrap(resp)
 
 
 def _list(base: str, token: str, path: str, vdom: str, verify: bool) -> list[dict]:
     url = f"{base}{path}?vdom={vdom}&count=2000"
-    resp = requests.get(url, headers=_api_headers(token),
-                        verify=verify, timeout=(_CONNECT_TIMEOUT, 30))
+    resp = _request_retry("GET", url, headers=_api_headers(token),
+                          verify=verify, timeout=(_CONNECT_TIMEOUT, 30))
     resp.raise_for_status()
     return (resp.json() or {}).get("results") or []
 
@@ -480,6 +515,248 @@ class _PushStep:
     id_field: str
     strand: str
     deletable_types: frozenset[str] | None
+
+
+# ── Per-policy NAT folding (shared by renderer + enrichment preview) ──
+
+def resolve_snat_pool(nat_row: dict, addr_value_lookup: dict,
+                      known_ippools: set[str]) -> dict:
+    """trans_src of a source-NAT row → the FortiOS pool decision, shared by
+    both NAT render modes and the enrichment fold preview.
+
+    Returns {'pool': str|None, 'synth': dict|None, 'error': str|None}:
+      pool  - poolname the policy / central-snat row references
+              (None = hide behind the egress interface IP, no pool)
+      synth - {'name','type','startip','endip'} when the pool object must
+              be created on the target (not an existing source ippool)
+      error - reason when the translation can't be expressed (caller drops)
+
+    Extracted 1:1 from the renderer's NAT loop (B-F2/B-F3; QA findings
+    'core-h-011' - trans_src may be an OBJECT NAME, naive '-'-split broke -
+    and 'core-h-025' - PA/CP dynamic pools need a synthesized overload
+    pool)."""
+    tstype = (nat_row.get("trans_src_type") or "").lower()
+    tsrc = (nat_row.get("trans_src") or "").strip()
+    if tstype == "interface-address" or not tsrc:
+        return {"pool": None, "synth": None, "error": None}
+
+    def _lit_ip(x: str) -> bool:
+        p = x.split(".")
+        return len(p) == 4 and all(q.isdigit() and int(q) <= 255 for q in p)
+
+    def _from_obj(name: str):
+        v = addr_value_lookup.get(name) or {}
+        vt = (v.get("type") or "").lower()
+        if vt in ("ip-netmask", "ipmask"):
+            ip, _, mask = (v.get("value") or "").partition("/")
+            if mask.strip() in ("", "32"):
+                return ip.strip(), ip.strip()
+        elif vt == "ip-range":
+            s, _, e = (v.get("value") or "").partition("-")
+            if s.strip() and e.strip():
+                return s.strip(), e.strip()
+        return None, None
+
+    if tstype == "static-ip":
+        startip, endip = _from_obj(tsrc)
+        if not startip and tsrc not in addr_value_lookup:
+            if "-" in tsrc:
+                s, e = tsrc.split("-", 1)
+                if _lit_ip(s.strip()) and _lit_ip(e.strip()):
+                    startip, endip = s.strip(), e.strip()
+            elif _lit_ip(tsrc):
+                startip = endip = tsrc
+        if not startip:
+            return {"pool": None, "synth": None,
+                    "error": f"static-SNAT trans_src {tsrc!r} doesn't resolve "
+                             "to a host IP or range (subnet/fqdn/unknown "
+                             "object) - rule skipped"}
+        name = _safe_name(f"snatpool-{tsrc}", _LIM_OBJ)
+        synth = None if name in known_ippools else {
+            "name": name, "type": "one-to-one",
+            "startip": startip, "endip": endip}
+        return {"pool": name, "synth": synth, "error": None}
+
+    # dynamic SNAT: a real source ippool, else synth an overload pool from
+    # the address object's value
+    if tsrc in known_ippools:
+        return {"pool": tsrc, "synth": None, "error": None}
+    startip, endip = _from_obj(tsrc)
+    if startip:
+        name = _safe_name(f"snatpool-{tsrc}", _LIM_OBJ)
+        return {"pool": name, "synth": {
+            "name": name, "type": "overload",
+            "startip": startip, "endip": endip}, "error": None}
+    return {"pool": None, "synth": None,
+            "error": f"dynamic-SNAT trans_src {tsrc!r} is neither an ippool "
+                     "nor a resolvable host/range address - rule skipped"}
+
+
+def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
+                    addr_value_lookup: dict,
+                    known_ippools: set[str]) -> dict:
+    """Per-policy NAT mode: which access rule gets ``nat enable`` from which
+    source-NAT intent, and every NAT row's fate. Pure over its inputs - the
+    fortinet renderer AND the enrichment preview call this same code, so
+    what the tabs show is exactly what a push would do.
+
+    Matching (unchanged from the old inline code): permit policy, no
+    negate_source, source-name intersection, src+dst zone overlap ('any'
+    matches everything). NEW: a service check for GENERIC (cross-vendor)
+    intents - the nat flag NATs ALL traffic of the policy, so an intent
+    scoped to specific services only folds when the policy's services are a
+    name-subset of the intent's; otherwise folding would silently WIDEN the
+    NAT and the intent is declared instead. Synthesized FGT intents fold
+    exactly onto their source policy (no service check - they ARE that
+    policy's scope). Conflict rule (unchanged): different pools on one
+    policy → no flag + declared.
+
+    Returns:
+      flags:       {rule_name: {'pool': str|None, 'intents': [names],
+                                'props': dict|None}}
+      conflicts:   {rule_name: [pool refs]}
+      pool_synths: [synth dicts]   # dedup by name, source order
+      fates:       [{'name','nat_hash','ntype','kind','rules','reason'}]
+                    kind ∈ folds | vip | declared | disabled
+    """
+    flags: dict[str, dict] = {}
+    conflicts: dict[str, list] = {}
+    pool_synths: list[dict] = []
+    synth_pool_names: set[str] = set()
+    fates: list[dict] = []
+    cands: dict[str, list[dict]] = {}
+
+    def _fate(n, ntype, kind, rules_l=None, reason=None):
+        fates.append({"name": n.get("name") or "?",
+                      "nat_hash": n.get("nat_hash"),
+                      "ntype": ntype, "kind": kind,
+                      "rules": rules_l or [], "reason": reason})
+
+    def _zov(a, b):
+        sa, sb = set(a or []), set(b or [])
+        return bool(sa & sb) or "any" in sa or "any" in sb
+
+    def _svc_ok(nat_row, rule):
+        ns = {str(s).strip().lower()
+              for s in (nat_row.get("orig_service") or [])
+              if str(s).strip().lower() not in ("", "any", "all")}
+        if not ns:
+            return True
+        ps = {str(s).strip().lower() for s in (rule.get("services") or [])}
+        if not ps or ps & {"any", "all"}:
+            return False    # policy any-service, intent specific → would widen
+        return ps <= ns
+
+    for n in nat_rules or ():
+        props = n.get("properties")
+        if isinstance(props, str):
+            try:
+                props = json.loads(props)
+            except Exception:
+                props = {}
+        props = props or {}
+        ntype = (n.get("nat_type") or "snat").lower()
+
+        if ntype != "snat":
+            if n.get("disabled"):
+                _fate(n, ntype, "disabled")
+            elif (n.get("trans_dst") or "").strip() or ntype == "static":
+                _fate(n, ntype, "vip")
+            else:
+                _fate(n, ntype, "declared",
+                      reason=f"nat_type={ntype!r} without usable translation "
+                             "not pushable to Forti (dest-scoped static / "
+                             "exemption)")
+            continue
+        if props.get("synthesized"):
+            # A DISABLED synth intent still folds: the nat flag is the source
+            # policy's own attribute, and the policy row renders disabled
+            # anyway - keeping the flag means re-enabling the policy behaves
+            # exactly like on the source (round-trip fidelity; the old synth
+            # path did the same).
+            src_name = props.get("source_rule_name") or ""
+            if src_name:
+                cands.setdefault(src_name, []).append({
+                    "intent": n.get("name") or "?",
+                    "pool": props.get("ippool_ref") or None,
+                    "props": props, "exact": True})
+            else:
+                _fate(n, ntype, "declared",
+                      reason="synthesized SNAT without source_rule_name")
+            continue
+
+        if n.get("disabled"):
+            # generic (cross-vendor) intents: a disabled NAT rule never
+            # wires a flag (unchanged from the old inline index).
+            _fate(n, ntype, "disabled")
+            continue
+
+        res = resolve_snat_pool(n, addr_value_lookup, known_ippools)
+        if res["error"]:
+            _fate(n, ntype, "declared", reason=res["error"])
+            continue
+        if res["synth"] and res["synth"]["name"] not in synth_pool_names:
+            synth_pool_names.add(res["synth"]["name"])
+            pool_synths.append(res["synth"])
+        osrc = set(n.get("orig_src") or ["any"])
+        matched = []
+        for r in rules or []:
+            act = (r.get("action") or "permit").lower()
+            if act not in ("permit", "allow", "accept", "pass"):
+                continue
+            if r.get("negate_source"):
+                continue
+            if not (osrc & set(r.get("sources") or [])):
+                continue
+            if not _zov(n.get("src_zones") or ["any"],
+                        r.get("src_zones") or []):
+                continue
+            if not _zov(n.get("dst_zones") or ["any"],
+                        r.get("dst_zones") or []):
+                continue
+            if not _svc_ok(n, r):
+                continue
+            matched.append(r.get("rule_name") or "")
+        if not matched:
+            _fate(n, ntype, "declared",
+                  reason="policy-NAT: source-NAT has no matching outbound "
+                         "policy - set nat=enable on the relevant policy "
+                         "manually")
+            continue
+        for rn in matched:
+            cands.setdefault(rn, []).append({
+                "intent": n.get("name") or "?", "pool": res["pool"],
+                "props": None, "exact": False})
+
+    wired: dict[str, list[str]] = {}
+    for rn, cl in cands.items():
+        pools = {c["pool"] for c in cl}
+        if len(pools) > 1:
+            conflicts[rn] = sorted(str(p) for p in pools)
+            continue
+        exacts = [c for c in cl if c["exact"]]
+        flags[rn] = {"pool": next(iter(pools)),
+                     "intents": [c["intent"] for c in cl],
+                     "props": (exacts[0]["props"] if exacts else None)}
+        for c in cl:
+            wired.setdefault(c["intent"], []).append(rn)
+
+    # second pass in source order: folds vs conflict-only leftovers
+    seen = {f["name"] for f in fates}
+    for n in nat_rules or ():
+        nm = n.get("name") or "?"
+        if nm in seen:
+            continue
+        seen.add(nm)
+        if nm in wired:
+            _fate(n, "snat", "folds", rules_l=wired[nm])
+        else:
+            _fate(n, "snat", "declared",
+                  reason="policy-NAT: matching policies have conflicting "
+                         "SNAT pools - nat not auto-set (set manually)")
+
+    return {"flags": flags, "conflicts": conflicts,
+            "pool_synths": pool_synths, "fates": fates}
 
 
 @register_driver
@@ -550,6 +827,7 @@ class FortinetDriver(DeployDriver):
         nat_rules: list[dict],
         settings: dict[str, str],
         tp_configs: list[dict] = (),
+        imported_tp: list[dict] = (),  # CP-only source TP rows; ignored here
         nat_vips: list[dict] = (),
         nat_ippools: list[dict] = (),
         tags: list[dict] = (),
@@ -567,7 +845,7 @@ class FortinetDriver(DeployDriver):
         del active_routes, routing_mode
         # Tags ignored - FortiGate policies have no tag concept; per-rule
         # tag-fields surface as DroppedField in the rules-loop below.
-        del vrfs, tp_configs, tags
+        del vrfs, tp_configs, imported_tp, tags
 
         sections: dict[str, str] = {}
         dropped: list[DroppedField] = []
@@ -662,6 +940,10 @@ class FortinetDriver(DeployDriver):
         # Zones AND interface names are both valid for srcintf/dstintf.
         iface_names  = {i.get("interface_name") for i in interfaces if i.get("interface_name")}
         valid_ifaces = set(zone_rename.values()) | iface_names | _FORTI_BUILTIN_IFACES
+        # Tunnel-type source ifaces only exist on FortiOS via their F8
+        # phase1 rename - an UNMAPPED one never materializes (B1-1 class).
+        _tunnel_srcs = {i.get("interface_name") for i in interfaces
+                        if (i.get("iface_type") or "").lower() == "tunnel"}
 
         # ── Address Objects ──
         addr_entries: list[dict] = []
@@ -1087,6 +1369,30 @@ class FortinetDriver(DeployDriver):
         sections["Schedules Recurring"] = json.dumps(sched_recurring)
         sections["Schedules Onetime"]   = json.dumps(sched_onetime)
         sections["Schedules Group"]     = json.dumps(sched_group)
+        # Schedule-skip gate: schedules the renderer declaredly skipped
+        # (monthly, empty groups, unknown kinds) must not stay referenced by
+        # policies - FortiOS datasource-checks the name and fails the policy
+        # push (-651). The rule render below falls back to 'always' with a
+        # declared note for refs outside this set (source names - policy
+        # refs compare in source form). 'always'/'none' are built-ins.
+        _pushable_schedules = ({e["name"] for e in sched_recurring}
+                               | {e["name"] for e in sched_onetime}
+                               | {e["name"] for e in sched_group}
+                               | {"always", "none"})
+
+        def _gated_schedule(rule: dict, rule_id: str) -> str:
+            v = (rule.get("schedule") or "").strip() or "always"
+            if v in _pushable_schedules:
+                return v
+            dropped.append(DroppedField(
+                rule_id=rule_id, field="schedule",
+                reason=f"schedule {v!r} was skipped by the schedule renderer "
+                       "(not representable on this target)",
+                fallback="rule pushed WITHOUT schedule - always-active "
+                         "(more permissive for allow rules; re-create the "
+                         "schedule on the target if needed)",
+            ))
+            return "always"
 
         # ── Policy Routes (PBF, Phase 3) - router/policy, network strand.
         # Rendered LATER (after _resolve_addr_ref is defined) so srcaddr/dstaddr
@@ -1143,6 +1449,28 @@ class FortinetDriver(DeployDriver):
             safe = zone_rename[zname]
             members = []
             for m in z.get("interfaces") or []:
+                # Tunnel-type members only exist on FortiOS when a VPN
+                # tunnel creates them (F8 phase1 rename). A tunnel iface
+                # WITHOUT that mapping (e.g. ASA Tunnel1 with no imported
+                # VPN row) never materializes - keeping it fails the whole
+                # zone push with -651 and cascades into every referencing
+                # rule (box-pass B1-1). Omit it declared; the zone still
+                # pushes (empty zones are valid).
+                _src_type = ""
+                for _si in interfaces:
+                    if (_si.get("interface_name") or "").strip() == m:
+                        _src_type = (_si.get("iface_type") or "").lower()
+                        break
+                if _src_type == "tunnel" and _imap(m) == m:
+                    dropped.append(DroppedField(
+                        rule_id=zname, field="zone_member",
+                        reason=f"tunnel iface '{m}' never materializes on "
+                               "FortiOS (no VPN tunnel creates it)",
+                        fallback="member omitted; bind the VPN tunnel "
+                                 "interface to the zone once the VPN is "
+                                 "set up",
+                    ))
+                    continue
                 # Normalize to the Forti-safe iface name (F7 dot-strip + F8
                 # tunnel rename) so the zone member matches the pushed iface.
                 m = _imap(m)
@@ -1155,13 +1483,22 @@ class FortinetDriver(DeployDriver):
                     continue
                 seen_iface_in_zone.add(m)
                 members.append({"interface-name": m})
-            if not members:
+            entry = {"name": safe}
+            if members:
+                entry["interface"] = members
+            else:
+                # Emit the zone EMPTY instead of dropping it (a FortiOS zone
+                # without interfaces is valid - the old drop made every rule
+                # referencing the zone fail at push with -651 whenever all
+                # members were deleted/skipped; ex-KNOWN_LIMITATIONS entry).
+                # Referencing rules are accepted and simply never match until
+                # the zone gets members again.
                 dropped.append(DroppedField(
-                    rule_id=zname, field="zone",
-                    reason="no interface members",
+                    rule_id=zname, field="zone_member",
+                    reason="zone has no pushable interface members",
+                    fallback="zone pushed empty - referencing rules stay "
+                             "inactive until it gets members",
                 ))
-                continue
-            entry = {"name": safe, "interface": members}
             # Vendor-prefixed zone-properties from fw_zones.properties
             # (schema in webui/zone_schemas.py). pa_* slots - if present
             # from a cross-vendor PA→Forti source - are ignored here; the
@@ -1457,7 +1794,6 @@ class FortinetDriver(DeployDriver):
         # synth-DNAT is implicit via VIP-ref in policy.dstaddr (no extra
         # central-snat-map row needed). Anything else is an actual
         # central-snat-map rule.
-        synth_snat_by_policy: dict[str, dict] = {}
         csnat_entries: list[dict] = []
 
         # ── B-3: cross-vendor dest-NAT → Forti VIP (+ dstaddr auto-wire below) ──
@@ -1468,9 +1804,23 @@ class FortinetDriver(DeployDriver):
         addr_value_lookup = {o.get("name"): (o.get("value") or {}) for o in address_objects}
         svc_value_lookup  = {o.get("name"): (o.get("value") or {}) for o in service_objects}
         dnat_index: dict[str, list[dict]] = {}   # orig_dst name → [{vip, proto, extport}]
-        # policy-NAT mode (B-3 Stufe B): orig_src name → [{pool, src_zones,
-        # dst_zones, name}] for wiring nat=enable+poolname onto matching policies.
-        snat_policy_index: dict[str, list[dict]] = {}
+        # policy-NAT mode (B-3 Stufe B): the shared fold decides which policy
+        # gets nat=enable from which source-NAT intent - the SAME function
+        # the enrichment preview calls (display == push truth). None in
+        # central mode (SNAT renders as central-snat-map rows below).
+        nat_fold = (fold_policy_nat(nat_rules, rules, addr_value_lookup,
+                                    set(ippool_names))
+                    if nat_mode == "policy" else None)
+        if nat_fold is not None:
+            for _psyn in nat_fold["pool_synths"]:
+                if _psyn["name"] not in ippool_names:
+                    ippool_entries.append(dict(_psyn))
+                    ippool_names.add(_psyn["name"])
+            for _fate in nat_fold["fates"]:
+                if _fate["ntype"] == "snat" and _fate["kind"] == "declared":
+                    dropped.append(DroppedField(
+                        rule_id=_fate["name"], field="nat_rule",
+                        reason=_fate["reason"]))
 
         def _host_ip(ref: str) -> str | None:
             """orig_dst → a single host IP for the VIP extip. Resolves an
@@ -1592,18 +1942,16 @@ class FortinetDriver(DeployDriver):
                     props = {}
             props = props or {}
             if props.get("synthesized"):
-                if n.get("nat_type") == "snat":
-                    src_name = props.get("source_rule_name")
-                    if src_name:
-                        synth_snat_by_policy[src_name] = {
-                            "ippool_ref": props.get("ippool_ref"),
-                            # Pass through the full props dict so Phase-D
-                            # vendor-slots (forti_fixedport, forti_natoutbound)
-                            # can be applied to the policy push.
-                            "properties": props,
-                        }
-                # synth-dnat falls through (VIP-ref handles it)
-                continue
+                # synth-SNAT: in policy mode the fold (nat_fold, computed
+                # upfront) wires nat=enable onto its source policy - nothing
+                # to do here. In CENTRAL mode it renders as a central-snat
+                # row like any other SNAT (it carries the resolved
+                # 'iface|ip' egress) - skipping it here lost every
+                # per-policy hide intent on a central-mode target (latent
+                # bug, found 2026-09-19: fgt→fgt central rendered 0 rows).
+                # synth-dnat always skips (VIP-ref handles it).
+                if n.get("nat_type") != "snat" or nat_mode == "policy":
+                    continue
 
             # #1: bidirectional source-static-1:1 (trans_src + static-ip, no
             # dest-condition, pa_bi_directional or ASA-static) → INBOUND VIP,
@@ -1639,97 +1987,27 @@ class FortinetDriver(DeployDriver):
             orig_dst = n.get("orig_dst") or ["any"]
             src_zones = n.get("src_zones") or ["any"]
             dst_zones = n.get("dst_zones") or ["any"]
-            # Source-translation pool - shared by both NAT modes:
-            #   interface-address → None (egress IP); static-ip → synth a
-            #   one-to-one ippool; dynamic/other → reference verbatim. (B-F2/B-F3)
-            tstype = (n.get("trans_src_type") or "").lower()
-            tsrc   = (n.get("trans_src") or "").strip()
-            pool_name = None
-            if tstype == "static-ip" and tsrc:
-                # tsrc is a literal IP/range OR an address-OBJECT NAME (CP/ASA
-                # sources resolve to names - splitting 'core-h-011' on '-'
-                # produced startip='core', QA finding). Resolve the object
-                # first; treat as literal only when it parses as IPv4.
-                def _lit_ip(x: str) -> bool:
-                    p = x.split(".")
-                    return len(p) == 4 and all(q.isdigit() and int(q) <= 255 for q in p)
-                startip = endip = None
-                _v = addr_value_lookup.get(tsrc) or {}
-                _vt = (_v.get("type") or "").lower()
-                if _vt in ("ip-netmask", "ipmask"):
-                    _ip, _, _mask = (_v.get("value") or "").partition("/")
-                    if _mask.strip() in ("", "32"):
-                        startip = endip = _ip.strip()
-                elif _vt == "ip-range":
-                    _s, _, _e = (_v.get("value") or "").partition("-")
-                    if _s.strip() and _e.strip():
-                        startip, endip = _s.strip(), _e.strip()
-                elif tsrc not in addr_value_lookup:
-                    if "-" in tsrc:
-                        _s, _e = tsrc.split("-", 1)
-                        if _lit_ip(_s.strip()) and _lit_ip(_e.strip()):
-                            startip, endip = _s.strip(), _e.strip()
-                    elif _lit_ip(tsrc):
-                        startip = endip = tsrc
-                if not startip:
-                    dropped.append(DroppedField(
-                        rule_id=n.get("name") or "?", field="nat_rule",
-                        reason=f"static-SNAT trans_src {tsrc!r} doesn't resolve to a "
-                               "host IP or range (subnet/fqdn/unknown object) - "
-                               "rule skipped"))
-                    continue
-                pool_name = _safe_name(f"snatpool-{tsrc}", _LIM_OBJ)
-                if pool_name not in ippool_names:
-                    ippool_entries.append({
-                        "name": pool_name, "type": "one-to-one",
-                        "startip": startip, "endip": endip,
-                    })
-                    ippool_names.add(pool_name)
-            elif tstype != "interface-address" and tsrc:
-                # Dynamic SNAT: tsrc is a REAL ippool only for Forti sources -
-                # CP hide-behind / PA dynamic-ip-and-port resolve to an ADDRESS
-                # object name, and the policy's poolname datasource requires an
-                # ippool → synth an overload pool from the address value
-                # (QA finding, 'core-h-025').
-                if tsrc in ippool_names:
-                    pool_name = tsrc
-                else:
-                    _v = addr_value_lookup.get(tsrc) or {}
-                    _vt = (_v.get("type") or "").lower()
-                    startip = endip = None
-                    if _vt in ("ip-netmask", "ipmask"):
-                        _ip, _, _mask = (_v.get("value") or "").partition("/")
-                        if _mask.strip() in ("", "32"):
-                            startip = endip = _ip.strip()
-                    elif _vt == "ip-range":
-                        _s, _, _e = (_v.get("value") or "").partition("-")
-                        if _s.strip() and _e.strip():
-                            startip, endip = _s.strip(), _e.strip()
-                    if startip:
-                        pool_name = _safe_name(f"snatpool-{tsrc}", _LIM_OBJ)
-                        if pool_name not in ippool_names:
-                            ippool_entries.append({
-                                "name": pool_name, "type": "overload",
-                                "startip": startip, "endip": endip,
-                            })
-                            ippool_names.add(pool_name)
-                    else:
-                        dropped.append(DroppedField(
-                            rule_id=n.get("name") or "?", field="nat_rule",
-                            reason=f"dynamic-SNAT trans_src {tsrc!r} is neither an "
-                                   "ippool nor a resolvable host/range address - "
-                                   "rule skipped"))
-                        continue
-
             if nat_mode == "policy":
-                # policy-NAT: no central-snat-map. Record so the rule loop sets
-                # nat=enable (+ poolname) on the matching outbound policy. (B2)
-                if not n.get("disabled"):
-                    for src in orig_src:
-                        snat_policy_index.setdefault(src, []).append({
-                            "pool": pool_name, "src_zones": src_zones,
-                            "dst_zones": dst_zones, "name": n.get("name") or "?"})
+                # policy-NAT: no central-snat-map. nat_fold (computed
+                # upfront, shared with the enrichment preview) already
+                # decided the per-policy wiring, the pool synths and the
+                # declared drops - nothing per-row to do here.
                 continue
+
+            # Source-translation pool via the shared resolver (also used by
+            # fold_policy_nat / the enrichment preview): interface-address →
+            # None (egress IP); static-ip → one-to-one pool; dynamic →
+            # source ippool or a synthesized overload pool. (B-F2/B-F3)
+            _pres = resolve_snat_pool(n, addr_value_lookup, ippool_names)
+            if _pres["error"]:
+                dropped.append(DroppedField(
+                    rule_id=n.get("name") or "?", field="nat_rule",
+                    reason=_pres["error"]))
+                continue
+            pool_name = _pres["pool"]
+            if _pres["synth"]:
+                ippool_entries.append(dict(_pres["synth"]))
+                ippool_names.add(_pres["synth"]["name"])
 
             # central-snat-map mode. Zoned member-ifaces must surface as their
             # zone (same FortiOS constraint as policy srcintf), deduped.
@@ -1827,7 +2105,20 @@ class FortinetDriver(DeployDriver):
             if renamed in iface_to_zone:
                 return iface_to_zone[renamed]
             if renamed in valid_ifaces:
-                return renamed
+                # Emit through the F7/F8 iface map - a raw PA tunnel name
+                # (tunnel.1) passed validation but no such interface ever
+                # exists on the box; the phase1-renamed one does (matrix
+                # finding M-3, -651 at rule push).
+                if renamed in _tunnel_srcs and _imap(renamed) == renamed:
+                    dropped.append(DroppedField(
+                        rule_id=rule_id, field="interface_ref",
+                        reason=f"tunnel iface '{ref}' never materializes on "
+                               "FortiOS (no VPN tunnel creates it) - "
+                               "falling back to 'any'",
+                        fallback="any",
+                    ))
+                    return "any"
+                return _imap(renamed)
             dropped.append(DroppedField(
                 rule_id=rule_id, field="interface_ref",
                 reason=f"'{ref}' not in zones/interfaces - falling back to 'any'",
@@ -1936,7 +2227,6 @@ class FortinetDriver(DeployDriver):
         # matches (portforward VIP → same proto/port; full-IP VIP → any). One
         # rule matching multiple VIPs is ambiguous → leave + warn (Fund U).
         wired_vips: set[str] = set()
-        snat_wired: set[str] = set()   # B2: SNAT-rule names wired onto a policy
 
         def _vip_matches_service(c: dict, rule: dict) -> bool:
             if c["extport"] is None:                 # full-IP VIP → any service
@@ -1964,6 +2254,16 @@ class FortinetDriver(DeployDriver):
         seen_rule_names: dict[str, int] = {}
         for i, rule in enumerate(rules):
             rule_id = str(rule.get("rule_name") or rule.get("id") or f"#{i+1}")
+
+            # Default-policy fidelity (see deploy.base.default_rule_disposition).
+            _disp, _dnote = default_rule_disposition(rule, "fortigate")
+            if _disp in ("skip", "drop"):
+                dropped.append(DroppedField(
+                    rule_id=rule_id, field="default_rule",
+                    reason=_dnote,
+                    fallback=("not pushed" if _disp == "skip" else "dropped"),
+                ))
+                continue
 
             for fld in _UNSUPPORTED_RULE_FIELDS:
                 if rule.get(fld):
@@ -2052,43 +2352,40 @@ class FortinetDriver(DeployDriver):
                 "action":    action,
                 # Phase 1b: rule.schedule kommt aus rules_query COALESCE
                 # (schovr.schedule_name, r.schedule). NULL = 'always'
-                # (Forti default).
-                "schedule":  (rule.get("schedule") or "").strip() or "always",
+                # (Forti default). Schedule-skip gate: a ref to a schedule
+                # the renderer skipped falls back to 'always' DECLARED
+                # (below) instead of failing the policy push.
+                "schedule":  _gated_schedule(rule, rule_id),
                 "logtraffic": rule_log_traffic,
                 "nat":       "disable",
                 "status":    "disable" if rule.get("disabled") else "enable",
                 "comments":  comments,
             }
-            # B2: policy-NAT mode - wire SNAT onto this policy when one of its
-            # sources matches a source-NAT rule (src-zone overlap). nat=enable
-            # (+ poolname for static-ip/pool; interface-address → egress IP).
-            # Ambiguous (different pools) → leave + warn.
-            _act = (rule.get("action") or "permit").lower()
-            if (nat_mode == "policy" and snat_policy_index
-                    and _act in ("permit", "allow", "accept", "pass")
-                    and not rule.get("negate_source")):
-                _rz = set(rule.get("src_zones") or [])
-                _dz = set(rule.get("dst_zones") or [])
-                def _zov(a, b):
-                    return bool(set(a) & b) or "any" in a or "any" in b
-                _matches = [c for s in (rule.get("sources") or [])
-                            for c in snat_policy_index.get(s, [])
-                            if _zov(c["src_zones"], _rz) and _zov(c["dst_zones"], _dz)]
-                if _matches:
-                    _pools = {c["pool"] for c in _matches}
-                    if len(_pools) == 1:
-                        entry["nat"] = "enable"
-                        _p = next(iter(_pools))
-                        if _p:
-                            entry["ippool"] = "enable"
-                            entry["poolname"] = [{"name": _p}]
-                        for c in _matches:
-                            snat_wired.add(c["name"])
-                    else:
-                        dropped.append(DroppedField(
-                            rule_id=rule_name, field="nat",
-                            reason=f"policy-NAT: {len(_pools)} different SNAT pools match this "
-                                   "policy's source - ambiguous, nat not auto-set (set manually)"))
+            # B2: policy-NAT mode - the shared fold (nat_fold) decided which
+            # policy gets nat=enable from which source-NAT intent (generic
+            # matching AND synthesized FGT intents; the enrichment preview
+            # shows the same result). Conflicting pools → no flag + warn.
+            if nat_mode == "policy" and nat_fold is not None:
+                _rn_key = rule.get("rule_name") or ""
+                _flag = nat_fold["flags"].get(_rn_key)
+                if _flag:
+                    entry["nat"] = "enable"
+                    if _flag["pool"]:
+                        entry["ippool"] = "enable"
+                        entry["poolname"] = [{"name": _flag["pool"]}]
+                    _sp = _flag.get("props") or {}
+                    # Phase-D vendor-slots on a synth-SNAT row carry over to
+                    # the policy push (fixedport = keep source port).
+                    if _sp.get("forti_fixedport"):
+                        entry["fixedport"] = "enable"
+                    if _sp.get("forti_natoutbound"):
+                        entry["natoutbound"] = "enable"
+                elif _rn_key in nat_fold["conflicts"]:
+                    _np = len(nat_fold["conflicts"][_rn_key])
+                    dropped.append(DroppedField(
+                        rule_id=rule_name, field="nat",
+                        reason=f"policy-NAT: {_np} different SNAT pools match this "
+                               "policy's source - ambiguous, nat not auto-set (set manually)"))
             # Per-rule negate flags - FortiOS expects "enable"/"disable" strings
             # (V0 lab-probe). Default disable; only flip when override-resolved
             # rule.negate_* is truthy.
@@ -2123,26 +2420,8 @@ class FortinetDriver(DeployDriver):
             if iden_groups:
                 entry["groups"] = iden_groups
 
-            # Phase-B4: a synth-SNAT NAT-rule for this policy flips nat=enable
-            # (and optionally ippool/poolname). Looked up by source_rule_name
-            # set in main._run_fortigate_import on the synth marker.
-            src_rule_name = rule.get("rule_name") or ""
-            synth_snat = synth_snat_by_policy.get(src_rule_name)
-            if synth_snat:
-                entry["nat"] = "enable"
-                pool_ref = synth_snat.get("ippool_ref")
-                if pool_ref:
-                    entry["ippool"] = "enable"
-                    entry["poolname"] = [{"name": pool_ref}]
-                # Phase-D: nat_schemas forti_* slots on the synth-SNAT row
-                # carry over to the policy push. fixedport is the common
-                # one ("keep source port unchanged"); natoutbound is the
-                # outbound flag, rarely set but supported.
-                synth_props = synth_snat.get("properties") or {}
-                if synth_props.get("forti_fixedport"):
-                    entry["fixedport"] = "enable"
-                if synth_props.get("forti_natoutbound"):
-                    entry["natoutbound"] = "enable"
+            # (Phase-B4 synth-SNAT wiring now happens via nat_fold above -
+            # same exact source_rule_name mapping, one shared code path.)
             if rule_log_traffic != "disable":
                 if rule.get("log_start"):
                     entry["logtraffic-start"] = "enable"
@@ -2184,18 +2463,8 @@ class FortinetDriver(DeployDriver):
                                "set a policy dstaddr to this VIP manually",
                     ))
 
-        # B2 policy-NAT: a source-NAT rule with no matching outbound policy isn't
-        # applied (nat lives on the policy) - surface it.
-        _seen_snat = set()
-        for _cands in snat_policy_index.values():
-            for _c in _cands:
-                if _c["name"] not in snat_wired and _c["name"] not in _seen_snat:
-                    _seen_snat.add(_c["name"])
-                    dropped.append(DroppedField(
-                        rule_id=_c["name"], field="nat_rule",
-                        reason="policy-NAT: source-NAT has no matching outbound policy - "
-                               "set nat=enable on the relevant policy manually",
-                    ))
+        # (policy-NAT leftovers - intents with no matching policy or with
+        # conflicting pools - are declared by nat_fold upfront.)
 
         # ── IPSec VPN (CE plan P3b) ──────────────────────────────────
         # phase1-interface (gateway + IKE crypto inline) + phase2-interface
@@ -2360,6 +2629,60 @@ class FortinetDriver(DeployDriver):
             yield StepResult(step="validate", success=False,
                              detail=f"No {strand}-strand sections with data to push")
             return
+
+        # ── NAT-mode preflight (policy strand) ──
+        # The pushed config was RENDERED for one NAT mode (generate resolved
+        # pin or live-probed the box). gs never flips
+        # system/settings.central-nat itself - that reshapes how every
+        # existing policy NATs and is the operator's call - so if the box
+        # runs the OTHER mode by push time, the sets only fail mid-push
+        # (central-snat-map rejected with central-nat disabled; per-policy
+        # nat flags rejected/ignored in central mode). Infer the rendered
+        # mode from the config itself (central rows → central; any policy
+        # nat=enable → policy; neither → a pin, if set), probe the box and
+        # refuse early on drift. Unreadable setting = fail-open like the
+        # HA probe.
+        if strand == "policy":
+            _rendered = None
+            try:
+                if json.loads(config.get("Central SNAT") or "[]"):
+                    _rendered = "central"
+                elif any((e.get("nat") == "enable")
+                         for e in json.loads(config.get("Rules") or "[]")):
+                    _rendered = "policy"
+            except Exception:
+                _rendered = None
+            if _rendered is None:
+                try:
+                    _pin = ((json.loads(device.get("config") or "{}")
+                             .get("fortigate") or {}).get("nat_mode") or "").lower()
+                except Exception:
+                    _pin = ""
+                if _pin in ("central", "policy"):
+                    _rendered = _pin
+            if _rendered is not None:
+                _live = None
+                try:
+                    _st = _list(base, token, "/system/settings", vdom, verify)
+                    if isinstance(_st, list):
+                        _st = _st[0] if _st else {}
+                    if isinstance(_st, dict) and _st.get("central-nat"):
+                        _live = ("central" if _st["central-nat"] == "enable"
+                                 else "policy")
+                except Exception:
+                    _live = None
+                if _live is not None and _live != _rendered:
+                    yield StepResult(
+                        step="NAT-mode preflight", success=False,
+                        detail=f"this config was rendered for '{_rendered}' "
+                               f"NAT mode, but the target runs in '{_live}' "
+                               "NAT mode (central-nat "
+                               f"{'enabled' if _live == 'central' else 'disabled'}). "
+                               "The NAT sections would be rejected mid-push "
+                               "- re-generate against the current target "
+                               "state (or align the target's NAT mode), "
+                               "then push again.")
+                    return
 
         # ── FGCP cluster awareness ──
         # Read the HA context once: gate on being the PRIMARY (cmdb writes must
@@ -2815,6 +3138,14 @@ class FortinetDriver(DeployDriver):
                 if s.label == "Interfaces" and e.get("type") and "vdom" not in e:
                     e = {**e, "vdom": vdom}
 
+                # Pace VPN object creation: each phase1/phase2 add makes
+                # FortiOS spin up tunnel plumbing, and rapid-fire creates
+                # are exactly what wedged the 7.6.7 admin daemon live
+                # (see _request_retry note). Half a second per entry keeps
+                # the burst survivable; ~50 VPN entries cost ~25s total.
+                if s.label in ("VPN Phase1", "VPN Phase2"):
+                    time.sleep(0.5)
+
                 try:
                     if use_put:
                         _put(base, token, _id_path(s, entry_id), vdom, e, verify)
@@ -2930,6 +3261,10 @@ class FortinetDriver(DeployDriver):
         # would then fail. A connection error right after this PUT is the
         # EXPECTED outcome (the new IP cut our session), not a failure.
         if mgmt_override and strand == "network":
+            # resolve here - _active_steps keeps its own copy since the
+            # skip-sections refactor (found live: NameError on the first
+            # real override push).
+            skip_internal = self._resolve_skip_internal(strand, skip_sections)
             iface_step = next((s for s in self._PUSH_STEPS
                                if s.label == "Interfaces"), None)
             mgmt_entry = None

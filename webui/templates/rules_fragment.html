@@ -30,7 +30,9 @@
   </div>
 
 {% else %}
-  {% if needs_generate %}
+  <script>(function(){var d=document.getElementById('regen-pending-dot');
+  if(d) d.classList.{{ 'remove' if needs_generate else 'add' }}('hidden');})();</script>
+{% if needs_generate %}
   {% if running %}
   <div class="mb-4 flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-950/50 border border-amber-800/60 text-amber-300 text-xs">
     <svg class="w-3.5 h-3.5 flex-shrink-0 animate-spin" viewBox="0 0 24 24" fill="none">
@@ -47,11 +49,19 @@
   <script>
     // Auto-trigger the pipeline ONCE per page load; the red button stays as
     // the fallback (a failed run would otherwise loop - see the re-heal
-    // warning at main.py's needs_generate handling).
-    if (!window._autoRegenFired && typeof startRun === 'function') {
-      window._autoRegenFired = true;
-      startRun('generate');
-    }
+    // warning at main.py's needs_generate handling). On the Objects and
+    // Network tabs the auto-fire is SUPPRESSED - cleanup flows (object
+    // deletes, zone mapping) batch there; the pending dot marks the state
+    // and switching to a rules-dependent tab re-triggers this render.
+    (function() {
+      var _tab = '';
+      try { _tab = localStorage.getItem('primary-tab') || ''; } catch (e) {}
+      if (_tab === 'objects' || _tab === 'network') return;
+      if (!window._autoRegenFired && typeof startRun === 'function') {
+        window._autoRegenFired = true;
+        startRun('generate');
+      }
+    })();
   </script>
   {% endif %}
   {% endif %}
@@ -109,10 +119,23 @@
       Bulk-select disabled in Endpoint-pairs mode
     </span>
     {% else %}
+    {# Shadowing lint - mirrors the Objects tabs' unused chip: on-demand
+       analysis (/api/rules/{id}/shadowing), badges + row filter client-side.
+       Match semantics follow the selected target (CP = zoneless). #}
+    <button type="button" id="rules-shadow-chip"
+            onclick="toggleShadowFilter()"
+            class="btn sm"
+            title="Find rules made unreachable by an earlier, broader rule (full shadowing and duplicates). Analysis follows the selected target's semantics.">
+      Shadowed (<span id="rules-shadow-count">?</span>)
+    </button>
+    <button type="button" id="rules-bulk-disable-btn"
+            onclick="rulesBulkDisable()" disabled
+            class="btn sm">
+      Disable selected (<span id="rules-bulk-disable-count">0</span>)
+    </button>
     <button type="button" id="rules-bulk-delete-btn"
             onclick="rulesBulkDelete()" disabled
-            class="btn danger sm"
-            style="opacity:0.4;">
+            class="btn danger sm">
       Delete selected (<span id="rules-bulk-count">0</span>)
     </button>
     <span id="rules-bulk-status" class="mut" style="font-size:11px;"></span>
@@ -169,7 +192,7 @@
      in the table). #}
   {% set _has_sched = target_platform in ('panw', 'checkpoint', 'fortigate') %}
   {% set _has_iden = target_platform in ('panw', 'checkpoint', 'fortigate') %}
-  {% set ncols = 15 + (1 if _has_sched else 0) + (1 if _has_iden else 0) + (2 if target_platform == 'panw' else 0) %}
+  {% set ncols = 15 + (1 if _has_sched else 0) + (1 if _has_iden else 0) + (2 if target_platform == 'panw' else 0) + (1 if nat_fold_ui else 0) %}
 
   {# Token .twrap wraps the rules table; <thead>/<tbody> styling comes from
      tokens.css element selectors. Filter row carries .filt class which the
@@ -200,6 +223,13 @@
         <th class="app-col">Applications</th>
         <th>Services/Ports</th>
         <th>Action</th>
+        {% if nat_fold_ui %}
+        {# Per-policy NAT fold preview (FGT target in policy NAT mode) -
+           read-only "what will the push do"; CSS-gated to the Enrichment
+           primary tab (body.show-enrichment), same pattern as the
+           negate pills. #}
+        <th class="natflag-col" title="Per-policy NAT: rules marked here get 'nat enable' on the FortiGate target">NAT</th>
+        {% endif %}
         <th class="log-col">Logging</th>
         <th class="prof-col">Profile</th>
         {% if _has_sched %}
@@ -287,21 +317,21 @@
             {% set gm = group_meta[group_label] %}
             {% if gm[0] or gm[1] %}
               <span class="mut" style="font-size:11px;">Zone Pair:</span>
-              <span class="chip {{ zone_cls(gm[0]) }}" style="font-weight:600;font-size:11.5px;padding:3px 9px;">{{ gm[0] or '?' }}</span>
+              <span class="chip {{ zone_cls(gm[0]) }}" style="font-weight:600;font-size:12px;padding:3px 9px;">{{ gm[0] or '?' }}</span>
               <svg style="width:12px;height:12px;color:var(--tx3);flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
               </svg>
-              <span class="chip {{ zone_cls(gm[1]) }}" style="font-weight:600;font-size:11.5px;padding:3px 9px;">{{ gm[1] or '?' }}</span>
+              <span class="chip {{ zone_cls(gm[1]) }}" style="font-weight:600;font-size:12px;padding:3px 9px;">{{ gm[1] or '?' }}</span>
             {% else %}
-              <span style="color:var(--tx2);font-size:11.5px;font-style:italic;">{{ group_label }}</span>
+              <span style="color:var(--tx2);font-size:12px;font-style:italic;">{{ group_label }}</span>
             {% endif %}
           {% elif group_by in ("src_zone", "dst_zone") %}
             {% set gz = group_meta[group_label] %}
             {% if gz %}
               <span class="mut" style="font-size:11px;">{{ 'Source Zone:' if group_by == 'src_zone' else 'Destination Zone:' }}</span>
-              <span class="chip {{ zone_cls(gz) }}" style="font-weight:600;font-size:11.5px;padding:3px 9px;">{{ gz }}</span>
+              <span class="chip {{ zone_cls(gz) }}" style="font-weight:600;font-size:12px;padding:3px 9px;">{{ gz }}</span>
             {% else %}
-              <span style="color:var(--tx2);font-size:11.5px;font-style:italic;">{{ group_label }}</span>
+              <span style="color:var(--tx2);font-size:12px;font-style:italic;">{{ group_label }}</span>
             {% endif %}
           {% elif group_by == "dst_port" %}
             <span class="mut" style="font-size:11px;">Destination Port:</span>
@@ -397,6 +427,7 @@
               <div id="name-cell-{{ rule.id }}" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
                 {% if rule.rule_name %}
                   <span class="rname" style="{% if rule.disabled %}text-decoration:line-through;color:var(--tx3);{% endif %}">{{ rule.rule_name }}</span>
+                  {% if rule.default_rule_kind %}<span class="pp" style="margin-left:6px;opacity:0.55;border:1px solid var(--line2);padding:0 5px;" title="Vendor default rule ({{ rule.default_rule_kind }}) - part of the source's effective policy. Pushed explicitly, skipped when the target enforces the same behavior built-in, or declared when inexpressible.">default</span>{% endif %}
                 {% else %}
                   <span class="dash">-</span>
                 {% endif %}
@@ -416,6 +447,7 @@
                 <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
                 {% if rule.rule_name %}
                   <span class="rname" style="{% if rule.disabled %}text-decoration:line-through;color:var(--tx3);{% endif %}">{{ rule.rule_name }}</span>
+                  {% if rule.default_rule_kind %}<span class="pp" style="margin-left:6px;opacity:0.55;border:1px solid var(--line2);padding:0 5px;" title="Vendor default rule ({{ rule.default_rule_kind }}) - part of the source's effective policy. Pushed explicitly, skipped when the target enforces the same behavior built-in, or declared when inexpressible.">default</span>{% endif %}
                 {% else %}
                   <span class="dash">-</span>
                 {% endif %}
@@ -437,7 +469,7 @@
                   <span class="dash">-</span>
                 {% endfor %}
                 {% if rule.zone_override_source == 'manual' %}
-                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);"
                       title="Manual override">M</span>
                 {% endif %}
               </div>
@@ -478,7 +510,7 @@
                   <span class="dash">-</span>
                 {% endfor %}
                 {% if rule.identity_override_source == 'manual' %}
-                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);"
                       title="Manual override">M</span>
                 {% endif %}
               </div>
@@ -496,7 +528,7 @@
                   <span class="dash">-</span>
                 {% endfor %}
                 {% if rule.zone_override_source == 'manual' %}
-                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:9px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);"
                       title="Manual override">M</span>
                 {% endif %}
               </div>
@@ -584,6 +616,19 @@
                 </div>
               {% endif %}
             </td>
+
+            {% if nat_fold_ui %}
+            {% set _nfl = nat_fold_ui.flags.get(rule.rule_name or '') %}
+            <td class="natflag-col" style="white-space:nowrap;">
+              {% if _nfl %}
+                <span class="chip trust" title="gets 'nat enable'{% if _nfl.pool %} + pool {{ _nfl.pool }}{% endif %} - from source NAT intent{{ 's' if _nfl.intents|length > 1 }} {{ _nfl.intents | join(', ') }}">NAT</span>
+              {% elif (rule.rule_name or '') in nat_fold_ui.conflicts %}
+                <span class="chip" title="conflicting SNAT pools match this policy - nat not auto-set (set it manually on the target)">(!)</span>
+              {% else %}
+                <span class="mut">-</span>
+              {% endif %}
+            </td>
+            {% endif %}
 
             <td class="log-col" style="white-space:nowrap;">
               {% set _auto_log = (rule.log_override_source == 'auto') %}

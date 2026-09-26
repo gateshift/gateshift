@@ -19,7 +19,7 @@
        elements anywhere in the header) */
     .hdr-grp { display:inline-flex; align-items:center; gap:6px; padding:0; border:none; border-radius:0; }
     .hdr-grp-lbl { font-size:12px; color:var(--ctrl); text-transform:capitalize; letter-spacing:.04em; font-weight:700; }
-    .hdr-cap { font-size:9px; color:var(--tx3); text-transform:uppercase; letter-spacing:.05em; }
+    .hdr-cap { font-size:10px; color:var(--tx3); text-transform:uppercase; letter-spacing:.05em; }
     .hdr-pair { display:inline-flex; align-items:center; gap:4px; }
     /* header dropdowns must READ as dropdowns (user feedback): dark well,
        visible border, white text - the inline chevron background-image
@@ -77,10 +77,10 @@
           <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
         </svg>
         <span id="zone-busy-label" style="color:var(--tx);font-size:13px;">Applying zone changes…</span>
-        <span id="zone-busy-elapsed" class="dash" style="font-size:11.5px;margin-left:auto;"></span>
+        <span id="zone-busy-elapsed" class="dash" style="font-size:12px;margin-left:auto;"></span>
       </div>
       <div id="zone-busy-progress" class="hidden" style="margin-top:12px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;font-size:11.5px;color:var(--tx2);margin-bottom:4px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--tx2);margin-bottom:4px;">
           <span id="zone-busy-step"></span>
           <span id="zone-busy-pct"></span>
         </div>
@@ -88,7 +88,7 @@
           <div id="zone-busy-bar" style="background:var(--green);height:100%;border-radius:0;width:0%;transition:width .3s;"></div>
         </div>
       </div>
-      <div id="zone-busy-log" class="hidden" style="margin-top:12px;max-height:240px;overflow-y:auto;font-size:11.5px;line-height:1.4;"></div>
+      <div id="zone-busy-log" class="hidden" style="margin-top:12px;max-height:240px;overflow-y:auto;font-size:12px;line-height:1.4;"></div>
     </div>
   </div>
 
@@ -153,7 +153,7 @@
       <span class="hdr-grp" title="Source device + scope">
         <span class="hdr-grp-lbl">source</span>
         {% if pano_dgs is defined and pano_dgs and pano_manager_id %}
-      <a href="/manager/{{ pano_manager_id }}" class="btn sm" title="Open the Manager-View (multi-scope workbench)">{{ pano_manager_label or device }}<span style="color:var(--tx3);font-size:9px;margin-left:5px;">&#9656;&nbsp;mgr</span></a>
+      <a href="/manager/{{ pano_manager_id }}" class="btn sm" title="Open the Manager-View (multi-scope workbench)">{{ pano_manager_label or device }}<span style="color:var(--tx3);font-size:10px;margin-left:5px;">&#9656;&nbsp;mgr</span></a>
       {% else %}
       <a href="/devices" class="btn sm" title="Source device - click to change (Devices page)">{{ device }}</a>
       {% endif %}
@@ -269,7 +269,7 @@
                 style="appearance:none;-webkit-appearance:none;padding-right:24px;background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>');background-repeat:no-repeat;background-position:right 8px center;">
           {# No empty "- target device -" state: the server defaults selected_target to the first. #}
           {% for t in target_devices %}
-          <option value="{{ t.id }}" {% if selected_target and selected_target.id == t.id %}selected{% endif %}>{{ t.name }} · {{ t.platform }}</option>
+          <option value="{{ t.id }}" {% if selected_target and selected_target.id == t.id %}selected{% endif %}>{{ t.name }} · {{ t.platform | plat }}</option>
           {% endfor %}
         </select>
         {% if target_pano_dgs is defined and target_pano_dgs %}
@@ -302,12 +302,12 @@
         </span>
         {% endif %}
         {% if target_cp_packages is defined and target_cp_packages %}
-        {# CheckPoint manager TARGET (dst) - the domain/package to EGRESS into. startPush sends the
+        {# Check Point manager TARGET (dst) - the domain/package to EGRESS into. startPush sends the
            selected package label; deploy_push resolves it to config.cp.domain + policy_package.
            Packages are created via Manager-View pkg-CRUD, not here (no + in V1). #}
         <span class="hdr-pair">
           <span class="hdr-cap">pkg</span>
-          <select id="target-cp-pkg-select" class="picker" title="Egress into CheckPoint domain / policy-package"
+          <select id="target-cp-pkg-select" class="picker" title="Egress into Check Point domain / policy-package"
                   onchange="if(typeof _cpSyncGw==='function')_cpSyncGw(); if(typeof _saveDstScope==='function')_saveDstScope();"
                   style="appearance:none;-webkit-appearance:none;padding-right:20px;">
             {% for p in target_cp_packages %}<option value="{{ p.label }}" data-gw="{{ p.gateway }}">{{ p.label }}</option>{% endfor %}
@@ -368,7 +368,7 @@
       <span class="hdr-grp" title="Deploy target - this manager = optimize in place, another manager = migrate" style="margin-left:4px;">
         <span class="hdr-grp-lbl">target</span>
         <select id="mgr-dest-picker" onchange="if(window.mgrDestChange) mgrDestChange();"
-                style="background:var(--bg2);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:11.5px;padding:2px 6px;">
+                style="background:var(--bg2);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:12px;padding:2px 6px;">
           {% for d in dest_managers %}
           <option value="{{ d.id }}"{% if d.is_self %} data-self="1"{% endif %} data-plat="{{ d.platform }}">{{ d.name }}</option>
           {% endfor %}
@@ -450,7 +450,7 @@
       const toast = document.createElement('div');
       toast.style.cssText =
         'pointer-events:auto;padding:8px 28px 8px 12px;border-radius:0;border:1px solid;' +
-        'font-size:11.5px;max-width:288px;box-shadow:var(--shadow-pop);position:relative;' +
+        'font-size:12px;max-width:288px;box-shadow:var(--shadow-pop);position:relative;' +
         'opacity:0;transform:translateX(8px);transition:opacity .2s,transform .2s;' +
         (styles[type] || styles.info);
       toast.textContent = msg;
@@ -788,27 +788,33 @@
     // old dialog claimed the opposite.
     // Returns false to block the synchronous submit; we re-submit
     // programmatically after the user confirms.
-    function confirmReimport(form, deviceId, busyLabel) {
+    function confirmReimport(form, deviceId, busyLabel, hasData) {
       if (form.dataset.confirmed === '1') return true;
       var btn = form.querySelector('button');
       if (btn) btn.disabled = true;
-      fetch('/devices/' + deviceId + '/reimport-preview')
-        .then(function(r) { return r.json(); })
-        .then(function(d) {
-          var parts = [];
-          if (d.zone_bindings) parts.push(d.zone_bindings + ' interface→zone binding' + (d.zone_bindings === 1 ? '' : 's') + ' will be reset');
-          if (d.deploy_skips)  parts.push(d.deploy_skips  + ' deploy-skip flag' + (d.deploy_skips === 1 ? '' : 's') + ' will be reset');
-          var p = (d.total > 0)
-            ? confirmModal({
-                title: 'Re-import resets curated interface data',
-                body: parts.concat([
-                  'Interface type/VLAN edits and route egress edits are also reset.',
-                  'Interface renames are kept.',
-                ]),
+      // FIRST import: nothing on file to replace or keep - no dialog,
+      // straight to the import (matrix finding M-1).
+      if (hasData === false) {
+        _setOverlay(true, busyLabel || 'Importing…');
+        form.dataset.confirmed = '1';
+        form.submit();
+        return false;
+      }
+      Promise.resolve(true)
+        .then(function() {
+          // Curation survives the re-import since A1/A2 (renames, zone
+          // bindings, type/VLAN edits, skip flags, disables, route edits,
+          // user-added interfaces/routes/zones). What still resets is
+          // content: IPs, descriptions, properties and role markers.
+          var p = confirmModal({
+                title: 'Re-import from source?',
+                body: [
+                  'Imported configuration is replaced with a fresh read.',
+                  'Kept: renames, zone bindings, type/VLAN edits, skip flags, rule disables, route edits and everything you added.',
+                  'Reset to source: IP addresses, descriptions, properties and role markers.',
+                ],
                 confirmLabel: 'Re-import',
-                danger: true,
-              })
-            : Promise.resolve(true);
+              });
           p.then(function(ok) {
             if (!ok) { if (btn) btn.disabled = false; return; }
             _setOverlay(true, busyLabel || 'Importing…');

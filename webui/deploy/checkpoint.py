@@ -31,6 +31,8 @@ from .base import (
     DeployDriver,
     DroppedField,
     StepResult,
+    transport_fail_fast,
+    default_rule_disposition,
     expand_multiproto_services,
     register_driver,
 )
@@ -60,9 +62,17 @@ requests.packages.urllib3.disable_warnings(
 _CONNECT_TIMEOUT = 5
 
 
+# Push-path backoff profile (mirrors fortinet.py 489dc1b): a mgmt server or
+# Gaia daemon that is briefly unresponsive under load needs minutes, not the
+# default 1.5s/3s. Login/discover paths keep the short default so a dead box
+# fails fast in the device wizard.
+_PUSH_RETRY_BACKOFF = (5, 15, 30, 60, 90)
+
+
 def _post_with_retry(
     url: str, *, payload: dict, headers: dict | None = None,
     timeout: int = 120, retries: int = 2,
+    backoff: tuple | None = None,
 ) -> requests.Response:
     """POST with retry on transport-level drops. CP Mgmt-API and Gaia REST
     both occasionally drop the TCP connection mid-request (observed as
@@ -72,6 +82,10 @@ def _post_with_retry(
     connect phase is capped at ``_CONNECT_TIMEOUT`` so an unreachable host
     fails fast instead of blocking ``timeout`` seconds per attempt."""
     connect_timeout = min(_CONNECT_TIMEOUT, timeout)
+    if transport_fail_fast():
+        # interactive path - never the push-grade profile
+        retries = min(retries, 1)
+        backoff = None
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -87,7 +101,11 @@ def _post_with_retry(
                     f"POST {url} → connection error after "
                     f"{retries + 1} attempts: {exc}"
                 ) from exc
-            time.sleep(1.5 * (attempt + 1))
+            if backoff and attempt < len(backoff):
+                delay = backoff[attempt]
+            else:
+                delay = 1.5 * (attempt + 1)
+            time.sleep(delay)
     raise RuntimeError(f"POST {url} → unreachable: {last_exc}")
 
 
@@ -324,6 +342,147 @@ def _discard_orphan_sessions(base_url: str, sid: str) -> tuple[int, str | None]:
     return discarded, last_err
 
 
+# ── Install readiness: verify-policy + conflict mitigation ──────────
+# (cp-verify-fix plan, 2026-09-20). CP's install verification is the
+# AUTHORITY on rule shadowing - no home-grown heuristic. Format probed
+# live on R81: task-details[] carries errors[]/warnings[]/notifications[]
+# with free-text entries like
+#   "Error: Layer <name>: Rule 1 Conflicts with Rule 3 for Services &
+#    Applications: any ."
+# verify-policy REFUSES while the calling session has unpublished
+# changes, so both helpers publish (and wait for the publish task)
+# before verifying.
+
+_VERIFY_CONFLICT_RE = re.compile(
+    r"Layer\s+(?P<layer>.+?):\s*Rule\s+(?P<a>\d+)\s+Conflicts\s+with\s+"
+    r"Rule\s+(?P<b>\d+)", re.IGNORECASE)
+
+
+def _wait_task(base_url: str, sid: str, task_id: str,
+               timeout: int = 900) -> dict:
+    """Poll show-task until terminal. Tolerates transient show-task errors
+    (same contract as the publish polling, 7f7ec2a)."""
+    deadline = time.time() + timeout
+    errs = 0
+    interval = 3.0
+    while time.time() < deadline:
+        try:
+            t = _call(base_url, sid, "show-task",
+                      {"task-id": task_id, "details-level": "full"})
+            errs = 0
+            task = (t.get("tasks") or [{}])[0]
+            if (task.get("status") or "") in ("succeeded", "failed",
+                                              "partially succeeded"):
+                return task
+        except Exception:
+            errs += 1
+            if errs > 5:
+                raise
+        time.sleep(interval)
+        interval = min(10.0, interval + 1.0)
+    raise RuntimeError(f"task {task_id} still running after {timeout}s")
+
+
+def _verify_policy_in_session(base_url: str, sid: str,
+                              package: str) -> dict:
+    """verify-policy within an EXISTING session. The session must have no
+    unpublished changes (CP refuses otherwise)."""
+    t = _call(base_url, sid, "verify-policy", {"policy-package": package})
+    task = _wait_task(base_url, sid, t.get("task-id") or "")
+    errors: list[str] = []
+    warnings: list[str] = []
+    title = ""
+    for d in (task.get("task-details") or []):
+        errors.extend(str(x).strip() for x in (d.get("errors") or [])
+                      if str(x).strip())
+        warnings.extend(str(x).strip() for x in (d.get("warnings") or [])
+                        if str(x).strip())
+        title = title or (d.get("title") or "")
+    fixable: list[dict] = []
+    seen: set[tuple] = set()
+    for msg in errors:
+        m = _VERIFY_CONFLICT_RE.search(msg)
+        if not m:
+            continue
+        key = (m.group("layer").strip(),
+               max(int(m.group("a")), int(m.group("b"))))
+        if key in seen:
+            continue
+        seen.add(key)
+        fixable.append({"layer": key[0], "rule_number": key[1],
+                        "message": msg})
+    status = task.get("status") or ""
+    return {"ok": status == "succeeded" and not errors,
+            "status": status, "errors": errors, "warnings": warnings,
+            "fixable": fixable, "title": title}
+
+
+# CP's verifier CAPS its error list per run (measured live 2026-09-20:
+# 50 identical conflicts -> exactly 21 reported). At or above this count
+# the caller must assume MORE conflicts surface after the current batch
+# is resolved and re-verified.
+_VERIFY_ERROR_CAP = 21
+
+
+def verify_policy(device: dict, package: str) -> dict:
+    """CP's own install verification, without installing.
+
+    Returns {'ok', 'status', 'errors', 'warnings', 'fixable', 'capped',
+    'title'}. fixable = [{'layer','rule_number','name','message'}]: for
+    every reported conflict the LATER rule number - under first-match the
+    later rule is the unreachable one, so disabling it is semantically
+    free (that can include a shadowed Cleanup rule). The rule NAME is
+    resolved read-only via the API's own rule-number so callers (the
+    gs-side disable) never reconstruct rendered names. Errors that don't
+    match the conflict pattern (NAT ranges etc.) stay report-only.
+    'capped' flags a result at the verifier's per-run error cap - expect
+    another batch after this one is resolved. Always a DEDICATED session:
+    verify refuses on unpublished changes, and the shared SID cache may
+    hold a session another operation staged into."""
+    sid, base_url = _login(device, fresh=True)
+    try:
+        res = _verify_policy_in_session(base_url, sid, package)
+        for f in res["fixable"]:
+            try:
+                _uid, _name = _find_rule_by_number(
+                    base_url, sid, f["layer"], f["rule_number"])
+            except Exception:
+                _uid = _name = None
+            f["name"] = _name
+        res["capped"] = len(res["errors"]) >= _VERIFY_ERROR_CAP
+        return res
+    finally:
+        try:
+            _call(base_url, sid, "logout", {})
+        except Exception:
+            pass
+
+
+def _find_rule_by_number(base_url: str, sid: str, layer: str,
+                         rule_number: int) -> tuple[str | None, str | None]:
+    """(uid, name) of the rule at CP rule-number in a layer. Resolution by
+    the API's own rule-number field (sections excluded), paged - never by
+    reconstructing rendered names."""
+    offset = 0
+    while True:
+        rb = _call(base_url, sid, "show-access-rulebase",
+                   {"name": layer, "offset": offset, "limit": 100,
+                    "details-level": "standard"})
+        entries = []
+        for e in rb.get("rulebase", []):
+            if e.get("type") == "access-rule":
+                entries.append(e)
+            else:
+                entries.extend(x for x in (e.get("rulebase") or [])
+                               if isinstance(x, dict))
+        for r in entries:
+            if r.get("rule-number") == rule_number:
+                return r.get("uid"), r.get("name")
+        offset += 100
+        if offset >= (rb.get("total") or 0) or not entries:
+            return None, None
+
+
 def _call(base_url: str, sid: str, command: str, payload: dict) -> dict:
     """POST a CP API command. Returns parsed JSON. Raises on non-2xx.
 
@@ -336,13 +495,21 @@ def _call(base_url: str, sid: str, command: str, payload: dict) -> dict:
         f"{base_url}/{command}",
         payload=payload,
         headers={"X-chkp-sid": sid, "Content-Type": "application/json"},
-        timeout=120,
+        timeout=120, retries=5, backoff=_PUSH_RETRY_BACKOFF,
     )
     if resp.status_code >= 400:
         try:
             body = resp.json()
         except Exception:
-            body = {"_raw": resp.text}
+            # Non-JSON refusal (e.g. a 403 HTML page): the API never processed
+            # the request. Field causes: API user not yet published, or the
+            # API server does not accept this client IP.
+            snippet = (resp.text or "").strip()[:120]
+            raise RuntimeError(
+                f"{command} → HTTP {resp.status_code}: non-JSON answer - the "
+                f"Mgmt API refused the request. Check that the API user is "
+                f"published and that the API server accepts requests from "
+                f"this client. Body: {snippet!r}")
         msg = body.get("message") or str(body)
         details: list[str] = []
         for key in ("blocking-errors", "errors"):
@@ -430,7 +597,7 @@ def _gaia_logout(base_url: str, sid: str) -> None:
 
 
 def _gaia_call(base_url: str, sid: str, command: str, payload: dict,
-               timeout: int = 120) -> dict:
+               timeout: int = 120, retries: int = 5) -> dict:
     """POST a Gaia API command. Returns parsed JSON. Raises on non-2xx.
 
     Mirrors ``_call``'s error aggregation - Gaia surfaces detailed problems
@@ -444,7 +611,7 @@ def _gaia_call(base_url: str, sid: str, command: str, payload: dict,
         f"{base_url}/{command}",
         payload=payload,
         headers={"X-chkp-sid": sid, "Content-Type": "application/json"},
-        timeout=timeout,
+        timeout=timeout, retries=retries, backoff=_PUSH_RETRY_BACKOFF,
     )
     if resp.status_code >= 400:
         try:
@@ -736,7 +903,7 @@ def _gaia_set_physical(base_url: str, sid: str, *, name: str,
                        ipv4: str = "", mask_len: int | None = None,
                        comment: str | None = None,
                        enabled: bool | None = None,
-                       timeout: int = 120) -> dict:
+                       timeout: int = 120, retries: int = 5) -> dict:
     """Configure an existing physical IF. Cannot create - HW-bound.
 
     Gaia refuses ``ipv4-address`` while the DHCP client is enabled
@@ -748,7 +915,7 @@ def _gaia_set_physical(base_url: str, sid: str, *, name: str,
     payload = _gaia_iface_payload(name, ipv4, mask_len, comment, enabled)
     try:
         return _gaia_call(base_url, sid, "set-physical-interface", payload,
-                          timeout=timeout)
+                          timeout=timeout, retries=retries)
     except RuntimeError as e:
         msg = str(e).lower()
         if "dhcp client is enabled" not in msg:
@@ -760,7 +927,8 @@ def _gaia_set_physical(base_url: str, sid: str, *, name: str,
 
 def _gaia_set_physical_dhcp(base_url: str, sid: str, *, name: str,
                             comment: str | None = None,
-                            enabled: bool | None = None) -> dict:
+                            enabled: bool | None = None,
+                            retries: int = 5) -> dict:
     """Enable the DHCP client on a physical IF - converse of the static
     set-physical-interface call. Gaia accepts the address and DHCP fields
     in the same payload here (going DHCP-on is allowed at any time;
@@ -772,7 +940,8 @@ def _gaia_set_physical_dhcp(base_url: str, sid: str, *, name: str,
         payload["enabled"] = False
     elif enabled is True:
         payload["enabled"] = True
-    return _gaia_call(base_url, sid, "set-physical-interface", payload)
+    return _gaia_call(base_url, sid, "set-physical-interface", payload,
+                      retries=retries)
 
 
 # bond-mode is a vendor-specific knob Gateshift doesn't yet model. Lab uses LACP
@@ -1559,6 +1728,18 @@ def _render_service_objects(
         if not name:
             continue
         val = obj.get("value") or {}
+        # CP-shipped PREDEFINED service (kept at import so cross-vendor
+        # targets can resolve the reference). A CP target owns these
+        # natively - materializing copies collides with the built-ins and
+        # fed the FF_*/FF_FF_* remap loop on self-deploy round-trips
+        # (box-pass B2-1). Reference-only on CP targets.
+        if val.get("predefined"):
+            dropped.append(DroppedField(
+                rule_id=raw_name, field="object",
+                reason="Check Point predefined service - resolved from "
+                       "the target's own catalog, not pushed",
+            ))
+            continue
         # All-traffic service (Forti 'ALL') → builtin 'Any', not a pushable
         # object (mirrors the _is_any_address skip). Rule refs resolve to 'Any'.
         if _is_any_service(val):
@@ -1607,6 +1788,48 @@ def _render_service_objects(
                     "payload": {"name": name, "members": members,
                                 "ignore-warnings": True}})
                 continue
+            # Port LIST ("80,8080" / "1-442,444-65535"): PAN-OS services
+            # carry comma lists - both genuine PA port lists and the
+            # two-range form a PA target materialized from an ASA 'neq'
+            # (so a PA box seeded via ASA→PA re-imports as a list). CP
+            # services take ONE port/range → same treatment as 'neq'
+            # above: one range member per entry plus a service-group
+            # under the REFERENCED name, so rule/group refs resolve
+            # instead of 404ing on a dropped object (matrix finding M-6,
+            # PA→CP - inline_S_tcp_-443).
+            if "," in port:
+                pieces = [x.strip() for x in port.split(",") if x.strip()]
+                if len(pieces) >= 2:
+                    section = ("Services-TCP" if cmd == "add-service-tcp"
+                               else "Services-UDP")
+                    members = []
+                    for idx, piece in enumerate(pieces, 1):
+                        pn = _cp_norm_port(piece)
+                        if pn is None:
+                            dropped.append(DroppedField(
+                                rule_id=raw_name, field="port",
+                                reason=f"list entry {piece!r} is not a "
+                                       "valid Check Point port - entry "
+                                       "skipped",
+                            ))
+                            continue
+                        mname = _safe_name(f"{raw_name}-{idx}")
+                        out[section].append({"command": cmd, "payload": {
+                            **base, "name": mname, "port": pn}})
+                        members.append(mname)
+                    if not members:
+                        dropped.append(DroppedField(
+                            rule_id=raw_name, field="port",
+                            reason=f"port list {port!r} has no valid "
+                                   "Check Point port - not pushed",
+                        ))
+                        continue
+                    out.setdefault("Service Groups", []).append({
+                        "command": "add-service-group",
+                        "payload": {"name": name, "members": members,
+                                    "ignore-warnings": True}})
+                    continue
+                port = pieces[0] if pieces else port  # stray comma
             # Port 0 is not a valid CP port ("'Port' value is not 'any' or a
             # valid port number"). It shows up as a SENTINEL, not real config:
             # FortiOS ships the factory service 'NONE' as tcp/0 (QA finding). Drop
@@ -2353,6 +2576,17 @@ def _render_security_rules(
     for i, rule in enumerate(rules):
         rule_id = str(rule.get("rule_name") or rule.get("id") or f"#{i+1}")
 
+        # Default-policy fidelity: marked vendor defaults classify per
+        # target (skip-as-matching / express / declared drop).
+        _disp, _dnote = default_rule_disposition(rule, "checkpoint")
+        if _disp in ("skip", "drop"):
+            dropped.append(DroppedField(
+                rule_id=rule_id, field="default_rule",
+                reason=_dnote,
+                fallback=("not pushed" if _disp == "skip" else "dropped"),
+            ))
+            continue
+
         for fld in _UNSUPPORTED_RULE_FIELDS:
             if rule.get(fld):
                 dropped.append(DroppedField(
@@ -2820,6 +3054,7 @@ def _render_nat_rules(
     section_lists: dict[str, list[dict]],
     dropped: list[DroppedField],
     any_svc_names: set[str] | None = None,
+    pushable_addrs: set[str] | None = None,
 ) -> list[dict]:
     """Convert agnostic NAT rules → CP add-nat-rule commands.
 
@@ -2855,8 +3090,58 @@ def _render_nat_rules(
             ))
         return vals[0] if vals else None
 
+    def _prune_nat_refs(vals: list | None, field: str,
+                        rid: str) -> list | None:
+        """Invariant I1 for the NAT rulebase (mirrors _prune_unpushable on
+        the access side): refs to objects this push never creates (FQDN /
+        unsupported type) 404 add-nat-rule mid-push. Pruned + reported; a
+        side that empties returns None → the caller drops the whole rule,
+        because an emptied NAT side would silently widen the match to Any."""
+        vals = [v for v in (vals or []) if v]
+        if pushable_addrs is None or not vals:
+            return vals
+        kept = [v for v in vals
+                if str(v).strip().lower() == "any"
+                or _resolve_addr(v, addr_lookup) in pushable_addrs
+                or _is_v4_literal(v)]
+        if len(kept) != len(vals):
+            lost = [str(v) for v in vals if v not in kept]
+            dropped.append(DroppedField(
+                rule_id=rid, field=field,
+                reason=f"reference(s) {lost} point at object(s) this push "
+                       "does not create (FQDN / unsupported type) - pruned",
+                fallback=("rule dropped - an emptied side would widen the "
+                          "NAT match to Any" if not kept
+                          else "remaining refs kept"),
+            ))
+        return kept if kept else None
+
+    def _is_v4_literal(v: str) -> bool:
+        try:
+            return ipaddress.ip_address(str(v).strip()).version == 4
+        except ValueError:
+            return False
+
+    def _orig_addr(literal: str | None) -> str:
+        """Original-side address ref. Object names resolve via the lookup;
+        a bare IPv4 literal (VIP-import dnat rules carry the external IP
+        verbatim) is materialized as a host on the fly - a dangling
+        literal ref would 404 add-nat-rule."""
+        if not literal:
+            return "Any"
+        if _is_v4_literal(literal) and literal not in addr_lookup:
+            return (_ensure_host(str(literal).strip(), addr_lookup,
+                                 section_lists) or "Any")
+        return _resolve_addr(literal, addr_lookup)
+
     for i, n in enumerate(nat_rules):
         rid = str(n.get("name") or f"nat-{i+1}")
+        _osrc = _prune_nat_refs(n.get("orig_src"), "orig_src", rid)
+        _odst = _prune_nat_refs(n.get("orig_dst"), "orig_dst", rid)
+        if _osrc is None or _odst is None:
+            continue
+        if pushable_addrs is not None:
+            n = {**n, "orig_src": _osrc, "orig_dst": _odst}
 
         # Drop zones (CP NAT has no zone matching)
         for zfld in ("src_zones", "dst_zones"):
@@ -2869,7 +3154,31 @@ def _render_nat_rules(
                 ))
 
         # Reduce list-fields to a single item
-        orig_src = _single(n, "orig_src", rid, "original-source")
+        # Consolidated hide rule ([[fgt-nat-hide-plan]]): CP's original-source
+        # is single-valued - materialize ONE group holding every member
+        # (analog _ensure_host) instead of silently narrowing to the first.
+        _props_n = n.get("properties") or {}
+        _srcs_all = [s for s in (n.get("orig_src") or []) if s]
+        if (_props_n.get("consolidated") and len(_srcs_all) > 1
+                and not any(str(s).strip().lower() == "any" for s in _srcs_all)):
+            _grp_name = _safe_name(f"{n.get('name') or 'hide-nat'}-sources")
+            _members: list[str] = []
+            for _s in _srcs_all:
+                _r = _orig_addr(_s)
+                if _r and _r != "Any" and _r not in _members:
+                    _members.append(_r)
+            # No set-if-exists: R8x rejects it on add-group; _call_idempotent
+            # falls back to set-group on a name conflict (same as the
+            # address-group renderer).
+            section_lists.setdefault("Address Groups", []).append({
+                "command": "add-group",
+                "payload": {"name": _grp_name, "members": _members,
+                            "ignore-warnings": True},
+            })
+            addr_lookup[_grp_name] = _grp_name
+            orig_src = _grp_name
+        else:
+            orig_src = _single(n, "orig_src", rid, "original-source")
         orig_dst = _single(n, "orig_dst", rid, "original-destination")
         svc_list = n.get("orig_service") or []
         if len(svc_list) > 1:
@@ -2898,8 +3207,8 @@ def _render_nat_rules(
         else:
             orig_service = "Any"
 
-        original_source = _resolve_addr(orig_src, addr_lookup) if orig_src else "Any"
-        original_destination = _resolve_addr(orig_dst, addr_lookup) if orig_dst else "Any"
+        original_source = _orig_addr(orig_src)
+        original_destination = _orig_addr(orig_dst)
 
         nat_type = (n.get("nat_type") or "snat").lower()
         trans_src = n.get("trans_src")
@@ -3721,7 +4030,7 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
             # provisioned the way PA/Forti are. Deferred: PSK is the CP path for
             # now; the operator configures cert-auth + peer-CA trust on the GW.
             dropped.append(DroppedField(rule_id=name, field="certificate",
-                reason="cert-auth not migrated for CheckPoint - the gateway's VPN "
+                reason="cert-auth not migrated for Check Point - the gateway's VPN "
                        "cert is ICA-managed (configure cert-auth + trusted CA on "
                        "the gateway directly); use PSK to migrate via Gateshift"))
         records.append(rec)
@@ -4038,7 +4347,7 @@ _CP_APP_SITE_NAMES: frozenset[str] = frozenset(
 
 
 # ═════════════════════════════════════════════════════════════════
-#  CheckPoint Driver
+#  Check Point Driver
 # ═════════════════════════════════════════════════════════════════
 
 @register_driver
@@ -4645,6 +4954,38 @@ class CheckpointDriver(DeployDriver):
         finally:
             _logout(base_url, sid)
 
+    def app_binding_caveat(self, *, device: dict) -> str | None:
+        """Enrichment-time blade check (Apps auto-derive, CP targets).
+
+        App-Sites only survive a push when the target layer has the
+        applications-and-url-filtering blade enabled - push() strips them
+        otherwise (declared, 'strip apps' step). Surfacing that at DERIVE
+        time saves the operator from binding apps that the next push will
+        drop. Best-effort: any error returns None and the derive proceeds.
+        """
+        try:
+            cfg = device.get("config") or "{}"
+            if isinstance(cfg, str):
+                cfg = json.loads(cfg or "{}")
+            package = ((cfg.get("cp") or {}).get("policy_package")
+                       or "Standard")
+            sid, base_url = _login(device)
+            pkg = _call(base_url, sid, "show-package", {"name": package})
+            layers = [l.get("name") for l in (pkg.get("access-layers") or [])
+                      if l.get("name")]
+            if len(layers) != 1:
+                return None
+            layer = _call(base_url, sid, "show-access-layer",
+                          {"name": layers[0], "details-level": "full"})
+            if not layer.get("applications-and-url-filtering"):
+                return (f"Layer {layers[0]!r} has the Applications & URL "
+                        "Filtering blade disabled - the push will strip the "
+                        "derived applications (they stay bound here; enable "
+                        "the blade on the layer and push again to apply them).")
+        except Exception:
+            return None
+        return None
+
     def list_applications(self, *, device: dict) -> dict[str, list[dict]]:
         """Return CP's curated L7 App-Site catalog for port→app auto-binding.
 
@@ -4769,36 +5110,200 @@ class CheckpointDriver(DeployDriver):
         zones: list[dict],
         address_objects: list[dict],
         address_groups: list[dict],
+        imported_tp: list[dict] | None = None,
     ) -> list[dict]:
         """Deterministic TP-rule generation. Pure function - Preview + Push
         call this same code so what the user saw == what gets pushed.
 
-        Strategy ``security-ruleset`` (V1):
-          - Group source rules by destination set; emit one TP-rule per
-            distinct destination group. ``src``/``dst``/``svc`` stay ``Any``
-            (CP-idiomatic), ``protected-scope`` is the destination set.
-          - Disabled source rules are skipped.
+        Strategies (cp-tp-v2 plan, 2026-09-19):
+          - ``baseline``: ONE rule, protected-scope Any → default_profile.
+            The honest minimum - most estates run exactly this.
+          - ``protected-assets``: ONE rule whose protected-scope is the
+            union of the DESTINATIONS of enabled source rules that carry
+            an inspection signal (security_profile / *_group, import or
+            enrichment override). No signal anywhere → all enabled rules.
+            A destination 'Any' in that base collapses the scope to Any.
+            One rule is deliberate: with a single profile, N scoped rules
+            are functionally identical to one union-scope rule (CP TP is
+            first-match and matches source OR destination), so splitting
+            only adds SmartConsole noise.
+          - ``security-ruleset`` (V1, legacy): one rule per distinct
+            destination-set of the source rules. Kept so stored layer
+            configs keep rendering; no longer offered in the UI (its
+            output devolves into dead rules behind the first Any scope).
+          - Disabled source rules are always skipped.
           - ``action`` (TP-profile) comes from ``params['default_profile']``.
 
-        ``params`` shape for ``security-ruleset``:
+        ``params`` shape (all strategies):
           - ``default_profile`` (str, required) - TP-profile name
           - ``track`` (str, optional)           - defaults to "Log"
           - ``rule_prefix`` (str, optional)     - defaults to "gateshift-tp-"
         """
-        if strategy != "security-ruleset":
+        if strategy not in ("security-ruleset", "baseline",
+                            "protected-assets", "source"):
             raise NotImplementedError(
-                f"TP strategy {strategy!r} not implemented in V1"
+                f"TP strategy {strategy!r} not implemented"
             )
         default_profile = (params.get("default_profile") or "").strip()
-        if not default_profile:
+        if not default_profile and strategy != "source":
+            # 'source' carries per-rule profiles from the imported rulebase.
             raise ValueError(
-                "params.default_profile is required for strategy "
-                "'security-ruleset'"
+                f"params.default_profile is required for strategy "
+                f"{strategy!r}"
             )
         track  = (params.get("track") or "Log").strip()
         prefix = (params.get("rule_prefix") or "gateshift-tp-").strip()
 
+        tag = {
+            "tag":      "gateshift",
+            "strategy": strategy,
+            "layer":    layer_name,
+        }
+        tag_json = json.dumps(tag, separators=(",", ":"))
+
+        def _one_rule(scope: list[str]) -> list[dict]:
+            return [{
+                "name":             f"{prefix}001",
+                "layer":            layer_name,
+                "position":         "bottom",
+                "source":           ["Any"],
+                "destination":      ["Any"],
+                "service":          ["Any"],
+                "protected-scope":  scope,
+                "action":           default_profile,
+                "track":            track,
+                "install-on":       ["Policy Targets"],
+                "comments":         tag_json,
+                "enabled":          True,
+            }]
+
+        if strategy == "source":
+            # CP->CP TP fidelity: re-render the imported source TP rulebase
+            # 1:1 into the target layer. Names/comments stay verbatim, but
+            # every rule carries the gateshift marker (comments prefix) so
+            # BOTH wipe paths keep working: the in-layer wipe is scope-based
+            # anyway, and the cross-layer stale sweep filters on the
+            # '"tag":"gateshift"' substring. Profiles/protections stay
+            # ref-only names; exceptions ride under rule["exceptions"] and
+            # are stripped before add-threat-rule by the push step.
+            rows = [dict(r) for r in (imported_tp or [])]
+            if not rows:
+                raise ValueError(
+                    "no imported TP rules for this source - re-import the "
+                    "source device")
+            src_layers = sorted({(r.get("source_layer") or "").strip()
+                                 for r in rows
+                                 if (r.get("source_layer") or "").strip()})
+            want = (params.get("source_layer") or "").strip()
+            if not want:
+                if len(src_layers) == 1:
+                    want = src_layers[0]
+                else:
+                    raise ValueError(
+                        f"params.source_layer required - source has "
+                        f"{len(src_layers)} TP layers: "
+                        f"{', '.join(src_layers)}")
+            rows = [r for r in rows
+                    if (r.get("source_layer") or "").strip() == want]
+            if not rows:
+                raise ValueError(
+                    f"source TP layer {want!r} not found in the import")
+
+            def _src_track(r: dict):
+                # add-threat-rule accepts track ONLY as a string (every
+                # dict form 400s "Parameter [track] value is not valid" -
+                # live-probed 2026-09-23). packet-capture cannot ride
+                # along; the driver declares that drop after generate.
+                tr = r.get("track") or {}
+                return (tr.get("type") or "Log").strip() or "Log"
+
+            def _cmt(r: dict) -> str:
+                base = (r.get("comments") or "").strip()
+                return (tag_json + (" | " + base if base else ""))[:1000]
+
+            def _scope(vals) -> list[str]:
+                # import normalizes CpmiAnyObject to lowercase 'any' - the
+                # Mgmt-API reference is the object name 'Any'.
+                out = [("Any" if str(v).strip().lower() == "any" else v)
+                       for v in (vals or []) if v]
+                return out or ["Any"]
+
+            parents = [r for r in rows if not r.get("exception_of")]
+            excs: dict[str, list[dict]] = {}
+            for r in rows:
+                if r.get("exception_of"):
+                    excs.setdefault(str(r["exception_of"]), []).append(r)
+
+            out: list[dict] = []
+            for r in sorted(parents, key=lambda x: x.get("seq") or 0):
+                rule = {
+                    "name":            r.get("rule_name") or "tp-rule",
+                    "layer":           layer_name,
+                    "position":        "bottom",
+                    "source":          _scope(r.get("src")),
+                    "destination":     _scope(r.get("dst")),
+                    "service":         _scope(r.get("svc")),
+                    "protected-scope": _scope(r.get("protected_scope")),
+                    "action":          (r.get("action_profile")
+                                        or default_profile or "Optimized"),
+                    "track":           _src_track(r),
+                    "install-on":      ["Policy Targets"],
+                    "comments":        _cmt(r),
+                    "enabled":         bool(r.get("enabled", True)),
+                }
+                e_out = []
+                for e in sorted(excs.get(rule["name"], []),
+                                key=lambda x: x.get("seq") or 0):
+                    e_out.append({
+                        "name":               e.get("rule_name") or "tp-exc",
+                        "rule-name":          rule["name"],
+                        "layer":              layer_name,
+                        "position":           "bottom",
+                        "source":             _scope(e.get("src")),
+                        "destination":        _scope(e.get("dst")),
+                        "service":            _scope(e.get("svc")),
+                        "protected-scope":    _scope(e.get("protected_scope")),
+                        "protection-or-site": _scope(e.get("protections")),
+                        "action":             (e.get("action_profile")
+                                               or "Detect"),
+                        # verified field set (2026-09-23): install-on is
+                        # NOT part of add-threat-exception - omit it.
+                        "track":              _src_track(e),
+                        "comments":           _cmt(e),
+                        "enabled":            bool(e.get("enabled", True)),
+                    })
+                if e_out:
+                    rule["exceptions"] = e_out
+                out.append(rule)
+            return out
+
+        if strategy == "baseline":
+            return _one_rule(["Any"])
+
         addr_lookup = _build_addr_lookup(address_objects, address_groups)
+
+        if strategy == "protected-assets":
+            enabled = [r for r in rules if not r.get("disabled")]
+            signal = [r for r in enabled
+                      if (r.get("security_profile") or "").strip()
+                      or (r.get("security_profile_group") or "").strip()]
+            base = signal or enabled
+            if not base:
+                return []
+            members: list[str] = []
+            seen: set[str] = set()
+            for r in base:
+                for d in (r.get("destinations") or ["any"]):
+                    nm = _resolve_addr(d, addr_lookup)
+                    if nm == "Any":
+                        # a signal rule protecting 'any' protects everything
+                        return _one_rule(["Any"])
+                    if nm and nm not in seen:
+                        seen.add(nm)
+                        members.append(nm)
+            if not members:
+                return _one_rule(["Any"])
+            return _one_rule(sorted(members, key=str.lower))
 
         # Group rules by destination-set (frozenset of resolved names).
         # Order: emit in the order we first observe each group, so rule
@@ -4865,6 +5370,7 @@ class CheckpointDriver(DeployDriver):
         nat_rules: list[dict],
         settings: dict[str, str],
         tp_configs: list[dict] = (),
+        imported_tp: list[dict] = (),   # CP source TP rows (strategy 'source')
         nat_vips: list[dict] = (),
         nat_ippools: list[dict] = (),
         tags: list[dict] = (),
@@ -4981,8 +5487,9 @@ class CheckpointDriver(DeployDriver):
 
         # ── Service objects + groups ────────────────────────────
         svc_sections = _render_service_objects(service_objects, dropped)
-        # neq services synthesize their own group (two range members) - pull
-        # it out so the groups render below doesn't overwrite the bucket.
+        # neq / port-list services synthesize their own group (range
+        # members) - pull it out so the groups render below doesn't
+        # overwrite the bucket.
         _neq_groups = svc_sections.pop("Service Groups", [])
         for label, items in svc_sections.items():
             section_lists[label] = items
@@ -5062,6 +5569,7 @@ class CheckpointDriver(DeployDriver):
         section_lists["NAT Rules"] = _render_nat_rules(
             nat_rules, settings, addr_lookup, svc_lookup,
             section_lists, dropped, any_svc_names=any_svc_names,
+            pushable_addrs=pushable_addrs,
         )
 
         # ── Decryption (HTTPS-Inspection) rules (Phase 5) ──
@@ -5132,16 +5640,32 @@ class CheckpointDriver(DeployDriver):
                     zones=zones,
                     address_objects=address_objects,
                     address_groups=address_groups,
+                    imported_tp=list(imported_tp or ()),
                 )
             except (NotImplementedError, ValueError) as e:
+                # DroppedField carries (rule_id, field, reason, fallback) -
+                # the TP layer rides in rule_id (found live: the old
+                # section=/item= kwargs crashed the handler itself).
                 dropped.append(DroppedField(
-                    section="TP Rules",
-                    item=layer,
-                    field="strategy",
-                    value=strat,
-                    reason=str(e),
+                    rule_id=f"TP layer {layer}",
+                    field="tp_strategy",
+                    reason=f"{strat!r}: {e}",
+                    fallback="TP section skipped",
                 ))
                 continue
+            if strat == "source":
+                # track packet-capture cannot be expressed through
+                # add-threat-rule (string-only track) - declare the loss
+                # per affected source rule instead of dropping silently.
+                for _r in (imported_tp or ()):
+                    if (_r.get("track") or {}).get("packet-capture"):
+                        dropped.append(DroppedField(
+                            rule_id=_r.get("rule_name") or "?",
+                            field="track.packet-capture",
+                            reason="add-threat-rule takes track as a "
+                                   "plain type string - packet capture "
+                                   "not migrated",
+                        ))
             tp_section.append({
                 "layer_name": layer,
                 "strategy":   strat,
@@ -5848,7 +6372,12 @@ class CheckpointDriver(DeployDriver):
                     pushed = 0
                     skipped_ro = 0
                     first_ro: str | None = None
-                    for cmd in cmds:
+                    # Count OBJECTS, not API commands: some entities render as
+                    # an add-* followed by a set-* on the same name (e.g. the
+                    # access-rule time attach) - counting both read like the
+                    # section pushed twice as many rules as it did.
+                    counted_names: set[str] = set()
+                    for cmd_idx, cmd in enumerate(cmds, 1):
                         # Apply renames decided earlier in THIS push (see the
                         # ambiguity handler below) to the payload's own name +
                         # member refs before sending it.
@@ -5871,7 +6400,11 @@ class CheckpointDriver(DeployDriver):
                         try:
                             _call_idempotent(base_url, sid,
                                              cmd["command"], cmd["payload"])
-                            pushed += 1
+                            if not (cmd["command"].startswith("set-")
+                                    and name in counted_names):
+                                pushed += 1
+                            if name != "<unnamed>":
+                                counted_names.add(name)
                         except Exception as e:
                             # CP AMBIGUOUS predefined names (QA finding, 'MMS'):
                             # add-* fails "More than one object named X exists"
@@ -5889,7 +6422,10 @@ class CheckpointDriver(DeployDriver):
                                 try:
                                     _call_idempotent(base_url, sid,
                                                      cmd["command"], cmd["payload"])
-                                    pushed += 1
+                                    if not (cmd["command"].startswith("set-")
+                                            and new_name in counted_names):
+                                        pushed += 1
+                                    counted_names.add(new_name)
                                     continue
                                 except Exception as e2:
                                     e = e2
@@ -5909,7 +6445,7 @@ class CheckpointDriver(DeployDriver):
                                 continue
                             yield StepResult(
                                 step=step, success=False,
-                                detail=f"failed at {name!r} (item {pushed + 1}/"
+                                detail=f"failed at {name!r} (command {cmd_idx}/"
                                        f"{len(cmds)}): {e}",
                             )
                             ok = False
@@ -6014,14 +6550,30 @@ class CheckpointDriver(DeployDriver):
                 yield StepResult(step="publish", success=True,
                                  detail="publish accepted (no task-id)")
                 return
-            for _ in range(120):  # ~4 min max
+            # Large publishes (XL estates: ~2600 changes) run well past 4 min,
+            # and while the SmartCenter is busy publishing its API turns briefly
+            # unresponsive - a single slow show-task must NOT be read as failure.
+            # Poll up to ~20 min with backoff, tolerating transient errors
+            # (the poll itself keeps the session active, so it won't idle out).
+            deadline = time.monotonic() + 1200.0   # 20 min
+            interval = 3.0
+            consecutive_errs = 0
+            last_pct = None
+            while time.monotonic() < deadline:
                 try:
                     t = _call(base_url, sid, "show-task",
                               {"task-id": task_id, "details-level": "full"})
+                    consecutive_errs = 0
                 except Exception as e:
-                    yield StepResult(step="publish", success=False,
-                                     detail=f"show-task failed: {e}")
-                    return
+                    # SC busy/slow mid-publish - retry a handful of times before
+                    # giving up, rather than failing on the first hiccup.
+                    consecutive_errs += 1
+                    if consecutive_errs >= 5:
+                        yield StepResult(step="publish", success=False,
+                                         detail=f"show-task failed {consecutive_errs}x: {e}")
+                        return
+                    time.sleep(min(interval * 2, 15.0))
+                    continue
                 tasks = t.get("tasks") or []
                 if not tasks:
                     yield StepResult(step="publish", success=False,
@@ -6036,9 +6588,11 @@ class CheckpointDriver(DeployDriver):
                     yield StepResult(step="publish", success=False,
                                      detail=f"publish status={status}")
                     return
-                time.sleep(2)
+                # back off gently (3s -> 10s) to ease load on a busy SC
+                time.sleep(interval)
+                interval = min(interval + 1.0, 10.0)
             yield StepResult(step="publish", success=False,
-                             detail="publish task still running after 4 min")
+                             detail="publish task still running after 20 min")
         finally:
             _logout(base_url, sid)
 
@@ -6553,8 +7107,13 @@ def _push_tp_rules_for_layer(
             )
             return
     pushed = 0
+    exc_pushed = 0
+    exc_failed: list[str] = []
     for rule in tp_rules:
         name = rule.get("name") or "<unnamed>"
+        # Exceptions ride on the generated rule dict (strategy 'source');
+        # they are NOT part of the add-threat-rule payload.
+        exceptions = rule.pop("exceptions", None) or []
         try:
             _call(base_url, sid, "add-threat-rule", rule)
             pushed += 1
@@ -6565,6 +7124,22 @@ def _push_tp_rules_for_layer(
                        f"{len(tp_rules)}): {e}",
             )
             return
+        for exc in exceptions:
+            # Best-effort per exception: a failed exception is reported but
+            # does not abort the layer push (the rule itself is live).
+            ename = exc.get("name") or "<unnamed>"
+            try:
+                _call(base_url, sid, "add-threat-exception", exc)
+                exc_pushed += 1
+            except Exception as e:
+                exc_failed.append(f"{ename}: {e}")
+    for msg in exc_failed[:5]:
+        yield StepResult(step=f"tp: exception {layer!r}", success=False,
+                         detail=f"add-threat-exception failed - {msg}")
+    if len(exc_failed) > 5:
+        yield StepResult(step=f"tp: exception {layer!r}", success=False,
+                         detail=f"... {len(exc_failed) - 5} more exception "
+                                f"failure(s)")
     tombstone_detail = ""
     if stranded_uid:
         try:
@@ -6575,8 +7150,10 @@ def _push_tp_rules_for_layer(
             # Non-fatal - tombstone stays but push succeeded. User sees
             # an extra _gateshift-tp-tombstone rule that the next wipe cleans up.
             tombstone_detail = f"; tombstone left ({e})"
+    _exc_note = f" + {exc_pushed} exception(s)" if exc_pushed else ""
     yield StepResult(step=step, success=True,
-                     detail=f"{pushed} rule(s) pushed{tombstone_detail}")
+                     detail=f"{pushed} rule(s){_exc_note} pushed"
+                            f"{tombstone_detail}")
 
 
 # ── Gaia push helpers (CP-Network-Push V1) ───────────────────────
@@ -6980,6 +7557,33 @@ def _gaia_push_interfaces(
         pushed = 0
         skipped = 0
         first_err: str | None = None
+        # VLAN adds fail on an admin-down parent ("Interface ethX is down",
+        # matrix finding M-4: fresh Gaia ships data ports down). Pushing
+        # subinterfaces IS the intent that the parent carries traffic, so
+        # bring only the actually-used parents up, declared. Other ifaces
+        # keep their prior state (the existing no-toggle contract).
+        if itype == "vlan":
+            _parents = sorted({(r.get("parent") or "").strip()
+                               for r in rows if r.get("parent")})
+            _raised = []
+            for _pn in _parents:
+                if mgmt_iface_name and _pn == mgmt_iface_name:
+                    continue
+                try:
+                    _st = _gaia_call(base_url, sid,
+                                     "show-physical-interface",
+                                     {"name": _pn})
+                    if _st.get("enabled") is False:
+                        _gaia_call(base_url, sid, "set-physical-interface",
+                                   {"name": _pn, "enabled": True})
+                        _raised.append(_pn)
+                except Exception:
+                    pass   # parent may be a bond/unknown - the add reports
+            if _raised:
+                yield StepResult(
+                    step="gaia: enable vlan parents", success=True,
+                    detail=f"{len(_raised)} parent port(s) were admin-down "
+                           f"and were enabled: {', '.join(_raised)}")
         for r in rows:
             name = r.get("name") or "<unnamed>"
             ipv4 = r.get("ipv4") or ""
@@ -7081,14 +7685,15 @@ def _gaia_force_mgmt_iface(
         try:
             if r.get("dhcp_enabled"):
                 _gaia_set_physical_dhcp(base_url, sid, name=name,
-                                        comment=comment, enabled=None)
+                                        comment=comment, enabled=None,
+                                        retries=0)
             else:
                 # Short timeout: we EXPECT the IP change to hang+drop the
                 # session (lab-measured: the full 120s read-timeout otherwise),
                 # so cap the wait at 20s instead of blocking the push for 2 min.
                 _gaia_set_physical(base_url, sid, name=name, ipv4=ipv4,
                                    mask_len=mask, comment=comment, enabled=None,
-                                   timeout=20)
+                                   timeout=20, retries=0)
         except Exception:
             # Session dropped right after the set landed - the new IP cut us off.
             # This is the success path: the change is in the running config.

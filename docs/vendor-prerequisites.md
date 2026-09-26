@@ -138,8 +138,9 @@ importing a policy.
 **Setup:** point the firewall's remote logging at the Gateshift host
 (UDP port 514) and include the firewall (`filterlog`) application - see
 OPNsense's remote-logging documentation. Gateshift's built-in syslog
-receiver listens on UDP 514; alternatively, copy a syslog-format capture
-file into the receiver's log directory (`syslog-ng/logs/`).
+receiver listens on UDP 514; alternatively, upload a syslog-format
+capture file in the UI (Devices > Add device > Log source) or copy it
+into the receiver's log directory (`syslog-ng/logs/`).
 
 **Notes**
 

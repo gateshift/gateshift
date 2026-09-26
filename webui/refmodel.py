@@ -518,7 +518,8 @@ def _imported_rule_references(conn, device_id: int) -> list[Reference]:
               ("services", ("service",)))
     try:
         rows = conn.execute(text(
-            "SELECT rule_name, src_zones, dst_zones, sources, destinations, services "
+            "SELECT rule_name, src_zones, dst_zones, sources, destinations, "
+            "services, schedule "
             "FROM fw_imported_rules WHERE device_id = :d"), {"d": device_id}).mappings().all()
     except Exception:
         return refs
@@ -532,6 +533,13 @@ def _imported_rule_references(conn, device_id: int) -> list[Reference]:
                 n = _clean(item)
                 if n and n.lower() not in ("any", "application-default"):
                     refs.append(Reference("access_rule", label, label, targets, n))
+        # Scalar schedule ref - the consolidated view carries it, but this
+        # fallback missed it, so a freshly-imported-not-generated device
+        # flagged every referenced schedule as unused (matrix finding M-2).
+        sched = _clean(row.get("schedule"))
+        if sched:
+            refs.append(Reference("access_rule", label, label,
+                                  ("schedule",), sched))
     return refs
 
 
