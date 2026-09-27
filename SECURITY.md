@@ -46,10 +46,11 @@ These properties matter more than any single patch:
   holds those credentials.
 - **Working data is not encrypted.** Imported rules, objects, interfaces and
   routes are stored in clear text so the pipeline can process them, and an
-  uploaded ASA running-config is kept verbatim. Do not import real production
-  configurations - restore a backup onto a lab appliance and connect to that.
-  Secrets embedded in a source config (VPN pre-shared keys)
-  are never read; Gateshift pushes a placeholder.
+  uploaded ASA running-config is kept verbatim. A Gateshift host therefore
+  holds the same sensitive material as the firewalls it talks to - run and
+  protect it accordingly, and where you do not need the live source, connect
+  to a restored backup instead. Secrets embedded in a source config (VPN
+  pre-shared keys) are never read; Gateshift pushes a placeholder.
 
 ## No bounty
 

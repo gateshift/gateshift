@@ -4,6 +4,10 @@
 
 Built to make firewall migration and optimization projects easier, faster and safer.
 
+Gateshift reads a firewall configuration, translates it into a vendor-neutral form, enriches it with what the target platform can do, and pushes it through the target's API.
+
+Website: [gateshift.org](https://gateshift.org)
+
 ## See it in action
 
 Complete migrations, start to finish, on YouTube:
@@ -15,11 +19,14 @@ Complete migrations, start to finish, on YouTube:
 
 ## What it can do
 
-- Migrate firewall configurations between different vendors and deployment models: standalones / clusters / unmanaged / managed (Enterprise Edition) - hardware / virtual / cloud alike.
-- Migrate interfaces, routes, rulesets, NAT, objects, security profiles, IPsec VPN, threat prevention, and more.
+- Migrate firewall configurations between different vendors and deployment models: standalones, clusters, unmanaged and managed devices, on hardware, virtual and cloud alike.
+- Carry security rules, NAT, address and service objects, interfaces, static routes, IPsec VPN, schedules and tags across to the target.
+- Attach what the target itself offers instead of copying the source: security profiles, applications and log settings.
 - Generate new rulesets from traffic logs.
 - Optimize and clean up firewall configurations, directly on a firewall or during migrations.
-- Operate fully offline: no telemetry, no phone-home, no license callbacks, no cloud uploads, no LLM calls.
+- Operate fully offline: no telemetry, no phone-home, no licence callbacks, no cloud uploads, no LLM calls.
+
+Migrating to and from central managers (Panorama, FortiManager, Check Point MDS) is part of the Enterprise Edition. See Editions below.
 
 ## What it can't do
 
@@ -64,7 +71,7 @@ Every step is explicit and under the operator's control:
 - Filter and consolidate the rules.
 - Drop unused and duplicate objects.
 - Auto-derive zones and interfaces, auto-assign applications.
-- Apply security profiles, log settings, schedules, etc.
+- Attach security profiles, log settings and schedules to the rules.
 - Push the whole configuration or just selected scopes.
 
 Sources come from an API connection, a configuration-file upload, or traffic logs. Migrations run intra-vendor and cross-vendor, appliance to manager and manager to appliance (the manager tier is the Enterprise Edition). With the same device as source and target, the identical pipeline performs in-place optimization and cleanup. Traffic logs can be turned into rule candidates instead of importing a policy.
@@ -88,13 +95,18 @@ The **Enterprise Edition** adds the manager tier - Panorama, FortiManager, Check
 
 ## Verification, liability and intended use
 
-> **Lab use only.** Gateshift is a private project, still under development, and not intended for production use. Do not connect it to production systems - neither API access to a production source nor pushes onto a production target. Use is entirely at your own risk.
-
 Gateshift is a tool for specialists. It assumes you know the platforms involved and can judge a firewall configuration on its merits; it is not a substitute for that judgment.
 
-Configuration backups and verification are the operator's responsibility and a mandatory part of every migration. Back up every system Gateshift touches, before it touches them. Read the generate report, review the pushed configuration on the target, and test the result for correctness and function before cutover.
+Gateshift can and will get things wrong. What it pushes onto a target is a draft, not a finished configuration: review it there, test it, and decide for yourself whether it goes live. Everything the tool does on a device happens on the operator's authority and remains the operator's responsibility.
 
-Most "tool bug" reports turn out to be device access problems: an API user missing a trusthost, an unpublished Check Point API user, or a PAN-OS password pasted into the API-key field. Read `KNOWN_LIMITATIONS.md` before the first migration.
+Configuration backups and verification are the operator's responsibility and a mandatory part of every migration:
+
+- Back up every system before Gateshift touches it.
+- Read Gateshift's own log.
+- Review the pushed configuration on the target.
+- Test the result for correctness and function before cutover.
+
+What Gateshift does not do is written down: read `KNOWN_LIMITATIONS.md` before the first migration. Most reported "tool bugs" turn out to be device access problems: an API user missing a trusthost, an unpublished Check Point API user, or a PAN-OS password pasted into the API-key field.
 
 To the extent permitted by applicable law, Gateshift and everything it produces are provided "as is", without warranty of any kind and without any acceptance of liability. In particular, no liability is accepted for:
 
@@ -111,7 +123,7 @@ Gateshift is an independent project. It is not affiliated with, endorsed by, or 
 
 ## Transparency
 
-Gateshift began as a hand-written one-man project; its development is now AI-assisted. The product itself contains no AI. The source is open, and every release is guaranteed to become genuine open source (MPL 2.0) four years after it ships (see License). `SBOM.json` (CycloneDX) lists every dependency and its license.
+Gateshift started as a hand-written project; its development is now AI-assisted. The product itself contains no AI. The source can be read, and every release is guaranteed to become genuine open source (MPL 2.0) four years after it ships (see License). `SBOM.json` (CycloneDX) lists every dependency and its licence.
 
 ## License
 
@@ -139,7 +151,7 @@ Security: report vulnerabilities privately, not in a public issue. Only the late
 
 ## Roadmap
 
-Direction, not commitment - entries carry no dates, and feature requests feed the list without filling it:
+Direction, not commitment. These entries carry no dates, and feature requests feed the list without filling it:
 
 - **1.0** - stability round incorporating first feedback.
 - Vendor cloud managers: Strata Cloud Manager, Smart-1 Cloud, FortiManager Cloud (Enterprise).
@@ -149,4 +161,4 @@ Direction, not commitment - entries carry no dates, and feature requests feed th
 
 ## Status
 
-Version 0.9.2 - feature-complete and verified against live appliances across the full cross-vendor matrix. Gateshift remains a private project in active development, not intended for production use; work against lab appliances, not production systems (see the liability section above).
+Version 0.9.2 is feature-complete and verified against live appliances across the full cross-vendor matrix. Gateshift remains an independent project in active development.
