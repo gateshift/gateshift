@@ -1,0 +1,427 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# The device inventory (U7, docs/PROJECTS_UI_DESIGN.md): the device column of
+   the Projects page. One row per device with import / edit / delete; the edit
+   dialog carries the former inline edit form, the reset and (hidden R1) the
+   restore. Expects the inventory context: devices, platform_labels,
+   manager_ui, has_logs, tenant_id and the flash values form_error /
+   discovered / uploaded / no_data / discover_empty. #}
+
+{# ── Discover-from-logs empty state: not an error - the syslog receiver
+     has nothing (nolog) or nothing identifiable (nodev) yet. Shown in the
+     standard hint dialog (base.html), auto-opened on page load. ── #}
+{% if discover_empty %}
+<div id="discover-hint-content" style="display:none;">
+  <div>Discovery registers devices from the syslog stream. The firewall has to send its traffic logs here first:</div>
+  <div style="margin-top:6px;padding-left:14px;">1. On the firewall, configure remote logging to this Gateshift host, UDP port 514.</div>
+  <div style="padding-left:14px;">2. Make sure the rules whose traffic should count have logging enabled.</div>
+  <div style="padding-left:14px;">3. Let traffic flow for a few minutes, then discover again.</div>
+  <div style="margin-top:6px;">Details per vendor: docs/vendor-prerequisites.md in the repository.</div>
+  <form method="post" action="/devices/discover" style="margin:10px 0 0;display:flex;justify-content:flex-end;gap:8px;"
+        onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
+    <button type="button" onclick="closeHintModal()" class="btn">Close</button>
+    <button type="submit" class="btn">Discover Again</button>
+  </form>
+</div>
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    openHintModal('{{ "No logs received yet" if discover_empty == "nolog" else "Logs received, but no supported firewall identified" }}',
+                  'discover-hint-content');
+  });
+</script>
+{% endif %}
+
+{# ── Flash messages from the device endpoints - shown as toasts, the params
+     stripped from the URL after the first render (GET handlers stay
+     read-only; a reload must not replay a stale banner). ── #}
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    {% if form_error %}showToast({{ form_error | tojson }}, 'error', 12000);{% endif %}
+    {% if discovered %}showToast('Discovered: ' + {{ discovered | tojson }}, 'success', 8000);{% endif %}
+    {% if uploaded %}showToast('Uploaded: ' + {{ uploaded | tojson }}, 'success', 8000);{% endif %}
+    {% if no_data %}showToast({{ no_data | tojson }} + ' has nothing imported yet: import config or logs first.', 'info', 9000);{% endif %}
+    try {
+      var u = new URL(window.location.href);
+      var had = false;
+      ['form_error', 'discovered', 'uploaded', 'no_data', 'discover_empty', 'picked'].forEach(function (p) {
+        if (u.searchParams.has(p)) { u.searchParams.delete(p); had = true; }
+      });
+      if (had) {
+        var qs = u.searchParams.toString();
+        history.replaceState(null, '', u.pathname + (qs ? '?' + qs : '') + u.hash);
+      }
+    } catch (e) { /* cosmetic - never break the page */ }
+  });
+</script>
+
+<div class="sec-hd">
+  <h1>Devices</h1>
+  <div class="count">
+    <span class="n" id="pf-dev-count">{{ devices | length }}</span>
+    <span class="lbl">device{{ '' if devices|length == 1 else 's' }}</span>
+  </div>
+  <div style="margin-left:auto;">
+    <button type="button" onclick="openAddModal({next: '/projects'})" class="btn" title="Register a device in this tenant">+Add Device</button>
+  </div>
+</div>
+
+{% if devices %}
+<div class="twrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Imported</th>
+        <th style="text-align:right;"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in devices %}
+      {% set has_data = d.last_import_ts is not none %}
+      {% set _pl_label = platform_labels.get(d.platform, 'Unknown') %}
+      <tr id="device-{{ d.id }}" data-device-id="{{ d.id }}" data-host="{{ d.host_name }}"
+          data-text="{{ ((d.display_name or d.host_name) ~ ' ' ~ d.host_name ~ ' ' ~ _pl_label ~ ' ' ~ (d.mgmt_ip or '') ~ ' ' ~ (d.role or '') ~ ' ' ~ (d.notes or '')) | lower }}">
+        <td style="max-width:280px;white-space:normal;overflow-wrap:anywhere;">
+          {% if d.device_kind == 'manager-source' and d.pano_default_scope %}
+          {# A manager (EE): the name enters the Manager-View (scope tree + cross-scope analysis). #}
+          <a href="/manager/{{ d.id }}" onclick="showNavOverlay()" class="pl-dev-link" title="Manager view: scopes and cross-scope analysis">{{ d.display_name or d.host_name }}</a>
+          {% else %}
+          <button type="button" class="pl-dev-link" style="background:none;border:0;border-bottom:1px dotted var(--line2);padding:0;font:inherit;cursor:pointer;text-align:left;white-space:normal;overflow-wrap:anywhere;" onclick="openEditDevice({{ d.id }})" title="Details and settings">{{ d.display_name or d.host_name }}</button>
+          {% endif %}
+          <div class="pl-sub" style="white-space:normal;">
+            {{ _pl_label }}{% if d.mgmt_ip %} &middot; {{ d.mgmt_ip }}{% if d.mgmt_port and d.mgmt_port != 443 %}:{{ d.mgmt_port }}{% endif %}{% endif %}
+            {# role and note are not shown in the list (user decision 2026-10-04) - both stay in Details #}
+            {% if d.managed_hint %}
+            {% set _mh = d.managed_hint %}
+            <span class="tag warn" style="margin-left:4px;font-size:var(--fs-caption);cursor:help;"
+                  title="{% if _mh.kind == 'panorama' %}Managed by Panorama {{ _mh.mgr }}{{ ' (registered in Gateshift)' if _mh.registered else ' (not registered in Gateshift)' }}. A DIRECT import contains only this firewall's LOCAL layer: import the Panorama for the full picture.{% else %}Managed by FortiManager {{ _mh.mgr }}{{ ' (registered in Gateshift)' if _mh.registered else ' (not registered in Gateshift)' }}. The import is complete, but direct pushes conflict with FMG ownership: push via the FortiManager route.{% endif %}">managed &middot; {{ 'Panorama' if _mh.kind == 'panorama' else 'FMG' }}</span>
+            {% endif %}
+          </div>
+        </td>
+        <td class="date">{% if has_data %}{{ d.last_import_ts | rel_time }}{% else %}<span class="dash" title="Nothing imported yet">never</span>{% endif %}</td>
+        <td style="text-align:right;white-space:nowrap;">
+          <div style="display:inline-flex;align-items:center;gap:6px;justify-content:flex-end;flex-wrap:nowrap;">
+            {# Import - amber when the device has no data yet (the next step). A
+               device with data is REPLACED by its import, so it reads 're-import'. #}
+            {% set _import_classes = 'btn' %}
+            {% set _import_label = 'Re-import' if has_data else 'Import' %}
+            {% if d.device_kind == 'manager-source' %}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Discovering scopes from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}" title="Discover the manager's scopes">{{ _import_label }}</button>
+              </form>
+            {% elif d.has_api and d.platform == 'panw' %}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}" title="Read the configuration through the API">{{ _import_label }}</button>
+              </form>
+            {% elif d.has_api and d.platform == 'checkpoint' %}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, '{{ 'Discovering scopes' if d.device_kind == 'manager-source' else 'Importing config' }} from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}"{% if d.cp_import_pkg %} title="Package: {{ d.cp_import_pkg }}"{% endif %}>{{ _import_label }}</button>
+              </form>
+            {% elif d.platform == 'checkpoint' %}
+              <span class="dash" style="font-style:italic;" title="No management API key configured">no API key</span>
+            {% elif d.platform == 'asa' %}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Parsing stored ASA config for {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}" title="Re-parse the stored running-config (no re-upload)">{{ _import_label }}</button>
+              </form>
+            {% elif d.has_api and d.platform == 'fortigate' %}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}" title="Read the configuration through the API">{{ _import_label }}</button>
+              </form>
+            {% elif d.platform == 'fortigate' %}
+              <span class="dash" style="font-style:italic;" title="No API key configured">no API key</span>
+            {% elif d.has_api and d.platform == 'firepower' %}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}" title="Read the configuration through FDM">{{ _import_label }}</button>
+              </form>
+            {% elif d.platform == 'firepower' %}
+              <span class="dash" style="font-style:italic;" title="No FDM password configured">no credentials</span>
+            {% elif d.platform == 'opnsense' and (d.opn_has_stored_config or d.has_api) %}
+              {# An uploaded configuration is read in preference to the box. #}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, '{{ 'Re-parsing the stored configuration for' if d.opn_has_stored_config else 'Reading configuration from' }} {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}"
+                        title="{{ 'Re-parse the uploaded configuration - upload a fresh export to pick up changes made on the firewall' if d.opn_has_stored_config else 'Read the configuration through the OPNsense API' }}">{{ _import_label }}</button>
+              </form>
+            {% else %}
+              <button type="button" onclick="startRun('ingest', '{{ d.host_name }}')" class="run-btn {{ _import_classes }}" title="Read this sender's traffic logs">{{ 're-import logs' if has_data else 'import logs' }}</button>
+            {% endif %}
+            {% if d.backup_ok %}
+            <button type="button" onclick="deviceBackup({{ d.id }}, '{{ d.host_name }}')" class="btn"
+                    title="Download this firewall's running configuration: pulled now, not stored in Gateshift">Backup</button>
+            {% endif %}
+            <button type="button" onclick="openEditDevice({{ d.id }})" class="btn" title="Details and settings">Details</button>
+            <form method="post" action="/devices/reset/{{ d.id }}" style="display:contents;"
+                  onsubmit="return confirmFormSubmit(this, {title:'Reset device?', body:'All collected data for {{ d.host_name }} will be wiped. The device registration itself stays.', confirmLabel:'Reset', danger:true});">
+              <button type="submit" class="btn danger" title="Wipe everything collected for this device. The registration stays">Reset</button>
+            </form>
+            <form method="post" action="/devices/delete/{{ d.id }}" style="display:contents;"
+                  onsubmit="return confirmFormSubmit(this, {title:'Remove device?', body:'{{ d.host_name }} and all its collected data will be removed.', confirmLabel:'Remove', danger:true});">
+              <button type="submit" class="btn danger"
+                      {% if d.projects %}disabled title="Used by {{ d.projects }} project(s), delete those first"{% endif %}>Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty" style="background:var(--bg1);border:1px solid var(--line);border-radius:0;">
+  No devices in this tenant yet.
+  <div style="margin-top:12px;"><button type="button" onclick="openAddModal({next: '/projects'})" class="btn">+Add Device</button></div>
+</div>
+{% endif %}
+
+{# ── Edit dialogs - one per device, hidden; openEditDevice(id) shows it. ── #}
+{% for d in devices %}
+<div id="edit-device-{{ d.id }}" class="hidden fixed inset-0 z-50 items-center justify-center"
+     style="background:rgba(4,7,11,0.6);" onclick="if (event.target === this) closeEditDevice({{ d.id }});">
+  <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:640px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);max-height:92vh;overflow:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h2 style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);">{{ d.display_name or d.host_name }} <span class="mut" style="font-weight:400;">&middot; {{ platform_labels.get(d.platform, 'Unknown') }}</span></h2>
+      <button type="button" onclick="closeEditDevice({{ d.id }})" class="x" aria-label="Close">&times;</button>
+    </div>
+    <div class="mut" style="font-size:var(--fs-body);margin:-6px 0 12px;" title="Device facts are shared: an edit reaches every project that uses this device">
+      {% if d.projects %}Used in {{ d.projects }} project{{ '' if d.projects == 1 else 's' }}{% else %}Not used in any project yet{% endif %}
+    </div>
+    <form method="post" action="/devices/edit/{{ d.id }}" style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+      {# where to return after the save; filled when a project's device card opened this dialog #}
+      <input type="hidden" name="next" value="">
+      {% set _cp_pinned = d.platform == 'checkpoint' and not d.cp_is_legacy %}
+      {# ASA devices have no IP / API key / Gaia creds - the config file is
+         the whole source of truth. #}
+      {% if d.platform != 'asa' %}
+      <div class="field" style="min-width:160px;flex:1 1 160px;">
+        <label>{% if _cp_pinned %}Gateway IP <span class="dash">(identity, re-add to change)</span>{% else %}Management IP{% endif %}</label>
+        <input type="text" name="mgmt_ip" value="{{ d.mgmt_ip or '' }}" {% if _cp_pinned %}readonly{% endif %}
+               class="inp" style="font-size:var(--fs-body);padding:7px 10px;{% if _cp_pinned %}opacity:0.55;cursor:not-allowed;{% endif %}">
+      </div>
+      <div class="field" style="min-width:80px;flex:0 0 90px;">
+        <label>Port</label>
+        <input type="number" name="mgmt_port" value="{{ d.mgmt_port or 443 }}" min="1" max="65535" {% if _cp_pinned %}readonly{% endif %}
+               class="inp" style="font-size:var(--fs-body);padding:7px 10px;{% if _cp_pinned %}opacity:0.55;cursor:not-allowed;{% endif %}">
+      </div>
+      {% if _cp_pinned %}
+      <div class="field" style="min-width:160px;flex:1 1 160px;">
+        <label>Mgmt-Server IP <span class="dash">(API endpoint)</span></label>
+        <input type="text" value="{{ d.cp_mgmt_ip or '' }}" readonly class="inp" style="font-size:var(--fs-body);padding:7px 10px;opacity:0.55;cursor:not-allowed;">
+      </div>
+      {% endif %}
+      {% if d.platform == 'opnsense' %}
+      <div class="field" style="min-width:160px;flex:1 1 160px;">
+        <label>API key <span class="dash">(to push to this firewall)</span></label>
+        <input type="text" name="opn_api_key_id" value="{{ d.opn_api_key_id or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+      </div>
+      {% endif %}
+      {% if d.platform == 'firepower' %}
+      <div class="field" style="min-width:120px;flex:1 1 120px;">
+        <label>FDM User</label>
+        <input type="text" name="ftd_username" value="{{ d.ftd_username or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+      </div>
+      {% endif %}
+      <div class="field" style="min-width:140px;flex:1 1 140px;">
+        <label>{{ 'FDM Password' if d.platform == 'firepower' else ('API Secret' if d.platform == 'opnsense' else 'API Key') }} <span class="dash">(Blank = keep)</span></label>
+        <input type="password" name="api_key" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="new-password">
+      </div>
+      {% if d.platform == 'checkpoint' %}
+      <div class="field" style="min-width:120px;flex:1 1 120px;">
+        <label>Gaia User</label>
+        <input type="text" name="gaia_user" value="{{ d.gaia_user or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+      </div>
+      <div class="field" style="min-width:140px;flex:1 1 140px;">
+        <label>Gaia Password <span class="dash">(Blank = keep)</span></label>
+        <input type="password" name="gaia_password" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="new-password">
+      </div>
+      {% endif %}
+      {% else %}
+      <div class="mut" style="font-style:italic;align-self:flex-end;padding-bottom:9px;">Config-file source, no IP or credentials.</div>
+      {% endif %}
+      <div class="field" style="min-width:160px;flex:1 1 100%;">
+        <label>Notes</label>
+        <input type="text" name="notes" value="{{ d.notes or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;">
+      </div>
+      {% if d.platform == 'fortigate' %}
+      <div class="field" style="min-width:170px;flex:1 1 170px;">
+        <label>NAT mode <span class="dash">(Forti)</span> <span id="nat-mode-hint-{{ d.id }}" class="dash"></span></label>
+        <select name="nat_mode" id="nat-mode-{{ d.id }}" data-pinned="{{ '1' if d.nat_mode_pinned else '0' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;">
+          {# 'auto' is the unpinned state - the push probes the box. Without
+             the option the dialog pre-selected Central, and merely saving a
+             device's details pinned it (found 2026-10-07 on a lab row). #}
+          {% set _nm = d.nat_mode or 'auto' %}
+          <option value="auto"    {% if _nm == 'auto' %}selected{% endif %}>Auto (read from the device at push time)</option>
+          <option value="central" {% if _nm == 'central' %}selected{% endif %}>Central (central-snat-map)</option>
+          <option value="policy"  {% if _nm == 'policy' %}selected{% endif %}>Policy (per-policy NAT)</option>
+        </select>
+      </div>
+      {% endif %}
+      {% if d.platform == 'panw' %}
+      <div class="field" style="min-width:200px;flex:1 1 200px;">
+        <label>Routing <span class="dash">(PA)</span></label>
+        <select name="routing_mode" id="routing-mode-{{ d.id }}" data-pinned="{{ '1' if d.routing_mode_pinned else '0' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;">
+          {% set _rm = d.routing_mode or 'auto' %}
+          <option value="auto"     {% if _rm == 'auto' %}selected{% endif %}>Auto (detect on generate)</option>
+          <option value="legacy"   {% if _rm == 'legacy' %}selected{% endif %}>Legacy (virtual-router)</option>
+          <option value="advanced" {% if _rm == 'advanced' %}selected{% endif %}>Advanced Routing (logical-router)</option>
+        </select>
+      </div>
+      {% endif %}
+      <div style="display:flex;gap:8px;flex:1 1 100%;justify-content:flex-end;">
+        <button type="button" onclick="closeEditDevice({{ d.id }})" class="btn">Cancel</button>
+        <button type="submit" class="btn">Save</button>
+      </div>
+    </form>
+    {# Restore - the destructive half of devicebackup.py (hidden in R1). A
+       sibling of the edit form (HTML forbids nested forms); talks JSON. #}
+    {% if d.restore_ok %}
+    <div id="restore-{{ d.id }}" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line2);">
+      <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+        <div class="field" style="min-width:280px;">
+          <label>Restore configuration <span class="dash">(replaces the whole firewall)</span></label>
+          <input type="file" id="restore-file-{{ d.id }}" class="inp" style="font-size:var(--fs-body);padding:5px 10px;" onchange="restoreInspect({{ d.id }})">
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button type="button" id="restore-btn-{{ d.id }}" class="btn danger" disabled onclick="restoreRun({{ d.id }}, '{{ d.host_name }}')">Restore</button>
+        </div>
+      </div>
+      <div id="restore-info-{{ d.id }}" class="mut" style="font-size:var(--fs-body);margin-top:8px;white-space:pre-line;"></div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+
+<script src="/static/gs-backup.js?v={{ static_version or '0' }}"></script>
+<script>
+function openEditDevice(id) {
+  var m = document.getElementById('edit-device-' + id);
+  if (!m) return;
+  m.classList.remove('hidden'); m.style.display = 'flex';
+  _maybeProbeNatMode(id);
+}
+function closeEditDevice(id) {
+  var m = document.getElementById('edit-device-' + id);
+  if (!m) return;
+  m.classList.add('hidden'); m.style.display = '';
+}
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  document.querySelectorAll('[id^="edit-device-"]:not(.hidden)').forEach(function (m) {
+    m.classList.add('hidden'); m.style.display = '';
+  });
+});
+// The workspace's device cards and old inventory links open a device's
+// dialog directly: /projects?edit=<id>. A card also says where to return to
+// after the save (?next=<workspace url>, the D8 mechanism of the add
+// dialog) - without it the save used to end on the inventory and the
+// project had to be found again.
+document.addEventListener('DOMContentLoaded', function () {
+  var q = new URLSearchParams(window.location.search);
+  var e = Number(q.get('edit') || 0);
+  if (e) {
+    var nxt = q.get('next') || '';
+    var m = document.getElementById('edit-device-' + e);
+    var inp = m ? m.querySelector('input[name="next"]') : null;
+    if (inp && nxt.charAt(0) === '/' && nxt.charAt(1) !== '/') inp.value = nxt;
+    history.replaceState(null, '', '/projects');
+    openEditDevice(e);
+  }
+});
+
+// Lazy NAT-mode probe for FortiGate: when the dialog opens for a device
+// whose nat_mode isn't pinned yet, probe the box's central-nat and pre-select
+// the dropdown accordingly. Only the opened device is probed.
+function _maybeProbeNatMode(id) {
+  const sel = document.getElementById('nat-mode-' + id);
+  if (!sel || sel.dataset.pinned === '1' || sel.dataset.probed === '1') return;
+  const hint = document.getElementById('nat-mode-hint-' + id);
+  if (hint) hint.textContent = '(Detecting…)';
+  fetch('/deploy/forti-nat-mode/' + id)
+    .then(r => r.json())
+    .then(d => {
+      sel.dataset.probed = '1';
+      // pre-select only what the box actually reported - a fallback (note
+      // set, box unreachable) stays Auto, or the next save would pin a guess
+      if (d.mode && !d.note) sel.value = d.mode;
+      if (hint) hint.textContent = d.note ? '(unknown - ' + d.note + ')'
+                                          : (d.mode ? '(detected: ' + d.mode + ')' : '');
+    })
+    .catch(() => { if (hint) hint.textContent = '(Probe failed)'; });
+}
+
+// ── Device restore (devicebackup.py, hidden in R1) ──
+function _restoreEls(id) {
+  return {
+    file: document.getElementById('restore-file-' + id),
+    btn:  document.getElementById('restore-btn-' + id),
+    info: document.getElementById('restore-info-' + id),
+  };
+}
+function restoreInspect(id) {
+  var el = _restoreEls(id);
+  el.btn.disabled = true;
+  el.btn.dataset.ident = '';
+  if (!el.file.files.length) { el.info.textContent = ''; return; }
+  var fd = new FormData(); fd.append('file', el.file.files[0]);
+  el.info.textContent = 'Reading the file…';
+  fetch('/devices/' + id + '/restore/inspect', {method: 'POST', body: fd})
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { el.info.textContent = 'Refused: ' + j.error; return; }
+      var i = j.identity || {};
+      var line = 'This file: ' + (i.hostname || '?')
+        + (i.version ? ' · version ' + i.version : '')
+        + (i.model ? ' · ' + i.model : '')
+        + (i.serial ? ' · serial ' + i.serial : '')
+        + ' · ' + j.bytes + ' bytes';
+      el.info.textContent = line + (j.note ? '\n' + j.note : '');
+      el.btn.dataset.ident = line;
+      el.btn.disabled = false;
+    })
+    .catch(function (e) { el.info.textContent = 'Could not read the file: ' + e.message; });
+}
+function restoreRun(id, host) {
+  var el = _restoreEls(id);
+  if (!el.file.files.length) return;
+  confirmModal({
+    title: 'Restore ' + host + ' from this file?',
+    body: [
+      el.btn.dataset.ident || 'the uploaded configuration',
+      'The whole configuration of ' + host + ' is replaced by the file, including everything Gateshift never read, and anything changed on the firewall since the file was taken.',
+      'A push still pending on this firewall is discarded with it.',
+    ],
+    confirmLabel: 'Restore',
+    danger: true,
+  }).then(function (ok) {
+    if (!ok) return;
+    _setOverlay(true, 'Restoring ' + host + '…');
+    el.btn.disabled = true;
+    var fd = new FormData(); fd.append('file', el.file.files[0]);
+    fetch('/devices/' + id + '/restore', {method: 'POST', body: fd})
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var lines = (j.steps || []).map(function (s) {
+          return (s.success ? 'ok   ' : 'FAIL ') + s.step + (s.detail ? ' - ' + s.detail : '');
+        });
+        if (j.ok) {
+          showToast('Restored ' + host + (j.note ? ' - ' + j.note : ''), 'success', 10000);
+        } else {
+          lines.push('ERROR ' + j.error);
+          showToast('Restore failed, see the panel', 'error', 9000);
+        }
+        el.info.textContent = lines.join('\n');
+        if (window.loadPushHistory) loadPushHistory();
+      })
+      .catch(function (e) {
+        el.info.textContent = 'Restore failed: ' + e.message;
+        showToast('Restore failed', 'error');
+      })
+      .finally(function () { _setOverlay(false); el.btn.disabled = false; });
+  });
+}
+</script>

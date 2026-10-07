@@ -48,7 +48,7 @@ def pre_parse(text: str) -> dict:
     warnings: list[str] = []
 
     if not text:
-        errors.append("Empty config - upload an ASA `show running-config` dump.")
+        errors.append("Empty config: upload an ASA `show running-config` dump.")
         return {"hostname": None, "header_ok": False,
                 "errors": errors, "warnings": warnings}
 
@@ -84,7 +84,7 @@ def pre_parse(text: str) -> dict:
     if not header_ok:
         warnings.append("No ASA header marker found "
                         "(expected one of: `ASA Version`, `: Saved`, "
-                        "`: Hardware:`). Vendor sanity check failed - "
+                        "`: Hardware:`). Vendor sanity check failed: "
                         "proceed only if you are sure this is an ASA config.")
 
     return {

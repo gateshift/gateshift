@@ -24,4 +24,5 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-CMD ["sh", "-c", "tailwindcss -c tailwind.config.js -i ./styles/input.css -o ./static/app.css --minify && uvicorn main:app --host 0.0.0.0 --port 8080"]
+# start.sh: stylesheet build, HTTPS on 8443 from /certs, HTTP redirect on 8080
+CMD ["sh", "start.sh"]

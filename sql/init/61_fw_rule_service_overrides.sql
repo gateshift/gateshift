@@ -20,9 +20,12 @@ USE gateshift;
 -- See feedback_rule_identity_hash memory: override tables key on rule_hash.
 
 CREATE TABLE IF NOT EXISTS fw_rule_service_overrides (
-  rule_hash   BINARY(20)                            NOT NULL PRIMARY KEY,
+  project_id  INT                   NOT NULL DEFAULT 0,
+  rule_hash   BINARY(20)                            NOT NULL,
   service     ENUM('any','application-default')     NOT NULL,
   source      ENUM('manual','auto')                 NOT NULL DEFAULT 'manual',
   updated_at  TIMESTAMP                             NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                                       ON UPDATE CURRENT_TIMESTAMP
+                                                       ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (project_id, rule_hash),
+  KEY ix_fw_rule_service_overrides_key (rule_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

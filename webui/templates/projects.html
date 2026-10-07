@@ -1,0 +1,370 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% extends "base.html" %}
+{% set ws_nav = true %}{# version + logout live in the tree's foot, not the header #}
+{% block title %}Projects - Gateshift{% endblock %}
+{# the navigation tree sits flush with the edge: no main gutter (U14) #}
+{% block main_class %}{% endblock %}
+{% block content %}
+
+{# Projects-first IA (docs/PROJECTS_UI_DESIGN.md, U6 layout): the landing
+   page shows the tenant's PROJECTS on the left and its DEVICES on the right.
+   One project = one (source, target) pair with its decisions; a pair whose
+   target is its source is an OPTIMIZATION (the device is curated and pushed
+   back to itself), everything else a migration. Devices are added from the
+   device column (shared modal) or on the inventory page, where edit, import
+   and delete live; the new-project dialog only picks from what exists. #}
+<style>
+  /* column gap 40px (twice the page gutter) so the two tables read as two areas */
+  /* projects 2fr : devices 3fr - the inventory row (name, platform line, four actions) needs the room (U14, beside the tree) */
+  .pl-grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,3fr); gap:22px 40px; padding:14px 20px 22px; align-items:start; }
+  /* the tree takes 236px: the two columns stack 236px earlier than before (U14) */
+  /* beside the 236px tree two columns need a wide window; smaller ones stack projects over devices */
+  @media (max-width: 1560px) { .pl-grid { grid-template-columns:1fr; } }
+  /* the tables (and empty states) span exactly their column, flush with the header row above */
+  .pl-grid .twrap { margin:0 0 22px; }
+  .pl-grid .empty { margin:0 0 22px; }
+  /* column headers = the shared .sec-hd (tokens.css) */
+  .pl-sub { font-size:var(--fs-small); color:var(--tx3); }
+  .np-mode { display:inline-flex; align-items:center; gap:6px; font-size:var(--fs-small);  padding:3px 8px; border:1px solid var(--line2); color:var(--tx2); }
+  .np-mode.optimization { color:var(--green); border-color:var(--green); }
+  .np-mode.migration { color:var(--tx); border-color:var(--line2); }
+  .pl-dev-link { color:var(--tx); text-decoration:none; border-bottom:1px dotted var(--line2); }
+  .pl-dev-link:hover { color:var(--green); border-bottom-color:var(--green); }
+</style>
+
+{# ── U14: the project list is the app's landing view inside the navigation frame -
+   the tree shows its one global entry, "Projects & Devices", and nothing else
+   until a project is opened. ── #}
+{# U16: with a picked project (ov_project) the tree draws that project's items;
+   the locks follow the rules page's two gates. #}
+{% set _source_gate = not has_source_capable %}
+{% set _right_gate  = (not has_target_capable) or (not selected_target) %}
+{% set _gate_locked = _source_gate %}
+{% set _right_locked = _source_gate or _right_gate %}
+<div class="ws-layout">
+{% with nav_mode='landing' %}{% include "_ws_nav.html" %}{% endwith %}
+  <div id="ws-main">
+    {# ── Page head, same place and style as the workspace views (user request
+         2026-10-05). This page has one view, so the path is the entry itself
+         and renders server-side instead of from the nav. ── #}
+    <div id="ws-crumb" class="ws-crumb"><span class="cur">Projects &amp; Devices</span></div>
+    <div class="ws-top">
+      <div id="ws-hint" class="ws-hint">
+        <div class="ws-hint-body"><span class="ws-hint-cap">What you can do here</span><span id="ws-hint-text">Open a project to work in it. Register and import devices on the right. The lists belong to the tenant picked below.</span></div>
+        <button type="button" class="ws-hint-x" onclick="wsHints(false)" title="Hide these hints on every view">Hide</button>
+        <button type="button" class="ws-hint-show" onclick="wsHints(true)" title="Show the view hints again">Show Hints</button>
+      </div>
+    </div>
+{# ── Tenant: header in the shared .sec-hd style; the controls (select, rename,
+     +Add Tenant, delete-when-empty) and the filter on the next row (user request
+     2026-10-04). ── #}
+<div class="sec-hd" style="padding:14px 20px 0;">
+  <h1>Tenant</h1>
+  <div class="count"><span class="n">{{ tenants | length }}</span><span class="lbl">tenant{{ '' if tenants|length == 1 else 's' }}</span></div>
+</div>
+<div class="toolbar" style="padding-top:6px;">
+  {% include "_tenant_switcher.html" %}
+  <div class="sp"></div>
+  {# One filter for both columns: project rows and device rows carry a
+     data-text with everything the eye would search for. #}
+  <input type="search" id="pf-text" class="inp" placeholder="Filter" autocomplete="off"
+         style="font-size:var(--fs-body);padding:5px 8px;width:240px;" oninput="pfApply()">
+</div>
+
+<div class="pl-grid">
+  {# ── Projects column ── #}
+  <section>
+    <div class="sec-hd">
+      <h1>Projects</h1>
+      <div class="count">
+        <span class="n" id="pf-count">{{ projects | length }}</span>
+        <span class="lbl">project{{ '' if projects|length == 1 else 's' }}</span>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <button type="button" onclick="openNewProjectModal()" class="btn"
+                {% if not sources %}disabled title="Register a source device first"{% endif %}>+Add Project</button>
+      </div>
+    </div>
+
+    {% if projects %}
+    <div class="twrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Source &rarr; Target</th>
+            <th style="text-align:right;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in projects %}
+          <tr data-project-id="{{ p.id }}" data-source-host="{{ p.source_host }}" data-target-host="{{ p.target_host }}" data-target-ip="{{ p.target_ip or '' }}"
+              data-mode="{{ p.mode }}" data-name="{{ p.name }}" data-text="{{ (p.name ~ ' ' ~ p.source_name ~ ' ' ~ p.target_name ~ ' ' ~ p.status) | lower }}">
+            <td style="max-width:280px;white-space:normal;overflow-wrap:anywhere;">
+              {# the name is the row's link, dotted like a device name; "open" below does the same #}
+              <a href="{{ p.url }}" onclick="showNavOverlay()" class="pl-dev-link" title="Open this project: its workspace lands on the Overview tab">{{ p.name }}</a>
+            </td>
+            <td style="min-width:160px;white-space:normal;">
+              {{ p.source_name }} <span class="mut">&middot; {{ p.source_platform | plat }}</span>
+              {% if p.mode == 'optimization' %}
+              <div class="pl-sub">&rarr; same device</div>
+              {% else %}
+              <div class="pl-sub">&rarr; {{ p.target_name }} &middot; {{ p.target_platform | plat }}</div>
+              {% endif %}
+            </td>
+            <td style="text-align:right;white-space:nowrap;">
+              <a href="{{ p.url }}" onclick="showNavOverlay()" class="btn" title="Open the workspace of this project">Open</a>
+              <button type="button" class="btn danger" title="Delete this project and every edit it holds (the devices stay)"
+                      onclick="projectDelete({{ p.id }}, this.closest('tr').dataset.name, {{ p.decision_total }})">Delete</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty" style="background:var(--bg1);border:1px solid var(--line);border-radius:0;">
+      No projects in this tenant yet.
+      {% if sources %}
+      <div style="margin-top:12px;"><button type="button" onclick="openNewProjectModal()" class="btn">+Add Project</button></div>
+      {% else %}
+      <div class="mut" style="margin-top:8px;font-size:var(--fs-body);">Add a device on the right first.</div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </section>
+
+  {# ── Devices column = the inventory (U7) ── #}
+  <section>
+    {% include "_device_inventory.html" %}
+  </section>
+</div>
+
+{# The global job log (imports, generates, pushes of every device) stays
+   off this page for now (user decision 2026-10-03); the Deploy tab keeps
+   the per-pair history (gs-log.js). #}
+
+{# ── New-project dialog (D2, U6 shape): two dropdowns, the mode follows the picks. ── #}
+<div id="new-project-modal" class="hidden fixed inset-0 z-50 items-center justify-center"
+     style="background:rgba(4,7,11,0.6);"
+     onclick="if (event.target === this) closeNewProjectModal();">
+  <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:520px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <h2 style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);">Add Project</h2>
+        <span id="np-mode" class="np-mode">Mode</span>
+      </div>
+      <button type="button" onclick="closeNewProjectModal()" class="x" aria-label="Close">&times;</button>
+    </div>
+    <div id="np-mode-hint" class="mut" style="font-size:var(--fs-body);min-height:18px;margin-bottom:12px;"></div>
+    <form onsubmit="return submitNewProject(event)" style="display:flex;flex-direction:column;gap:12px;">
+      <div class="field">
+        <label>Source</label>
+        <select id="np-source" class="inp" onchange="npPick('source', Number(this.value))">
+          <option value="">- Pick the source -</option>
+          {% for d in sources %}
+          <option value="{{ d.id }}" data-host="{{ d.host_name }}" data-name="{{ d.name }}">{{ d.name }} &middot; {{ d.platform | plat }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Target</label>
+        <select id="np-target" class="inp" disabled onchange="npPick('target', Number(this.value))">
+          <option value="">- Pick the target -</option>
+          {% for d in targets %}
+          <option value="{{ d.id }}" data-host="{{ d.host_name }}" data-name="{{ d.name }}">{{ d.name }} &middot; {{ d.platform | plat }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Name</label>
+        <input type="text" id="np-name" class="inp" maxlength="120" autocomplete="off" oninput="npNameTyped()">
+      </div>
+      <div id="np-pair-hint" class="mut" style="font-size:var(--fs-body);min-height:16px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:2px;">
+        <button type="button" onclick="closeNewProjectModal()" class="btn">Cancel</button>
+        <button type="submit" id="np-submit" class="btn" disabled>Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% include "_add_device_modal.html" %}
+
+<script>
+  // U16: the tree items on this page open the picked project at that view -
+  // the workspace consumes the one-shot key (rules.html tab-once).
+  var _NAV_PROJECT_URL = {{ (('/projects/' ~ ov_project.id) if ov_project else '') | tojson }};
+  function _wsGo(key) {
+    if (!_NAV_PROJECT_URL) return;
+    try { if (key) sessionStorage.setItem('tab-once', key); } catch (e) { /* non-fatal */ }
+    showNavOverlay(); window.location.href = _NAV_PROJECT_URL;
+  }
+  function wsNav(primary, rb, sub, obj) { _wsGo([primary, rb, sub, obj].filter(Boolean).join(':')); }
+  function switchConfiguration() { _wsGo('network:interfaces'); }
+  function switchOrgSub() { /* the navigation above already left this page */ }
+  // ── One text filter over both columns (project rows + device rows) ──
+  function pfApply() {
+    var q = ((document.getElementById('pf-text') || {}).value || '').trim().toLowerCase();
+    [['tr[data-project-id]', 'pf-count'], ['tr[data-device-id]', 'pf-dev-count']].forEach(function (pair) {
+      var shown = 0;
+      document.querySelectorAll(pair[0]).forEach(function (r) {
+        var ok = !q || (r.dataset.text || '').indexOf(q) >= 0;
+        r.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      var c = document.getElementById(pair[1]); if (c) c.textContent = shown;
+    });
+  }
+
+  // ── New-project dialog state (docs/PROJECTS_UI_DESIGN.md, D2) ──
+  var NP = {
+    sources: {{ sources | tojson }},
+    targets: {{ targets | tojson }},
+    pairs:   {{ pair_projects | tojson }},
+    source: null, target: null,
+    targetExplicit: false,   // a chosen target stays; an auto-filled one follows the source
+    nameDirty: false
+  };
+  function npName(id, list) {
+    var d = (list || NP.sources.concat(NP.targets)).find(function (x) { return x.id === id; });
+    return d ? d.name : '';
+  }
+  function npIsTargetCapable(id) { return NP.targets.some(function (d) { return d.id === id; }); }
+  function npMode() {
+    if (NP.source === null) return 'pick';
+    if (NP.target === null) return 'choose';
+    return NP.target === NP.source ? 'optimization' : 'migration';
+  }
+  function npPick(what, id) {
+    id = id || null;
+    if (what === 'source') {
+      NP.source = id;
+      if (id === null) { NP.target = null; NP.targetExplicit = false; }
+      else if (!NP.targetExplicit || NP.target === null) {
+        NP.target = npIsTargetCapable(id) ? id : null;
+        NP.targetExplicit = false;
+      }
+    } else {
+      if (NP.source === null) return;
+      NP.target = id;
+      NP.targetExplicit = id !== null;
+    }
+    npRender();
+  }
+  function npAutoName() {
+    var s = npName(NP.source, NP.sources), t = npName(NP.target, NP.targets);
+    var m = npMode();
+    if (m === 'optimization') return 'Optimize ' + s;
+    if (m === 'migration') return s + ' -> ' + t;
+    if (m === 'choose') return s + ' -> ';
+    return '';
+  }
+  function npNameTyped() {
+    var v = document.getElementById('np-name').value;
+    NP.nameDirty = (v.trim() !== '' && v !== npAutoName());
+  }
+  function npRender() {
+    var srcSel = document.getElementById('np-source'), tgtSel = document.getElementById('np-target');
+    srcSel.value = NP.source === null ? '' : String(NP.source);
+    tgtSel.value = NP.target === null ? '' : String(NP.target);
+    var locked = NP.source === null;
+    tgtSel.disabled = locked;
+    var m = npMode(), badge = document.getElementById('np-mode'), hint = document.getElementById('np-mode-hint');
+    badge.className = 'np-mode ' + (m === 'optimization' || m === 'migration' ? m : '');
+    badge.textContent = m === 'pick' ? 'Mode' : (m === 'optimization' ? 'Optimization' : 'Migration');
+    var s = npName(NP.source, NP.sources), t = npName(NP.target, NP.targets);
+    hint.textContent = m === 'pick' ? 'Pick the device to read. A device that can also be a target starts as an optimization.'
+      : m === 'optimization' ? 'Optimization: ' + s + ' is curated and pushed back to itself. Pick another target to migrate instead.'
+      : m === 'migration' ? 'Migration: the configuration of ' + s + ' is curated and pushed onto ' + t + '.'
+      : 'Migration: ' + s + ' can only be read: pick the target it migrates to.';
+    if (!NP.nameDirty) document.getElementById('np-name').value = npAutoName();
+    var ph = document.getElementById('np-pair-hint');
+    var ex = (NP.source !== null && NP.target !== null) ? (NP.pairs[NP.source + ':' + NP.target] || []) : [];
+    ph.innerHTML = ex.length ? (ex.length + ' project' + (ex.length === 1 ? '' : 's') + ' already exist' + (ex.length === 1 ? 's' : '')
+      + ' for this pair: ' + ex.map(function (p) {
+        return '<a href="/projects/' + p.id + '/open" onclick="showNavOverlay()" style="color:var(--green);">' + p.name.replace(/[&<>]/g, function (c) { return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'; }) + '</a>';
+      }).join(', ') + '. A new one starts from the source\'s auto rows.') : '';
+    document.getElementById('np-submit').disabled = !(NP.source !== null && NP.target !== null);
+  }
+  function openNewProjectModal() {
+    var m = document.getElementById('new-project-modal');
+    m.classList.remove('hidden'); m.style.display = 'flex';
+    npRender();
+    setTimeout(function () { document.getElementById('np-source').focus(); }, 0);
+  }
+  function closeNewProjectModal() {
+    var m = document.getElementById('new-project-modal');
+    m.classList.add('hidden'); m.style.display = '';
+  }
+  function submitNewProject(ev) {
+    ev.preventDefault();
+    if (NP.source === null || NP.target === null) return false;
+    var btn = document.getElementById('np-submit');
+    btn.disabled = true;
+    fetch('/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({source_id: NP.source, target_id: NP.target,
+                                              name: document.getElementById('np-name').value})})
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        btn.disabled = false;
+        if (j && j.ok && j.url) { showNavOverlay(); window.location.href = j.url; return; }
+        showToast((j && j.error) || 'the project could not be created', 'error');
+      }, function () { btn.disabled = false; showToast('The project could not be created', 'error'); });
+    return false;
+  }
+  function projectRename(pid, current) {
+    var name = window.prompt('Project name', current);
+    if (name === null) return;
+    name = name.trim();
+    if (!name || name === current) return;
+    fetch('/projects/' + pid + '/rename', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                           body: JSON.stringify({name: name})})
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.ok) { showNavOverlay(); window.location.reload(); }
+        else showToast((j && j.error) || 'rename failed', 'error');
+      }, function () { showToast('Rename failed', 'error'); });
+  }
+  function projectDelete(pid, name, decisions) {
+    confirmModal({
+      title: 'Delete project "' + name + '"?',
+      body: [decisions + ' edit(s) go with it (renames, zone bindings, rule settings, snapshots)',
+             'the devices and their imported data stay',
+             'its push history stays, without a project'],
+      confirmLabel: 'Delete project', danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      fetch('/projects/' + pid + '/delete', {method: 'POST'})
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) { showNavOverlay(); window.location.reload(); }
+          else showToast((j && j.error) || 'delete failed', 'error');
+        }, function () { showToast('Delete failed', 'error'); });
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    // The add dialog handles its own Escape in the capture phase and marks it
+    // handled - that press must not close the project dialog too.
+    if (e.key === 'Escape' && !e.defaultPrevented) closeNewProjectModal();
+  });
+  // A legacy workspace URL without a project lands here with the pair
+  // pre-filled (D6); an add from this page returns with ?picked=<id>, which
+  // the device column already shows - nothing to do beyond cleaning the URL.
+  document.addEventListener('DOMContentLoaded', function () {
+    var q = new URLSearchParams(window.location.search);
+    if (q.get('wizard') !== '1') return;
+    var preS = Number(q.get('source') || 0), preT = Number(q.get('target') || 0);
+    history.replaceState(null, '', '/projects');
+    openNewProjectModal();
+    if (preS && NP.sources.some(function (d) { return d.id === preS; })) {
+      npPick('source', preS);
+      if (preT && NP.targets.some(function (d) { return d.id === preT; })) npPick('target', preT);
+    }
+  });
+</script>
+  </div>{# end ws-main #}
+</div>{# end ws-layout #}
+
+{% endblock %}

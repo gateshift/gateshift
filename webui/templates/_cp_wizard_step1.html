@@ -3,7 +3,7 @@
 {% with step = 1 %}{% include "_cp_wizard_progress.html" %}{% endwith %}
 
 {% if error %}
-<div class="tag bad" style="display:flex;width:auto;margin:0 0 12px;padding:8px 12px;border-radius:0;font-size:12px;color:var(--danger);border:1px solid var(--danger);">
+<div class="tag bad" style="display:flex;width:auto;margin:0 0 12px;padding:8px 12px;border-radius:0;font-size:var(--fs-body);color:var(--danger);border:1px solid var(--danger);">
   <span style="font-weight:600;margin-right:6px;">Error:</span>{{ error }}
 </div>
 {% endif %}
@@ -34,12 +34,12 @@
     <input type="password" name="api_key" required
            value="{{ form_api_key or '' }}"
            class="inp" autocomplete="new-password">
-    <p class="dash" style="margin:0;font-size:11px;">Generated in SmartConsole under Manage &amp; Settings → Blades → Management API.</p>
+    <p class="dash" style="margin:0;font-size:var(--fs-small);">Generated in SmartConsole under Manage &amp; Settings → Blades → Management API.</p>
   </div>
 
   <div style="display:flex;align-items:center;gap:8px;padding-top:4px;">
-    <button type="submit" class="btn primary sm">Probe Mgmt-Server</button>
-    <a href="/devices" class="btn ghost sm">Cancel</a>
+    <button type="submit" class="btn">Probe Mgmt-Server</button>
+    <button type="button" class="btn" onclick="closeAddModal()">Cancel</button>
     <span class="htmx-indicator dash" style="font-style:italic;">Connecting…</span>
   </div>
 </form>

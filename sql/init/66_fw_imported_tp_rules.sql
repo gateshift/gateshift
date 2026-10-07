@@ -1,6 +1,8 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
+USE gateshift;
+
 -- Check Point source TP rulebase, imported per device (CP->CP fidelity).
 -- One row per threat rule; exception rows carry exception_of = parent
 -- rule name. Profile/protection references stay ref-only (names).

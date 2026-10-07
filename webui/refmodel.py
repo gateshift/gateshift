@@ -34,6 +34,8 @@ import json
 
 from sqlalchemy import text
 
+import projview
+
 
 # ── declarations ─────────────────────────────────────────────────────────────
 
@@ -100,8 +102,19 @@ TABLE_REFERRERS: tuple[TableReferrer, ...] = (
     )),
     # VPN tunnels reference interfaces by name (the local egress iface = Forti
     # local-if / PA tunnel local-interface, and the bound tunnel iface). Both are
-    # vpn_hash inputs, so cascade_rename additionally rehashes + re-keys the VPN
-    # overlay/secret/cert tables (see _cascade_vpn_extra).
+    # vpn_hash inputs - under model A names are never rewritten here, so the
+    # hash is stable; the migration re-keyed the overlay/secret/cert tables once.
+    # SSL/TLS-inspection rules bind ZONES like access and NAT rules do (PA/CP
+    # rulebase shape); without this entry a zone used only by a decryption
+    # rule read as unreferenced and its delete guard stayed silent. Only the
+    # zone fields live here: the rules' object/service names stay OUT of the
+    # registry on purpose (vendor builtins such as 'HTTPS default services'
+    # would false-positive in find_dangling) - see _ssl_used_names and
+    # ssl_referrer_rules for that targeted layer.
+    TableReferrer("ssl_rule", "fw_ssl_rules", "id", "name", "device_id", (
+        FieldRef("src_zones", ZONE_OR_IFACE, shape="json_list"),
+        FieldRef("dst_zones", ZONE_OR_IFACE, shape="json_list"),
+    )),
     TableReferrer("vpn_tunnel", "fw_vpn_tunnels", "id", "name", "device_id", (
         FieldRef("local_interface", ("interface",)),
         FieldRef("tunnel_interface", ("interface",)),
@@ -236,10 +249,38 @@ class Reference:
 
 # ── collectors ───────────────────────────────────────────────────────────────
 
-def collect_references(conn, device_id: int, *, device_host: str | None = None) -> list[Reference]:
+def _excluded_tokens(excluded: dict | None, target_type: str) -> set:
+    """Names a member list of `target_type` loses in the project view: the
+    excluded objects and groups (or services and service groups)."""
+    if not excluded:
+        return set()
+    kinds = ("object", "group") if target_type == "object" else (
+        ("service", "service_group") if target_type == "service" else (target_type,))
+    out: set = set()
+    for k in kinds:
+        out |= set(excluded.get(k) or ())
+    return out
+
+
+def collect_references(conn, device_id: int, *, device_host: str | None = None,
+                       projects: list | None = None, excluded: dict | None = None,
+                       view=None) -> list[Reference]:
     """All outgoing references for a device: table-backed referrers + groups +
-    access rules."""
+    access rules. The override-shadowed parts (rules, NAT zones, PBF, VPN)
+    are read from the effective view of `projects` - one project for a
+    project-bound question such as generate - or, by default, of every
+    project the device is the source of (the device-level question: is this
+    still referenced anywhere?)."""
     out: list[Reference] = []
+    # the project view (projview.ProjectView): its exclusions decide what
+    # references nothing, its interface and route edits decide what a network
+    # row references (a re-bound zone, a re-homed VR, a new parent / member,
+    # a re-pointed egress)
+    if view is not None:
+        if excluded is None:
+            excluded = view.excluded_dict(device_id)
+        if projects is None and getattr(view, "project_id", None):
+            projects = [view.project_id]
 
     for rr in TABLE_REFERRERS:
         # PBF is read from the EFFECTIVE view (override overlay applied) via
@@ -268,6 +309,8 @@ def collect_references(conn, device_id: int, *, device_host: str | None = None) 
             field_refs = tuple(fr for fr in rr.refs
                                if fr.field not in ("src_zones", "dst_zones"))
         cols = {rr.id_col, rr.label_col} | {fr.field for fr in field_refs}
+        if view is not None and rr.kind == "interface":
+            cols.add("import_interface_name")
         col_sql = ", ".join(sorted(cols))
         try:
             rows = conn.execute(
@@ -276,9 +319,30 @@ def collect_references(conn, device_id: int, *, device_host: str | None = None) 
             ).mappings().all()
         except Exception:
             continue
+        gone_if = set((excluded or {}).get("interface") or ())
+        gone_routes = set((excluded or {}).get("route") or ())
         for row in rows:
             rid = row.get(rr.id_col)
             label = str(row.get(rr.label_col) or rid or "")
+            if view is not None and rr.kind in ("interface", "route"):
+                row = dict(row)
+                if rr.kind == "interface":
+                    e = view.interface_edits_for(device_id, row.get("import_interface_name"), label)
+                    for k in ("zone_name", "vr_name", "parent_iface_name", "member_iface_names"):
+                        if k in e:
+                            row[k] = json.dumps(e[k]) if isinstance(e[k], list) else e[k]
+                else:
+                    e = view.route_edits_for(device_id, label, row.get("vr_name"))
+                    for k in ("interface_name",):
+                        if k in e:
+                            row[k] = e[k]
+            # the project view: a row deleted in the project references nothing -
+            # an excluded interface, an excluded route, a route of an excluded interface
+            if rr.kind == "interface" and label in gone_if:
+                continue
+            if rr.kind == "route" and (row.get("interface_name") in gone_if
+                                       or projview.route_key(label, row.get("vr_name")) in gone_routes):
+                continue
             for fr in field_refs:
                 for targets, name in _extract(row.get(fr.field), fr):
                     # an interface's parent/member edge to its own name is not an
@@ -287,10 +351,17 @@ def collect_references(conn, device_id: int, *, device_host: str | None = None) 
                         continue
                     out.append(Reference(rr.kind, rid, label, targets, name, fr.literal_ok))
 
-    out.extend(_group_references(conn, device_id))
-    rule_refs, view_has_rules = _rule_references(conn, device_id, device_host)
+    out.extend(_group_references(conn, device_id, excluded))
+    rule_refs, view_has_rules = _rule_references(conn, device_id, device_host, projects)
     out.extend(rule_refs)
     imported = _imported_rule_references(conn, device_id)
+    if excluded:
+        # the project view (docs/PROJECT_VIEW_DESIGN.md): a rule deleted in the
+        # project references nothing, a deleted member is no reference
+        gone_rules = set(excluded.get("rule") or ())
+        gone_obj = _excluded_tokens(excluded, "object") | _excluded_tokens(excluded, "service")
+        imported = [x for x in imported
+                    if x.referrer_label not in gone_rules and x.name not in gone_obj]
     # The imported-rules fallback exists for the freshly-imported-but-not-
     # generated gap. Once the EFFECTIVE view carries this device's rules,
     # its zone/iface columns are authoritative for zone semantics (the
@@ -304,13 +375,80 @@ def collect_references(conn, device_id: int, *, device_host: str | None = None) 
     if view_has_rules:
         imported = [r for r in imported if r.targets != ZONE_OR_IFACE]
     out.extend(imported)
-    out.extend(_pbf_references(conn, device_id))
-    out.extend(_vpn_references(conn, device_id))
-    out.extend(_nat_zone_references(conn, device_id))
+    out.extend(_pbf_references(conn, device_id, projects))
+    out.extend(_vpn_references(conn, device_id, projects))
+    out.extend(_nat_zone_references(conn, device_id, projects))
     return out
 
 
-def _pbf_references(conn, device_id: int) -> list[Reference]:
+def _device_projects(conn, device_id: int) -> list:
+    """The projects this device is the source of. Each holds its own
+    decisions (overrides), so a device-level reference question - is this
+    zone still referenced? - is the union over all of them. A device without
+    a project reads its imported view only (project None)."""
+    try:
+        rows = conn.execute(text(
+            "SELECT id FROM fw_projects WHERE source_ref_id = :d ORDER BY id"
+        ), {"d": device_id}).fetchall()
+    except Exception:
+        rows = []
+    return [int(r[0]) for r in rows] or [None]
+
+
+def _effective_rows(conn, device_id: int, projects, loader) -> list[dict]:
+    """One effective view per project (`projects`, or every project of the
+    device), concatenated: a project's own rows stay exactly as its loader
+    returns them, a row an earlier project already produced with the same
+    content is skipped. A single project therefore reads as it always did.
+    Rows are read in SOURCE space (no name map); each carries `_project_id`
+    so override-owned values can be inverse-mapped per project."""
+    out: list[dict] = []
+    seen: set = set()
+    for pid in (projects if projects is not None else _device_projects(conn, device_id)):
+        for row in loader(conn, device_id, project_id=pid):
+            key = json.dumps(row, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            row["_project_id"] = pid
+            out.append(row)
+    return out
+
+
+# Model A: override-owned values (a picked zone, an edited interface) are
+# stored in PROJECT space; the reference engine compares names in SOURCE
+# space. These helpers turn such a token into the source names it stands
+# for - all pre-images of a merged name, the token itself when it is an
+# unmapped source name or a target-side literal (which then simply fails to
+# match any source entity, as it should).
+def _inverse_maps(conn, cache: dict, project_id):
+    if project_id not in cache:
+        try:
+            import namemap
+            cache[project_id] = namemap.inverse_name_map(namemap.load_name_map(conn, project_id))
+        except Exception:
+            cache[project_id] = None
+    return cache[project_id]
+
+
+def _token_sources(inv, kinds, token) -> list:
+    """Source names for a project-space token across the given kinds (a zone
+    slot may hold a zone or an interface name)."""
+    if not inv:
+        return [token]
+    out: list = []
+    for kind in kinds:
+        pre = (inv.get(kind) or {}).get(token)
+        if pre:
+            out.extend(pre)
+    return _dedup_keep(out) if out else [token]
+
+
+def _dedup_keep(seq):
+    return list(dict.fromkeys(seq))
+
+
+def _pbf_references(conn, device_id: int, projects=None) -> list[Reference]:
     """PBF references from the EFFECTIVE rule view (base + override edits, via
     main._load_pbf_rules) - so a user-remapped ingress/egress and soft-deleted
     rules reflect reality, not the raw fw_pbf_rules row. Mirrors why access rules
@@ -319,13 +457,16 @@ def _pbf_references(conn, device_id: int) -> list[Reference]:
     refs: list[Reference] = []
     try:
         from main import _load_pbf_rules  # lazy (avoids import cycle)
-        rules = _load_pbf_rules(conn, device_id)
+        rules = _effective_rows(conn, device_id, projects, _load_pbf_rules)
     except Exception:
         return refs
     _ING = {"interface": "interface", "zone": "zone"}
+    inv_cache: dict = {}
     for p in rules:
         rid = p.get("id")
         label = str(p.get("name") or rid or "")
+        edited = set(p.get("_edited_fields") or [])
+        inv = _inverse_maps(conn, inv_cache, p.get("_project_id")) if edited else None
         for item in (p.get("ingress") or []):
             if not isinstance(item, dict):
                 continue
@@ -333,11 +474,15 @@ def _pbf_references(conn, device_id: int) -> list[Reference]:
             if not n:
                 continue
             tgt = _ING.get(str(item.get("type")))
-            refs.append(Reference("pbf_rule", rid, label,
-                                  (tgt,) if tgt else ZONE_OR_IFACE, n))
+            kinds = (tgt,) if tgt else ZONE_OR_IFACE
+            names = _token_sources(inv, kinds, n) if "ingress" in edited else [n]
+            for nn in names:
+                refs.append(Reference("pbf_rule", rid, label, kinds, nn))
         eg = _clean(p.get("egress_interface"))
         if eg:
-            refs.append(Reference("pbf_rule", rid, label, ("interface",), eg))
+            names = _token_sources(inv, ("interface",), eg) if "egress_interface" in edited else [eg]
+            for nn in names:
+                refs.append(Reference("pbf_rule", rid, label, ("interface",), nn))
         for field, tgt in (("sources", "object"), ("destinations", "object"),
                            ("services", "service")):
             for item in (p.get(field) or []):
@@ -347,7 +492,7 @@ def _pbf_references(conn, device_id: int) -> list[Reference]:
     return refs
 
 
-def _vpn_references(conn, device_id: int) -> list[Reference]:
+def _vpn_references(conn, device_id: int, projects=None) -> list[Reference]:
     """VPN interface references from the EFFECTIVE tunnel view (raw row +
     fw_vpn_tunnel_overrides edits, soft-deleted tunnels excluded) via
     main._load_vpn_tunnels - mirrors _pbf_references. The raw
@@ -357,20 +502,26 @@ def _vpn_references(conn, device_id: int) -> list[Reference]:
     refs: list[Reference] = []
     try:
         from main import _load_vpn_tunnels  # lazy (avoids import cycle)
-        tunnels = _load_vpn_tunnels(conn, device_id)   # include_deleted=False
+        tunnels = _effective_rows(conn, device_id, projects, _load_vpn_tunnels)   # include_deleted=False
     except Exception:
         return refs
+    inv_cache: dict = {}
     for v in tunnels:
         rid = v.get("id")
         label = str(v.get("name") or rid or "")
+        edited = set(v.get("_edited_fields") or [])
+        inv = _inverse_maps(conn, inv_cache, v.get("_project_id")) if edited else None
         for field in ("local_interface", "tunnel_interface"):
             n = _clean(v.get(field))
-            if n:
-                refs.append(Reference("vpn_tunnel", rid, label, ("interface",), n))
+            if not n:
+                continue
+            names = _token_sources(inv, ("interface",), n) if field in edited else [n]
+            for nn in names:
+                refs.append(Reference("vpn_tunnel", rid, label, ("interface",), nn))
     return refs
 
 
-def _nat_zone_references(conn, device_id: int) -> list[Reference]:
+def _nat_zone_references(conn, device_id: int, projects=None) -> list[Reference]:
     """NAT src/dst zone-or-iface references from the EFFECTIVE view
     (fw_nat_rule_overrides COALESCEd over raw, via main._load_nat_rules) -
     the raw columns keep the imported zone after the operator (or
@@ -382,24 +533,34 @@ def _nat_zone_references(conn, device_id: int) -> list[Reference]:
     refs: list[Reference] = []
     try:
         from main import _load_nat_rules  # lazy (avoids import cycle)
-        rules = _load_nat_rules(conn, device_id)
+        rules = _effective_rows(conn, device_id, projects, _load_nat_rules)
     except Exception:
         return refs
+    inv_cache: dict = {}
     for r in rules:
         rid = r.get("id")
         label = str(r.get("name") or rid or "")
+        # Zone slots from the override row are project-space tokens.
+        inv = (_inverse_maps(conn, inv_cache, r.get("_project_id"))
+               if r.get("zone_override_source") else None)
         for field in ("src_zones", "dst_zones"):
             for item in (r.get(field) or []):
                 n = _clean(item)
-                if n:
-                    refs.append(Reference("nat_rule", rid, label, ZONE_OR_IFACE, n))
+                if not n:
+                    continue
+                names = _token_sources(inv, ZONE_OR_IFACE, n) if r.get("zone_override_source") else [n]
+                for nn in names:
+                    refs.append(Reference("nat_rule", rid, label, ZONE_OR_IFACE, nn))
     return refs
 
 
-def _group_references(conn, device_id: int) -> list[Reference]:
+def _group_references(conn, device_id: int, excluded: dict | None = None) -> list[Reference]:
     """Group memberships (fw_imported_objects.value JSON), active snapshot only:
-    address_group members → object, service_group members → service."""
+    address_group members → object, service_group members → service. With
+    `excluded` (the project view) a deleted group references nothing and a
+    deleted member is no reference."""
     refs: list[Reference] = []
+    gone_groups = set((excluded or {}).get("group") or ()) | set((excluded or {}).get("service_group") or ())
     try:
         rows = conn.execute(text(
             "SELECT name, obj_type, value FROM fw_imported_objects "
@@ -409,18 +570,21 @@ def _group_references(conn, device_id: int) -> list[Reference]:
     except Exception:
         return refs
     for name, obj_type, val in rows:
+        if excluded and _clean(name) in gone_groups:
+            continue
         tgt = "object" if obj_type == "address_group" else "service"
+        gone = _excluded_tokens(excluded, tgt)
         data = _jload(val) or {}
         members = data.get("members") if isinstance(data, dict) else None
         for m in (members or []):
             n = _clean(m)
-            if n:
+            if n and n not in gone:
                 refs.append(Reference("group", name, str(name or ""), (tgt,), n))
     return refs
 
 
 def _rule_references(conn, device_id: int,
-                     device_host: str | None) -> tuple[list[Reference], bool]:
+                     device_host: str | None, projects=None) -> tuple[list[Reference], bool]:
     """Access-rule references from the effective, name-bearing rules view
     (main._fetch_rules_and_devices) - NOT raw consolidated columns. Lazy import
     avoids a circular import. Returns (refs, view_has_rules): the second slot
@@ -437,8 +601,14 @@ def _rule_references(conn, device_id: int,
         if not device_host:
             return refs, False
         disp = load_display(conn)
-        data = _fetch_rules_and_devices(conn, page=1, page_size=100000,
-                                        device=device_host, display=disp)
+        # One effective view per project (`projects`, else every project of
+        # the device) - each holds its own decisions; the references are
+        # their union, a project's own list kept as it is.
+        views = [(pid, _fetch_rules_and_devices(conn, page=1, page_size=100000,
+                                                device=device_host, display=disp,
+                                                project_id=pid))
+                 for pid in (projects if projects is not None
+                             else _device_projects(conn, device_id))]
     except Exception:
         return refs, False
 
@@ -463,42 +633,58 @@ def _rule_references(conn, device_id: int,
     # IMPORT zone names must therefore not count as references - otherwise
     # a zone stays undeletable forever after the operator re-zoned or
     # any'd every rule (pa2fgt finding 2026-08-31). Presence map per side:
-    zone_ovr: dict[str, tuple[bool, bool]] = {}
-    try:
-        for h, s, d in conn.execute(text(
-                "SELECT LOWER(HEX(rule_hash)), src_zone, dst_zone "
-                "FROM fw_rule_zone_overrides")).fetchall():
-            zone_ovr[h] = (s is not None, d is not None)
-    except Exception:
-        pass
     view_has_rules = False
-    for grp in (data.get("devices") or {}).values():
-        for rule in grp:
-            view_has_rules = True
-            label = str(rule.get("rule_name") or rule.get("rhash") or "")
-            rid = rule.get("rhash")
-            ovr_src, ovr_dst = zone_ovr.get(str(rid or "").lower(), (False, False))
-            for key, targets in list_fields:
-                for item in (rule.get(key) or []):
-                    n = _clean(item)
+    seen: set = set()
+    inv_cache: dict = {}
+    for pid, data in views:
+        # Override-owned zone slots hold project-space tokens (model A).
+        inv = _inverse_maps(conn, inv_cache, pid)
+        zone_ovr: dict[str, tuple[bool, bool]] = {}
+        try:
+            for h, s, d in conn.execute(text(
+                    "SELECT LOWER(HEX(rule_hash)), src_zone, dst_zone "
+                    "FROM fw_rule_zone_overrides WHERE project_id = :p"),
+                    {"p": pid if pid else -1}).fetchall():
+                zone_ovr[h] = (s is not None, d is not None)
+        except Exception:
+            pass
+        proj_refs: list[Reference] = []
+        for grp in (data.get("devices") or {}).values():
+            for rule in grp:
+                view_has_rules = True
+                label = str(rule.get("rule_name") or rule.get("rhash") or "")
+                rid = rule.get("rhash")
+                ovr_src, ovr_dst = zone_ovr.get(str(rid or "").lower(), (False, False))
+                overridden = bool(rule.get("zone_override_source"))
+                for key, targets in list_fields:
+                    for item in (rule.get(key) or []):
+                        n = _clean(item)
+                        if not n:
+                            continue
+                        if overridden and key in ("src_zones", "dst_zones"):
+                            for nn in _token_sources(inv, ZONE_OR_IFACE, n):
+                                proj_refs.append(Reference("access_rule", rid, label, targets, nn))
+                        else:
+                            proj_refs.append(Reference("access_rule", rid, label, targets, n))
+                for key, targets in import_fields:
+                    if key == "import_src_zones" and ovr_src:
+                        continue
+                    if key == "import_dst_zones" and ovr_dst:
+                        continue
+                    arr = _jload(rule.get(key))
+                    if not isinstance(arr, list):
+                        continue
+                    for item in arr:
+                        n = _clean(item)
+                        if n and n.lower() not in ("any", "application-default"):
+                            proj_refs.append(Reference("access_rule", rid, label, targets, n))
+                for key, targets in scalar_fields:
+                    n = _clean(rule.get(key))
                     if n:
-                        refs.append(Reference("access_rule", rid, label, targets, n))
-            for key, targets in import_fields:
-                if key == "import_src_zones" and ovr_src:
-                    continue
-                if key == "import_dst_zones" and ovr_dst:
-                    continue
-                arr = _jload(rule.get(key))
-                if not isinstance(arr, list):
-                    continue
-                for item in arr:
-                    n = _clean(item)
-                    if n and n.lower() not in ("any", "application-default"):
-                        refs.append(Reference("access_rule", rid, label, targets, n))
-            for key, targets in scalar_fields:
-                n = _clean(rule.get(key))
-                if n:
-                    refs.append(Reference("access_rule", rid, label, targets, n))
+                        proj_refs.append(Reference("access_rule", rid, label, targets, n))
+        # What an earlier project already contributed is not repeated.
+        refs.extend(r for r in proj_refs if r not in seen)
+        seen.update(proj_refs)
     return refs, view_has_rules
 
 
@@ -620,20 +806,28 @@ def collect_referent_names(conn, device_id: int) -> dict[str, set[str]]:
 # ── engine ops (read side) ───────────────────────────────────────────────────
 
 def find_referrers(conn, device_id: int, target_type: str, name: str,
-                   *, device_host: str | None = None) -> list[Reference]:
+                   *, device_host: str | None = None, projects: list | None = None,
+                   excluded: dict | None = None, view=None) -> list[Reference]:
     """Everything that references (target_type, name)."""
     want = _clean(name)
-    return [r for r in collect_references(conn, device_id, device_host=device_host)
+    return [r for r in collect_references(conn, device_id, device_host=device_host,
+                                          projects=projects, excluded=excluded, view=view)
             if target_type in r.targets and r.name == want]
 
 
 def find_unused(conn, device_id: int, target_type: str,
-                *, device_host: str | None = None) -> set[str]:
+                *, device_host: str | None = None, projects: list | None = None,
+                excluded: dict | None = None) -> set[str]:
     """Referents of target_type that nothing references. The used-set folds in
     SSL/TLS-inspection rule refs (a separate policy layer, see _ssl_used_names) so an
-    object used only in a decryption rule is never wrongly listed unused."""
+    object used only in a decryption rule is never wrongly listed unused. With
+    `projects` / `excluded` (the project view) the question is the project's:
+    what it deleted is neither a referent nor a referrer."""
     referents = collect_referent_names(conn, device_id).get(target_type, set())
-    used = {r.name for r in collect_references(conn, device_id, device_host=device_host)
+    if excluded:
+        referents = referents - _excluded_tokens(excluded, target_type)
+    used = {r.name for r in collect_references(conn, device_id, device_host=device_host,
+                                               projects=projects, excluded=excluded)
             if target_type in r.targets}
     used |= _ssl_used_names(conn, device_id).get(target_type, set())
     return referents - used
@@ -658,12 +852,15 @@ def _valid_names(conn, device_id: int) -> dict[str, set[str]]:
 
 
 def find_dangling(conn, device_id: int,
-                  *, device_host: str | None = None) -> list[Reference]:
+                  *, device_host: str | None = None,
+                  projects: list | None = None) -> list[Reference]:
     """References whose name exists under NONE of their validatable target types
-    (interface accepts source names + target bindings)."""
+    (interface accepts source names + target bindings). `projects` as in
+    collect_references - generate passes its own project."""
     valid = _valid_names(conn, device_id)
     dangling: list[Reference] = []
-    for r in collect_references(conn, device_id, device_host=device_host):
+    for r in collect_references(conn, device_id, device_host=device_host,
+                                projects=projects):
         if r.literal_ok:
             continue  # value may legitimately be a bare literal (e.g. NAT trans IP)
         # object/service refs can hold bare IP/CIDR/range literals (syslog-derived
@@ -816,11 +1013,10 @@ def _recompute_nat_hash(conn, device_id: int) -> None:
         pass
 
 
-def _cascade_zone_extra(conn, device_id: int, old: str, new: str) -> int:
-    """Zone also lives in fw_flows + the consolidated rule tables (keyed by
-    device_host) and is a nat_hash input. Mirrors _cascade_rename_zone's extra
-    writes (the generic loop already did interfaces/nat/pbf-ingress/imported_rules).
-    PBF-ingress is now cascaded by the generic loop → closes REF-8."""
+def _rewrite_zone_mirrors(conn, device_id: int, old: str, new: str) -> int:
+    """A zone name also lives in fw_flows and the consolidated rule tables
+    (keyed by device_host) - the mirror the old zone cascade rewrote. Used
+    by reverse_rename (migration) only; model A never rewrites it again."""
     touched = 0
     host = conn.execute(text(
         "SELECT COALESCE(display_name, host_name) FROM fw_devices WHERE id = :id"
@@ -835,50 +1031,75 @@ def _cascade_zone_extra(conn, device_id: int, old: str, new: str) -> int:
                     ), {"new": new, "old": old, "h": host}).rowcount
                 except Exception:
                     pass
-    _recompute_nat_hash(conn, device_id)  # zone is a nat_hash input (parity)
     return touched
 
 
-def _cascade_vpn_extra(conn, device_id: int) -> None:
-    """local_interface + tunnel_interface are vpn_hash inputs, and the VPN
-    overlay / PSK-secret / cert tables key on vpn_hash - so an interface rename
-    that rewrote those columns must recompute the hash AND migrate the dependent
-    keys old→new, or the per-tunnel edits/secrets/certs orphan. Mirrors the
-    nat-hash recompute, plus the overlay re-key the NAT path doesn't need."""
+def _rewrite_json_edits(conn, table: str, where: str, params: dict,
+                        fn) -> int:
+    """Apply fn(edits_dict) -> changed? to the JSON `edits` column of the
+    rows `where` selects (the device-level edit tables and the project
+    overlays both keep operator edits as a JSON dict)."""
+    n = 0
     try:
-        from main import _write_vpn_hash  # lazy (avoids import cycle)
+        rows = conn.execute(text(
+            f"SELECT {where['key']} AS _k, edits FROM {table} WHERE {where['cond']}"
+        ), params).fetchall()
     except Exception:
-        return
-    # Snapshot the pre-recompute hash per tunnel - this is the current overlay key.
-    old_by_id = {tid: h for tid, h in conn.execute(text(
-        "SELECT id, HEX(vpn_hash) FROM fw_vpn_tunnels WHERE device_id = :d"
-    ), {"d": device_id}).fetchall() if h}
-    _write_vpn_hash(conn, "v.device_id = :did", {"did": device_id})
-    for tid, new_hex in conn.execute(text(
-        "SELECT id, HEX(vpn_hash) FROM fw_vpn_tunnels WHERE device_id = :d"
-    ), {"d": device_id}).fetchall():
-        old_hex = old_by_id.get(tid)
-        if not old_hex or not new_hex or old_hex == new_hex:
-            continue
-        for tbl in ("fw_vpn_tunnel_overrides", "fw_vpn_tunnel_secrets",
-                    "fw_vpn_tunnel_certs"):
-            try:
-                conn.execute(text(
-                    f"UPDATE {tbl} SET vpn_hash = UNHEX(:new) "
-                    "WHERE vpn_hash = UNHEX(:old)"
-                ), {"new": new_hex, "old": old_hex})
-            except Exception:
-                pass
-
-
-def cascade_rename(conn, device_id: int, target_type: str, old: str, new: str) -> int:
-    """Rewrite old→new across every referrer of target_type; returns rows touched.
-    Zone additionally cascades to flows + the consolidated tables (via
-    _cascade_zone_extra). PBF-ingress zone is handled by the generic loop (REF-8)."""
-    old = _clean(old)
-    new = str(new).strip() if new else None
-    if not old or not new or old == new:
         return 0
+    for k, raw in rows:
+        edits = _jload(raw)
+        if not isinstance(edits, dict) or not edits:
+            continue
+        if fn(edits):
+            conn.execute(text(
+                f"UPDATE {table} SET edits = :e WHERE {where['key']} = :k AND {where['cond']}"
+            ), {**params, "e": json.dumps(edits), "k": k})
+            n += 1
+    return n
+
+
+def _rewrite_device_edit_tokens(conn, device_id: int, kind: str, old: str, new: str) -> int:
+    """Device-level edit tables (model A: source space) that carry names the
+    old cascade never rewrote: an interface's zone binding / parent in
+    fw_interface_overrides.edits, a route's egress interface in
+    fw_route_overrides.edits and the VR in fw_route_overrides' key."""
+    n = 0
+    if kind in ("zone", "interface"):
+        field = "zone_name" if kind == "zone" else "parent_iface_name"
+
+        def _iface(edits):
+            if edits.get(field) == old:
+                edits[field] = new
+                return True
+            return False
+        n += _rewrite_json_edits(conn, "fw_interface_overrides",
+                                 {"key": "import_interface_name", "cond": "device_id = :d"},
+                                 {"d": device_id}, _iface)
+    if kind == "interface":
+        def _route(edits):
+            if edits.get("interface_name") == old:
+                edits["interface_name"] = new
+                return True
+            return False
+        n += _rewrite_json_edits(conn, "fw_route_overrides",
+                                 {"key": "CONCAT(prefix, '/', prefix_len, '@', vr_name)",
+                                  "cond": "device_id = :d"},
+                                 {"d": device_id}, _route)
+    if kind == "vrf":
+        try:
+            n += conn.execute(text(
+                "UPDATE IGNORE fw_route_overrides SET vr_name = :new "
+                "WHERE device_id = :d AND vr_name = :old"
+            ), {"new": new, "old": old, "d": device_id}).rowcount or 0
+        except Exception:
+            pass
+    return n
+
+
+def _rewrite_registry(conn, device_id: int, target_type: str, old: str, new: str) -> int:
+    """old -> new through every registered referrer column of the device's
+    imported data (rules at the newest import, NAT, PBF, VPN, interfaces,
+    routes) plus group members for objects/services."""
     touched = 0
     for rr in (_RULE_WRITE,) + TABLE_REFERRERS:
         where = _IMPORTED_RULES_NEWEST if rr.table == "fw_imported_rules" else None
@@ -888,46 +1109,141 @@ def cascade_rename(conn, device_id: int, target_type: str, old: str, new: str) -
                                           fr, device_id, target_type, old, new, where)
     if target_type in ("object", "service"):
         touched += _rename_in_groups(conn, device_id, target_type, old, new)
-        _rehash_nat_rekey_overrides(conn, device_id)  # orig_*/trans_* are nat_hash inputs
-    if target_type == "zone":
-        touched += _cascade_zone_extra(conn, device_id, old, new)
-    if target_type == "interface":
-        # local_interface/tunnel_interface (rewritten above) are vpn_hash inputs.
-        _cascade_vpn_extra(conn, device_id)
-        # trans_src may hold an 'iface|ip' composite (interface-address SNAT,
-        # e.g. resolved ASA egress-PAT) - the generic scalar rewrite matches
-        # exact values only, so the composite kept the old name (asa2pa
-        # finding 2026-09-01). interface_name/trans_src are nat_hash inputs,
-        # so the interface path needs the re-hash too (pre-existing drift:
-        # the exact-match rewrite above never re-hashed).
-        touched += _rewrite_nat_trans_src_composite(conn, device_id, old, new)
-        _rehash_nat_rekey_overrides(conn, device_id)
-    if target_type in ("zone", "interface"):
-        # Per-rule zone overrides hold zone-OR-iface tokens (newline-joined
-        # multi-values, keyed on content_hash - no device column, so scope
-        # through the consolidated rules). Missing this left overrides on
-        # stale names after a rebind -> renderer any-fallback (estate find).
-        touched += _rewrite_zone_override_values(conn, device_id, old, new)
-        # NAT overrides shadow the raw zone slots (COALESCEd by
-        # _load_nat_rules and rendered by the deploy) - they must follow a
-        # rename too, or the effective NAT keeps pointing at the old name.
-        touched += _rewrite_nat_override_zone_values(conn, device_id, old, new)
     return touched
 
 
-def _rewrite_nat_override_zone_values(conn, device_id: int, old: str, new: str) -> int:
-    """Rewrite zone-or-iface tokens inside fw_nat_rule_overrides.src_zones/
-    dst_zones (JSON lists, keyed on nat_hash - device-scoped via the owning
-    fw_nat_rules row)."""
-    from sqlalchemy import text as _t
+def cascade_rename(conn, device_id: int, target_type: str, old: str, new: str) -> int:
+    """Model A: the one remaining MUTATING rename - an object/service MERGE
+    (object_merge): the loser's references are rewritten to the canonical
+    name in the imported data (rules, NAT, PBF, VPN, groups) and NAT is
+    re-hashed (orig_*/trans_* are nat_hash inputs; the overrides follow by
+    re-key). Interfaces, zones and VRFs are never renamed in place any more
+    - a rename is a project name-map row (main._name_map_set)."""
+    if target_type not in ("object", "service"):
+        raise ValueError(f"cascade_rename is for object/service merges, not {target_type!r}")
+    old = _clean(old)
+    new = str(new).strip() if new else None
+    if not old or not new or old == new:
+        return 0
+    touched = _rewrite_registry(conn, device_id, target_type, old, new)
+    _rehash_nat_rekey_overrides(conn, device_id)
+    return touched
+
+
+def reverse_rename(conn, device_id: int, kind: str, old: str, new: str) -> int:
+    """Migration projects_names_v1 only: put a device's data back into
+    SOURCE space by undoing one in-place rename (old = the chosen name, new
+    = the collector's name). Mirrors exactly what the old cascade touched
+    (registry, group members, the zone mirror in flows + consolidated
+    tables, the 'iface|ip' NAT composite) plus the device-level edit tables
+    it never touched. Project-space tokens (rule/NAT zone overrides, PBF/VPN
+    edits) are NOT touched - they keep the chosen name, which the map now
+    says. No hash is recomputed here: the caller re-hashes + re-keys once
+    per device (rehash_and_rekey) after every rename of the device."""
+    old = _clean(old)
+    new = str(new).strip() if new else None
+    if not old or not new or old == new:
+        return 0
+    touched = _rewrite_registry(conn, device_id, kind, old, new)
+    if kind == "zone":
+        touched += _rewrite_zone_mirrors(conn, device_id, old, new)
+    if kind == "interface":
+        touched += _rewrite_nat_trans_src_composite(conn, device_id, old, new)
+    touched += _rewrite_device_edit_tokens(conn, device_id, kind, old, new)
+    return touched
+
+
+def rehash_and_rekey(conn, device_id: int) -> dict:
+    """Recompute nat/pbf/vpn hashes of a device and re-key every table that
+    keys on them (project overlays, VPN secrets + certs) old -> new per row.
+    Migration projects_names_v1 runs this once per device after the reverse
+    renames - the last time a hash of imported data ever changes."""
+    from main import _write_nat_hash, _write_pbf_hash, _write_vpn_hash  # lazy
+    out = {}
+    for name, table, col, writer, keyed in (
+            ("nat", "fw_nat_rules", "nat_hash", _write_nat_hash, ("fw_nat_rule_overrides",)),
+            ("pbf", "fw_pbf_rules", "pbf_hash", _write_pbf_hash, ("fw_pbf_rule_overrides",)),
+            ("vpn", "fw_vpn_tunnels", "vpn_hash", _write_vpn_hash,
+             ("fw_vpn_tunnel_overrides", "fw_vpn_tunnel_secrets", "fw_vpn_tunnel_certs"))):
+        try:
+            before = {r[0]: r[1] for r in conn.execute(text(
+                f"SELECT id, HEX({col}) FROM {table} WHERE device_id = :d"),
+                {"d": device_id}).fetchall()}
+            alias = {"fw_nat_rules": "n", "fw_pbf_rules": "p", "fw_vpn_tunnels": "v"}[table]
+            writer(conn, f"{alias}.device_id = :did", {"did": device_id})
+            after = {r[0]: r[1] for r in conn.execute(text(
+                f"SELECT id, HEX({col}) FROM {table} WHERE device_id = :d"),
+                {"d": device_id}).fetchall()}
+        except Exception:
+            continue
+        n = 0
+        for rid, old_h in before.items():
+            new_h = after.get(rid)
+            if not old_h or not new_h or old_h == new_h:
+                continue
+            for t in keyed:
+                try:
+                    conn.execute(text(
+                        f"UPDATE IGNORE {t} SET {col} = UNHEX(:n) WHERE {col} = UNHEX(:o)"
+                    ), {"n": new_h, "o": old_h})
+                except Exception:
+                    pass
+            n += 1
+        out[name] = n
+    return out
+
+
+def rewrite_project_tokens(conn, project_id: int, kind: str, old: str, new: str) -> int:
+    """A project's name map changed (old -> new is what the operator now
+    sees for one source entity): the project-space tokens that spelled the
+    old name follow - rule and NAT zone overrides (zone-or-interface
+    slots), PBF ingress/egress and VPN interface edits. Imported data is
+    not touched. Returns rows rewritten."""
+    old = _clean(old)
+    new = str(new).strip() if new else None
+    if not old or not new or old == new or kind not in ("zone", "interface"):
+        return 0
+    n = _rewrite_zone_override_values(conn, project_id, old, new)
+    n += _rewrite_nat_override_zone_values(conn, project_id, old, new)
+
+    def _pbf(edits):
+        changed = False
+        ing = edits.get("ingress")
+        if isinstance(ing, list):
+            for item in ing:
+                if isinstance(item, dict) and item.get("name") == old \
+                        and str(item.get("type") or "") in ("", kind):
+                    item["name"] = new
+                    changed = True
+        if kind == "interface" and edits.get("egress_interface") == old:
+            edits["egress_interface"] = new
+            changed = True
+        return changed
+    n += _rewrite_json_edits(conn, "fw_pbf_rule_overrides",
+                             {"key": "HEX(pbf_hash)", "cond": "project_id = :p"},
+                             {"p": project_id}, _pbf)
+    if kind == "interface":
+        def _vpn(edits):
+            changed = False
+            for f in ("local_interface", "tunnel_interface"):
+                if edits.get(f) == old:
+                    edits[f] = new
+                    changed = True
+            return changed
+        n += _rewrite_json_edits(conn, "fw_vpn_tunnel_overrides",
+                                 {"key": "HEX(vpn_hash)", "cond": "project_id = :p"},
+                                 {"p": project_id}, _vpn)
+    return n
+
+
+def _rewrite_nat_override_zone_values(conn, project_id: int, old: str, new: str) -> int:
+    """Rewrite zone-or-iface tokens inside ONE project's
+    fw_nat_rule_overrides.src_zones/dst_zones (JSON lists)."""
     try:
-        rows = conn.execute(_t(
-            "SELECT DISTINCT o.nat_hash, o.src_zones, o.dst_zones "
-            "FROM fw_nat_rule_overrides o "
-            "JOIN fw_nat_rules n ON n.nat_hash = o.nat_hash "
-            "WHERE n.device_id = :did "
-            "  AND (o.src_zones LIKE :pat OR o.dst_zones LIKE :pat)"),
-            {"did": device_id, "pat": f"%{old}%"}).fetchall()
+        rows = conn.execute(text(
+            "SELECT nat_hash, src_zones, dst_zones FROM fw_nat_rule_overrides "
+            "WHERE project_id = :p AND (src_zones LIKE :pat OR dst_zones LIKE :pat)"),
+            {"p": project_id, "pat": f"%{old}%"}).fetchall()
     except Exception:
         return 0
     n = 0
@@ -946,24 +1262,22 @@ def _rewrite_nat_override_zone_values(conn, device_id: int, old: str, new: str) 
         ns, nd = _sub(src), _sub(dst)
         if ns == src and nd == dst:
             continue
-        conn.execute(_t(
+        conn.execute(text(
             "UPDATE fw_nat_rule_overrides SET src_zones = :s, dst_zones = :d "
-            "WHERE nat_hash = :nh"), {"s": ns, "d": nd, "nh": nh})
+            "WHERE project_id = :p AND nat_hash = :nh"),
+            {"s": ns, "d": nd, "p": project_id, "nh": nh})
         n += 1
     return n
 
 
-def _rewrite_zone_override_values(conn, device_id: int, old: str, new: str) -> int:
-    from sqlalchemy import text as _t
+def _rewrite_zone_override_values(conn, project_id: int, old: str, new: str) -> int:
+    """Rewrite zone-or-iface tokens (newline-joined multi-values) inside ONE
+    project's fw_rule_zone_overrides."""
     try:
-        rows = conn.execute(_t(
-            "SELECT DISTINCT o.rule_hash, o.src_zone, o.dst_zone "
-            "FROM fw_rule_zone_overrides o "
-            "JOIN fw_rules_consolidated_1 r ON r.content_hash = o.rule_hash "
-            "JOIN fw_devices d ON (d.display_name = r.device_host "
-            "                      OR d.host_name = r.device_host) "
-            "WHERE d.id = :did AND (o.src_zone LIKE :pat OR o.dst_zone LIKE :pat)"),
-            {"did": device_id, "pat": f"%{old}%"}).fetchall()
+        rows = conn.execute(text(
+            "SELECT rule_hash, src_zone, dst_zone FROM fw_rule_zone_overrides "
+            "WHERE project_id = :p AND (src_zone LIKE :pat OR dst_zone LIKE :pat)"),
+            {"p": project_id, "pat": f"%{old}%"}).fetchall()
     except Exception:
         return 0
     n = 0
@@ -976,28 +1290,43 @@ def _rewrite_zone_override_values(conn, device_id: int, old: str, new: str) -> i
         ns, nd = _sub(src), _sub(dst)
         if ns == src and nd == dst:
             continue
-        conn.execute(_t(
+        conn.execute(text(
             "UPDATE fw_rule_zone_overrides SET src_zone = :s, dst_zone = :d "
-            "WHERE rule_hash = :rh"), {"s": ns, "d": nd, "rh": rh})
+            "WHERE project_id = :p AND rule_hash = :rh"),
+            {"s": ns, "d": nd, "p": project_id, "rh": rh})
         n += 1
     return n
 
 
 def deletability(conn, device_id: int, target_type: str, name: str,
-                 *, device_host: str | None = None) -> dict:
+                 *, device_host: str | None = None, projects: list | None = None,
+                 excluded: dict | None = None, view=None) -> dict:
     """Whether a referent can be removed. Interface: routes cascade with it
     (interface_delete clears routes by name), so they don't block; everything else
     blocks, plus 'sole member of a referenced zone' (would empty a used zone)."""
     name = _clean(name)
-    refs = find_referrers(conn, device_id, target_type, name, device_host=device_host)
+    if view is not None:
+        if excluded is None:
+            excluded = view.excluded_dict(device_id)
+        if projects is None and getattr(view, "project_id", None):
+            projects = [view.project_id]
+    refs = find_referrers(conn, device_id, target_type, name, device_host=device_host,
+                          projects=projects, excluded=excluded, view=view)
     if target_type != "interface":
         return {"removable": not refs, "referrers": refs}
     blockers = [r for r in refs if r.referrer_kind != "route"]
     cascading_routes = [r for r in refs if r.referrer_kind == "route"]
     sole_used_zone = None
-    z = _clean(conn.execute(text(
-        "SELECT zone_name FROM fw_interfaces WHERE device_id = :d AND interface_name = :n"
-    ), {"d": device_id, "n": name}).scalar())
+    _zrow = conn.execute(text(
+        "SELECT zone_name, import_interface_name FROM fw_interfaces "
+        "WHERE device_id = :d AND interface_name = :n"
+    ), {"d": device_id, "n": name}).fetchone()
+    z = _clean(_zrow[0]) if _zrow else None
+    if view is not None and _zrow:
+        # the project's zone binding of this interface, when it edited it
+        e = view.interface_edits_for(device_id, _zrow[1], name)
+        if "zone_name" in e:
+            z = _clean(e.get("zone_name"))
     # 'default' is the NO-ZONE sentinel on fw_interfaces.zone_name - an
     # unzoned interface is not "the sole member of a zone" (5th sentinel
     # site, missed by the afc22ca sweep; it blocked skip/delete on every
@@ -1005,11 +1334,28 @@ def deletability(conn, device_id: int, target_type: str, name: str,
     if z == "default":
         z = None
     if z:
-        others = conn.execute(text(
-            "SELECT COUNT(*) FROM fw_interfaces WHERE device_id = :d AND zone_name = :z "
-            "AND interface_name <> :n"
-        ), {"d": device_id, "z": z, "n": name}).scalar()
-        if not others and find_referrers(conn, device_id, "zone", z, device_host=device_host):
+        # the project view: interfaces deleted in the project are no members
+        gone_if = set((excluded or {}).get("interface") or ())
+        others = []
+        for n, imp, zn in conn.execute(text(
+                "SELECT interface_name, import_interface_name, zone_name FROM fw_interfaces "
+                "WHERE device_id = :d AND interface_name <> :n"
+        ), {"d": device_id, "n": name}).fetchall():
+            if n in gone_if:
+                continue
+            if view is not None:
+                zn = view.interface_edits_for(device_id, imp, n).get("zone_name", zn)
+            if _clean(zn) == z:
+                others.append(n)
+        # Who else would still use the zone - the interface's OWN zone
+        # reference does not count (it leaves with the interface). Without
+        # this the sole member of an otherwise unreferenced zone always
+        # needed the empty-zone confirm, and the message counted the
+        # interface itself as a rule reference.
+        zrefs = [r for r in find_referrers(conn, device_id, "zone", z, device_host=device_host,
+                                           projects=projects, excluded=excluded, view=view)
+                 if not (r.referrer_kind == "interface" and r.referrer_label == name)]
+        if not others and zrefs:
             sole_used_zone = z
     return {"removable": not blockers and not sole_used_zone, "referrers": refs,
             "blockers": blockers, "cascading_routes": cascading_routes,
@@ -1042,7 +1388,8 @@ def _object_scalar_targets(target_type: str):
     return out
 
 
-def find_delete_blockers(conn, device_id: int, target_type: str, names) -> dict:
+def find_delete_blockers(conn, device_id: int, target_type: str, names,
+                         *, excluded: dict | None = None) -> dict:
     """Selection-aware last-member guard. A name is blocked when removing the WHOLE
     `names` selection would EMPTY a container - a rule field, a NAT field (list or
     scalar trans_*), or a group - that is NOT itself in the selection (deleting an
@@ -1059,8 +1406,10 @@ def find_delete_blockers(conn, device_id: int, target_type: str, names) -> dict:
     # contradict (raw fw_imported_rules.schedule would ignore a schedule
     # override and falsely block a no-longer-used schedule). The schedule slot
     # is scalar: any referencing rule empties it on delete → blocks.
+    gone_rules = set((excluded or {}).get("rule") or ())
+    gone_members = _excluded_tokens(excluded, target_type)
     if target_type == "schedule":
-        for r in collect_references(conn, device_id):
+        for r in collect_references(conn, device_id, excluded=excluded):
             if "schedule" in r.targets and r.name in names:
                 blocked.setdefault(r.name, []).append(
                     f"schedule of {r.referrer_kind} {r.referrer_label!r}")
@@ -1069,7 +1418,8 @@ def find_delete_blockers(conn, device_id: int, target_type: str, names) -> dict:
     def _check(members, reason, owner=None):
         if owner is not None and owner in names:
             return  # the container itself is being deleted → not a blocker
-        ms = {m for m in (_clean(x) for x in members) if m}
+        # the project view: members the project already deleted are no survivors
+        ms = {m for m in (_clean(x) for x in members) if m} - gone_members
         removed = ms & names
         if not removed or (ms - names):
             return  # nothing of ours, or survivors remain → not emptied
@@ -1090,6 +1440,8 @@ def find_delete_blockers(conn, device_id: int, target_type: str, names) -> dict:
             sel += f" AND ({where})"
         for row in conn.execute(text(sel), {"d": device_id}).mappings().all():
             label = str(row.get(rr.label_col) or row.get(rr.id_col) or "")
+            if rr.kind == "access_rule" and label in gone_rules:
+                continue   # a rule deleted in the project holds nothing
             for fr in frs:
                 if fr.shape == "json_list":
                     arr = _jload(row.get(fr.field))
@@ -1107,6 +1459,8 @@ def find_delete_blockers(conn, device_id: int, target_type: str, names) -> dict:
         for gid, gname, val in conn.execute(text(
                 "SELECT id, name, value FROM fw_imported_objects WHERE device_id = :d "
                 f"AND obj_type = :t AND ({_GRP_ACTIVE})"), {"d": device_id, "t": grp_type}):
+            if excluded and _clean(gname) in (set(excluded.get("group") or ()) | set(excluded.get("service_group") or ())):
+                continue   # a group deleted in the project holds nothing
             data = _jload(val) or {}
             members = data.get("members") if isinstance(data, dict) else None
             if isinstance(members, list):
@@ -1123,7 +1477,7 @@ def cascade_delete(conn, device_id: int, target_type: str, name: str,
     name = _clean(name)
     if not name or target_type not in ("object", "service"):
         return {"stripped": 0, "blocked": [],
-                "note": "object/service only; interface/zone via deletability"}
+                "note": "object/service only, interface/zone via deletability"}
     if not force:
         blk = find_delete_blockers(conn, device_id, target_type, {name})
         if name in blk:

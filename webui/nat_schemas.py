@@ -94,6 +94,9 @@ SCHEMA: dict[str, dict] = {
     },
     # FTD not implemented yet - empty schema.
     "firepower":  {"fields": []},
+    # Source NAT carries no vendor-specific slots here; port forwards are
+    # not pushable at all before the DNat controller ships.
+    "opnsense":   {"fields": []},
 }
 
 

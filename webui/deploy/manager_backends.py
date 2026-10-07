@@ -67,7 +67,7 @@ class _EnterpriseGateDriver:
         label = self._LABELS.get(self._key, self._key)
         yield StepResult(
             step="Enterprise required", success=False,
-            detail=(f"This target is managed via {label} - an Enterprise feature. "
+            detail=(f"This target is managed via {label}, an Enterprise feature. "
                     f"Install the Enterprise module + a valid licence, or point the "
                     f"target at the device directly."))
 

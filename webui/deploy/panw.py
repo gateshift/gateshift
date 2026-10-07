@@ -23,6 +23,7 @@ import requests
 
 from . import integrity as _integ
 from .base import (
+    DropTagger,
     DeployDriver,
     DroppedField,
     StepResult,
@@ -204,7 +205,7 @@ def _pa_specials_to_any(raw, dropped, rule_id: str, field: str, specials: set, l
                 dropped.append(DroppedField(
                     rule_id=rule_id, field=field,
                     reason=f"'{m}' is a Check Point {label} with no PA equivalent",
-                    fallback="any"))
+                    fallback="replaced by any"))
             out.append("any")
         else:
             out.append(m)
@@ -324,10 +325,10 @@ def _paf_addr_group_skip(grp, ctx):
     if lost and not kept:
         if ctx.get("dropped") is not None:
             ctx["dropped"].append(DroppedField(
-                rule_id=grp.get("name") or "?", field="members",
+                rule_id=grp.get("name") or "?", field="address_group",
                 reason=f"all member(s) {lost} reference object(s) this push does "
-                       "not create (e.g. wildcard FQDN) - no members left; group skipped",
-                fallback="group skipped"))
+                       "not create (e.g. wildcard FQDN), no members left. Group skipped",
+                fallback="not pushed"))
         return True
     return False
 
@@ -343,8 +344,8 @@ def _paf_addr_group_body(grp, ctx):
             ctx["dropped"].append(DroppedField(
                 rule_id=grp.get("name") or "?", field="member",
                 reason=f"member(s) {lost} reference object(s) this push does not "
-                       "create (e.g. wildcard FQDN) - pruned from the group",
-                fallback="member(s) removed"))
+                       "create (e.g. wildcard FQDN): pruned from the group",
+                fallback="pushed without the member(s)"))
         _member_list(static, members)
         return [static]
     if val.get("type") == "dynamic":
@@ -373,16 +374,27 @@ def _paf_addr_skip(obj, ctx):
             ctx["dropped"].append(DroppedField(
                 rule_id=obj.get("name") or "?",
                 field="fqdn",
-                reason=f"wildcard FQDN '{val.get('value')}' - PAN-OS FQDN objects "
-                       f"do not accept wildcards; object skipped"))
+                reason=f"wildcard FQDN '{val.get('value')}': PAN-OS FQDN objects "
+                       f"do not accept wildcards",
+                fallback="not pushed"))
         return True
     return False
 
 
 def _paf_service_skip(obj, ctx):
-    """L3 protos (icmp/gre/esp/…) aren't PA service objects → skip the whole entry."""
+    """L3 protos (icmp/gre/esp/…) aren't PA service objects → skip the whole
+    entry and declare it: PAN-OS carries them as predefined applications, so a
+    rule keeps its meaning through the application slot, not the service."""
     proto = (obj.get("value", {}).get("protocol") or "").lower()
-    return proto not in _PA_SERVICE_PROTOS
+    if proto in _PA_SERVICE_PROTOS:
+        return False
+    if (ctx or {}).get("dropped") is not None:
+        ctx["dropped"].append(DroppedField(
+            rule_id=obj.get("name") or "?", field="service",
+            reason=f"protocol {proto or '?'} is not a PAN-OS service object: "
+                   "PAN-OS carries it as a predefined application",
+            fallback="not pushed"))
+    return True
 
 
 def _paf_service_protocol(obj, ctx):
@@ -518,8 +530,8 @@ def _paf_r_addr_side(rule, ctx, field: str, key: str):
             rule_id=rule.get("rule_name") or rule.get("name") or "?",
             field=field,
             reason=f"reference(s) {lost} point at object(s) this push does not "
-                   "create - pruned (PAN-OS would reject the candidate at commit)",
-            fallback=("side became empty → matches any" if not kept
+                   "create: pruned (PAN-OS would reject the candidate at commit)",
+            fallback=("replaced by any (the side became empty)" if not kept
                       else "remaining refs kept")))
     el = _el(field); _member_list(el, kept or ["any"]); return [el]
 
@@ -661,9 +673,8 @@ def _paf_r_schedule(rule, ctx):
                 rule_id=ctx.get("rule_id") or "?", field="schedule",
                 reason=f"schedule {v!r} was skipped by the schedule renderer "
                        "(not representable on this target)",
-                fallback="rule pushed WITHOUT schedule - always-active "
-                         "(more permissive for allow rules; re-create the "
-                         "schedule on the target if needed)",
+                fallback="pushed without schedule (always active, more permissive "
+                         "for allow rules. Re-create the schedule on the target)",
             ))
         return []
     return [_el("schedule", v[:31])]
@@ -696,7 +707,7 @@ def _paf_r_negate(rule, ctx):
         ctx["dropped"].append(DroppedField(
             rule_id=ctx["rule_id"], field="negate_service",
             reason="PAN-OS security rules have no service-negate element",
-            fallback="ignored"))
+            fallback="pushed without the negate"))
     return out
 
 
@@ -932,9 +943,9 @@ def _pa_xlate_port(value, nat_rule: dict, dropped: list) -> str:
         return txt
     dropped.append(DroppedField(
         rule_id=nat_rule.get("name") or "?", field="trans_dst_port",
-        reason=f"translated port {txt!r} is not a single port - PAN-OS accepts "
+        reason=f"translated port {txt!r} is not a single port: PAN-OS accepts "
                "only one integer here",
-        fallback="no port translation emitted (address translation kept)"))
+        fallback="pushed without port translation (address translation kept)"))
     return ""
 
 
@@ -2048,6 +2059,15 @@ class PanwDriver(DeployDriver):
                 })
         if _vip_objs:
             address_objects = _vip_objs + list(address_objects or [])
+        # A VIP the source wires to no policy carries no dest-NAT the importer
+        # could synthesise a rule from (properties.vip_ref names the one it
+        # did), so its translation does not travel - only the external address
+        # above does. Said out loud: on a FortiGate source these were invisible
+        # in both directions, present on the box and absent here (matrix 0.9.4).
+        _wired_vips = {str(((_n.get("properties") or {}).get("vip_ref") or "")).strip()
+                       for _n in (nat_rules or [])}
+        _unwired_vips = [str(_v.get("name") or "").strip() for _v in (nat_vips or [])
+                         if str(_v.get("name") or "").strip() not in _wired_vips]
         # A Forti SNAT POOL is referenced BY NAME as a NAT rule's translated
         # source; PAN-OS resolves that against its ADDRESS objects, so the
         # pool must exist as one (host for a single IP, ip-range otherwise).
@@ -2070,6 +2090,28 @@ class PanwDriver(DeployDriver):
             address_objects = _pool_objs + list(address_objects or [])
         sections: dict[str, str] = {}
         dropped: list[DroppedField] = []
+        for _uv in _unwired_vips:
+            dropped.append(DroppedField(
+                rule_id=_uv, field="vip",
+                reason="VIP with no policy on the source, no dest-NAT rule "
+                       "was derived from it",
+                fallback="not pushed: the external address is created, the "
+                         "translation is not"))
+        # The addresses materialised above for VIPs and SNAT pools are objects
+        # the source does not have as such - the Review's surplus check needs
+        # to hear that (a FortiGate source: 9 VIP addresses on every PA leg).
+        for _o in _vip_objs:
+            dropped.append(DroppedField(
+                rule_id=_o["name"], field="address", synthesized=True,
+                reason="a FortiGate VIP is an object of its own. PAN-OS needs "
+                       "its external address as an address object",
+                fallback="created from the VIP's external address"))
+        for _o in _pool_objs:
+            dropped.append(DroppedField(
+                rule_id=_o["name"], field="address", synthesized=True,
+                reason="a FortiGate SNAT pool is referenced by name. PAN-OS "
+                       "resolves that against an address object",
+                fallback="created from the SNAT pool"))
 
         # Normalize all object/group names to PA's allowed subset BEFORE building
         # lookups + rendering. ASA-side autogenerated names like
@@ -2086,12 +2128,13 @@ class PanwDriver(DeployDriver):
         # service-group, BEFORE the L3-drop, so PA represents them faithfully
         # instead of dropping the whole object (BUG-024 parity).
         service_objects, service_groups = expand_multiproto_services(
-            service_objects, service_groups)
+            service_objects, service_groups, dropped=dropped)
 
         # Drop L3-proto service objects (icmp/gre/...) - PA models them as apps,
         # not services. Clean their names out of service-group members + drop
         # groups that become empty so push doesn't fail on dangling references.
-        dropped_l3_svcs = self._drop_l3_service_objects(service_objects, service_groups)
+        dropped_l3_svcs = self._drop_l3_service_objects(
+            service_objects, service_groups, dropped)
 
         # Lookups so rules can reference objects/groups by name instead of literals.
         addr_lookup = self._build_addr_lookup(address_objects, address_groups)
@@ -2134,9 +2177,9 @@ class PanwDriver(DeployDriver):
         # emitted; the push (_has_data + its own _PUSH_STEPS row) rides whichever
         # section carries data. The inner interface/route body is shared.
         if routing_mode == "advanced":
-            sections["Logical Router"] = self._gen_logical_router(vrfs, routes, interfaces)
+            sections["Logical Router"] = self._gen_logical_router(vrfs, routes, interfaces, dropped)
         else:
-            sections["Virtual Router"] = self._gen_virtual_router(vrfs, routes, interfaces)
+            sections["Virtual Router"] = self._gen_virtual_router(vrfs, routes, interfaces, dropped)
         sections["Zones"] = self._gen_zones(
             zones,
             {self._pa_iface_name(i["interface_name"]) for i in interfaces
@@ -2144,7 +2187,7 @@ class PanwDriver(DeployDriver):
         sections["Address Objects"] = self._gen_address_objects(address_objects, dropped)
         sections["Address Groups"] = self._gen_address_groups(
             address_groups, addr_lookup, _pushable_addrs, dropped)
-        sections["Service Objects"] = self._gen_service_objects(service_objects)
+        sections["Service Objects"] = self._gen_service_objects(service_objects, dropped)
         sections["Service Groups"] = self._gen_service_groups(service_groups)
         sections["Tags"] = self._gen_tag_objects(list(tags or []), dropped)
         sections["URL Categories"] = self._gen_url_categories(list(url_categories or []), dropped)
@@ -2167,7 +2210,12 @@ class PanwDriver(DeployDriver):
             if _n and _z:
                 _iface_zone[_n] = _z
 
-        def _sane_zone_slot(vals, rule_id, field):
+        # (!) This pass runs BEFORE the rule loop, so the DropTagger that
+        # normally stamps the rule's hash onto a drop is not in scope yet -
+        # the hash has to travel explicitly, or the Review's change log cannot
+        # tell the operator WHICH rule lost its zone (matrix 0.9.4: 372
+        # unattributed drops on a Check Point source).
+        def _sane_zone_slot(vals, rule_id, field, rhash=""):
             out: list[str] = []
             for t in (vals or []):
                 s = str(t or "").strip()
@@ -2181,7 +2229,8 @@ class PanwDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=rule_id, field=field,
                     reason=f"zone token '{s}' is neither a pushed zone nor a "
-                           f"zone-bound interface - relaxed to any",
+                           f"zone-bound interface, relaxed to any",
+                    rhash=rhash,
                 ))
                 out.append("any")
             out = list(dict.fromkeys(out))
@@ -2189,12 +2238,14 @@ class PanwDriver(DeployDriver):
 
         for _r in rules or []:
             _rid = str(_r.get("rule_name") or _r.get("id") or "?")
-            _r["src_zones"] = _sane_zone_slot(_r.get("src_zones"), _rid, "src_zones")
-            _r["dst_zones"] = _sane_zone_slot(_r.get("dst_zones"), _rid, "dst_zones")
+            _rh = str(_r.get("rhash") or "")
+            _r["src_zones"] = _sane_zone_slot(_r.get("src_zones"), _rid, "src_zones", _rh)
+            _r["dst_zones"] = _sane_zone_slot(_r.get("dst_zones"), _rid, "dst_zones", _rh)
         for _n in nat_rules or []:
             _rid = str(_n.get("name") or _n.get("id") or "?")
-            _n["src_zones"] = _sane_zone_slot(_n.get("src_zones"), _rid, "src_zones")
-            _n["dst_zones"] = _sane_zone_slot(_n.get("dst_zones"), _rid, "dst_zones")
+            _nh = str(_n.get("rhash") or "")
+            _n["src_zones"] = _sane_zone_slot(_n.get("src_zones"), _rid, "src_zones", _nh)
+            _n["dst_zones"] = _sane_zone_slot(_n.get("dst_zones"), _rid, "dst_zones", _nh)
 
         sections["Security Rules"] = self._gen_rules(
             rules, settings, dropped, addr_lookup, svc_lookup, dropped_l3_svcs,
@@ -2213,7 +2264,7 @@ class PanwDriver(DeployDriver):
             list(pbf_rules or []), dropped, svc_lookup, _pbf_svc_extra)
         if _pbf_svc_extra:
             service_objects = list(service_objects) + _pbf_svc_extra
-            sections["Service Objects"] = self._gen_service_objects(service_objects)
+            sections["Service Objects"] = self._gen_service_objects(service_objects, dropped)
         sections["Decryption Rules"] = self._gen_decryption(
             list(ssl_rules or []), dropped)
         # IPSec VPN (CE plan P3a): crypto profiles + IKE gateways + IPSec tunnels.
@@ -2284,6 +2335,7 @@ class PanwDriver(DeployDriver):
     def _drop_l3_service_objects(
         service_objects: list[dict],
         service_groups: list[dict],
+        dropped: list | None = None,
     ) -> set[str]:
         """Remove service objects whose proto isn't in PA's service schema.
 
@@ -2302,6 +2354,19 @@ class PanwDriver(DeployDriver):
                 name = obj.get("name")
                 if name:
                     dropped_names.add(name)
+                if dropped is not None:
+                    _vendor = bool((obj.get("value") or {}).get("predefined"))
+                    _portless = not (obj.get("value") or {}).get("port")
+                    dropped.append(DroppedField(
+                        rule_id=name or "?", field="service",
+                        reason=(
+                            f"vendor-shipped service on IP protocol {proto} "
+                            "without a port: PAN-OS has no equivalent service "
+                            "object" if (_vendor and _portless) else
+                            f"protocol {proto or '?'} is not a PAN-OS service "
+                            "object: PAN-OS carries it as a predefined "
+                            "application"),
+                        fallback="not pushed"))
         if dropped_names:
             service_objects[:] = kept
 
@@ -2314,6 +2379,13 @@ class PanwDriver(DeployDriver):
                 pruned = [m for m in members if m not in dropped_names]
                 if not pruned:
                     dropped_groups.add(str(grp.get("name") or ""))
+                    if dropped is not None:
+                        dropped.append(DroppedField(
+                            rule_id=str(grp.get("name") or "?"),
+                            field="service_group",
+                            reason="every member is a protocol PAN-OS does not "
+                                   "model as a service object",
+                            fallback="not pushed"))
                     continue
                 val["members"] = pruned
                 kept_groups.append(grp)
@@ -2480,8 +2552,8 @@ class PanwDriver(DeployDriver):
                 empty_bonds.add(ae_name)
                 dropped.append(DroppedField(
                     rule_id=ae_name, field="member_iface_names",
-                    reason="aggregate-ethernet has no members - bundle is inactive until members are added",
-                    fallback="rendered without members (so router / VPN references resolve)",
+                    reason="aggregate-ethernet has no members: bundle is inactive until members are added",
+                    fallback="pushed without members (router and VPN references still resolve)",
                 ))
                 continue
             for m in members or []:
@@ -2647,7 +2719,8 @@ class PanwDriver(DeployDriver):
 
     def _router_vrf_body(self, parent: "ET.Element", raw_name: str,
                          routes: list[dict], interfaces: list[dict],
-                         pushed_iface_names: set[str], bond_slaves: set[str]) -> None:
+                         pushed_iface_names: set[str], bond_slaves: set[str],
+                         dropped: list | None = None) -> None:
         """Populate one routing instance's <interface> members + <routing-table>
         static routes into ``parent``. Shared verbatim by the legacy
         <virtual-router> and the ARE <logical-router> renders - the static-route
@@ -2676,14 +2749,58 @@ class PanwDriver(DeployDriver):
         # are kept regardless (next-hop is `<discard/>`). Tunnel-iface routes
         # without an explicit next-hop survive too (their iface is pushed, so
         # <interface>tunnel.N</interface> alone resolves the egress).
+        # On-link check for next-hop-only routes: PAN-OS resolves the egress
+        # itself when the next hop sits in a pushed interface's subnet of
+        # this VR, and REFUSES the whole candidate otherwise ("can't find
+        # interface in 'default' for next hop X" at validate - matrix 0.9.3
+        # cp2pa: six Gaia statics via VPN peer addresses, no interface).
+        # Such a route is dropped and declared; the operator binds its
+        # interface in Network > Routing, which makes it render.
+        _vr_nets: list = []
+        for iface in interfaces:
+            if (iface.get("vr_name") or "default") != raw_name:
+                continue
+            _ips = iface.get("ip_addresses") or []
+            if isinstance(_ips, str):
+                try:
+                    _ips = json.loads(_ips)
+                except Exception:
+                    _ips = []
+            for _ip in _ips:
+                try:
+                    _vr_nets.append(ipaddress.ip_network(str(_ip), strict=False))
+                except (ValueError, TypeError):
+                    continue
+
+        def _on_link(nh: str) -> bool:
+            try:
+                addr = ipaddress.ip_address(str(nh).strip())
+            except ValueError:
+                return True   # not a plain address - leave it to PAN-OS
+            return any(addr in n for n in _vr_nets)
+
         usable_routes = []
         for r in static_routes:
             if (r.get("route_type") or "static") == "blackhole":
                 usable_routes.append(r)
                 continue
             pa_name = self._pa_iface_name(r.get("interface_name") or "")
-            if pa_name in pushed_iface_names or r.get("next_hop"):
+            if pa_name in pushed_iface_names:
                 usable_routes.append(r)
+            elif r.get("next_hop") and _on_link(r["next_hop"]):
+                usable_routes.append(r)
+            elif r.get("next_hop") and dropped is not None:
+                _p = r.get("prefix") or ""
+                if "/" not in _p and r.get("prefix_len") is not None:
+                    _p = f"{_p}/{int(r['prefix_len'])}"
+                dropped.append(DroppedField(
+                    rule_id=_p, field="next_hop",
+                    reason=f"next hop {r['next_hop']} is not on-link in VR "
+                           f"'{raw_name}' and the route names no interface: "
+                           "PAN-OS cannot resolve the egress (candidate "
+                           "validation fails)",
+                    fallback="not pushed: bind its interface in "
+                             "Network > Routing"))
         if not usable_routes:
             return
         rt_table = ET.SubElement(parent, "routing-table")
@@ -2715,7 +2832,8 @@ class PanwDriver(DeployDriver):
                 ET.SubElement(rt_entry, "metric").text = str(int(rt["metric"]))
 
     def _gen_virtual_router(self, vrfs: list[dict], routes: list[dict],
-                            interfaces: list[dict]) -> str:
+                            interfaces: list[dict],
+                            dropped: list | None = None) -> str:
         """Generate legacy PAN-OS <virtual-router> XML from first-class fw_vrfs.
 
         Iterates ``vrfs`` (each entry: {name, raw_name, properties}). ``name`` is
@@ -2735,12 +2853,13 @@ class PanwDriver(DeployDriver):
             raw_name = vrf.get("raw_name") or eff_name
             entry = ET.SubElement(root, "entry", name=eff_name)
             self._router_vrf_body(entry, raw_name, routes, interfaces,
-                                  pushed_iface_names, bond_slaves)
+                                  pushed_iface_names, bond_slaves, dropped)
         _indent(root)
         return _to_xml_str(root)
 
     def _gen_logical_router(self, vrfs: list[dict], routes: list[dict],
-                            interfaces: list[dict]) -> str:
+                            interfaces: list[dict],
+                            dropped: list | None = None) -> str:
         """Generate PAN-OS <logical-router> XML (Advanced Routing Engine, PAN-OS
         10.2+) - the ARE counterpart to _gen_virtual_router.
 
@@ -2760,7 +2879,7 @@ class PanwDriver(DeployDriver):
             entry = ET.SubElement(root, "entry", name=eff_name)
             vrf_entry = ET.SubElement(ET.SubElement(entry, "vrf"), "entry", name="default")
             self._router_vrf_body(vrf_entry, raw_name, routes, interfaces,
-                                  pushed_iface_names, bond_slaves)
+                                  pushed_iface_names, bond_slaves, dropped)
         _indent(root)
         return _to_xml_str(root)
 
@@ -2842,7 +2961,7 @@ class PanwDriver(DeployDriver):
                 if dropped is not None:
                     dropped.append(DroppedField(
                         rule_id=name, field="pa_color",
-                        reason=f"unknown PA color {color!r} - falling back to {dflt}",
+                        reason=f"unknown PA color {color!r}: falling back to {dflt}",
                         fallback=dflt,
                     ))
                 color = dflt
@@ -2886,9 +3005,9 @@ class PanwDriver(DeployDriver):
                 if dropped is not None:
                     dropped.append(DroppedField(
                         rule_id=name, field="url_category",
-                        reason="no pa_list slot - cross-vendor import "
+                        reason="no pa_list slot: cross-vendor import "
                                "without PA mapping",
-                        fallback="object skipped at push",
+                        fallback="not pushed",
                     ))
                 continue
             entry = ET.SubElement(root, "entry", name=name[:127])
@@ -2966,17 +3085,17 @@ class PanwDriver(DeployDriver):
                 if dropped is not None:
                     dropped.append(DroppedField(
                         rule_id=name, field="schedule",
-                        reason="monthly recurrence (CP-only) - PA has no "
+                        reason="monthly recurrence (CP-only): PA has no "
                                "monthly pattern",
-                        fallback="interval skipped at push",
+                        fallback="pushed without the monthly interval",
                     ))
             elif kind == "group":
                 if dropped is not None:
                     dropped.append(DroppedField(
                         rule_id=name, field="schedule",
-                        reason="group schedule (CP/Forti) - PA has no "
+                        reason="group schedule (CP/Forti): PA has no "
                                "schedule-group concept",
-                        fallback="interval skipped at push",
+                        fallback="pushed without the group schedule",
                     ))
         return weekly, daily, non_rec
 
@@ -3047,16 +3166,17 @@ class PanwDriver(DeployDriver):
                     rule_id=name, field="schedule",
                     reason=f"time range(s) {_degen} have end == start, which "
                            "PAN-OS rejects (vendor sentinel schedule)",
-                    fallback=("object skipped" if not (weekly or daily or non_rec)
-                              else "range dropped, rest kept"),
+                    fallback=("not pushed: every time range is degenerate"
+                              if not (weekly or daily or non_rec)
+                              else "pushed without the degenerate range(s)"),
                 ))
             if not (weekly or daily or non_rec):
                 if dropped is not None and not _degen:
                     dropped.append(DroppedField(
                         rule_id=name, field="schedule",
-                        reason="no pa_* slot AND no intervals - cross-vendor "
+                        reason="no pa_* slot AND no intervals: cross-vendor "
                                "import without any schedule mapping",
-                        fallback="object skipped at push",
+                        fallback="not pushed",
                     ))
                 continue
             if pushable_out is not None:
@@ -3110,12 +3230,15 @@ class PanwDriver(DeployDriver):
 
     # ── Service Objects XML ──────────────────────────────────────
 
-    def _gen_service_objects(self, objects: list[dict]) -> str:
+    def _gen_service_objects(self, objects: list[dict], dropped=None) -> str:
         """Emit PA service objects. L3 protos (icmp/gre/esp/...) are skipped -
         PA represents them as predefined apps, not as service objects, and
-        leaving them in fails the push with "protocol X is unexpected"."""
+        leaving them in fails the push with "protocol X is unexpected". The
+        skip is declared (matrix 0.9.4: 55 of 395 CP services vanished from
+        the statistics without a word)."""
         return _pa_spec_render("service", objects, lambda o: o["name"],
                                [_paf_service_protocol, _paf_description],
+                               ctx={"dropped": dropped},
                                entry_skip=_paf_service_skip)
 
     # ── Service Groups XML ───────────────────────────────────────
@@ -3145,12 +3268,14 @@ class PanwDriver(DeployDriver):
         # target's zone topology, App-ID detection or profile objects differ
         # from the source's. Clones carry a '-fb' name suffix.
         append_fallback = _truthy(settings.get("append_fallback_ruleset", "false"))
+        dropped = DropTagger(dropped)  # every drop below carries the rule's hash (Review change log, R2)
 
         root = _el("rules")
         seen_names: dict[str, int] = {}
 
         def emit_rule(i: int, rule: dict, force_fallback: bool, name_suffix: str = "") -> None:
             rule_id = str(rule.get("rule_name") or rule.get("id") or f"#{i+1}")
+            dropped.current = (rule.get("rhash") or "")
             # Default-policy fidelity (deploy.base.default_rule_disposition):
             # a pristine default matching PA's own built-ins is skipped
             # (declared once, on the original pass); modified ones render as
@@ -3302,8 +3427,8 @@ class PanwDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=name, field="nat_rule",
                         reason="no destination zone and no zone flagged external "
-                               "on the source - PAN-OS NAT needs a concrete zone",
-                        fallback="rule dropped; set the zone in Enrichment"))
+                               "on the source: PAN-OS NAT needs a concrete zone",
+                        fallback="not pushed: set the zone in Target Settings"))
                     root.remove(entry)
                     return
             to_el = ET.SubElement(entry, "to")
@@ -3419,7 +3544,7 @@ class PanwDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=rid, field=aspect,
                         reason="PAN-OS NAT rules do not support negation",
-                        fallback="ignored",
+                        fallback="pushed without the negate",
                     ))
 
             # PA group-tag - entry-level, optional. Trimmed to 127 chars
@@ -3493,9 +3618,9 @@ class PanwDriver(DeployDriver):
                 # whole section (QA finding, Forti→PA).
                 dropped.append(DroppedField(
                     rule_id=name, field="pbf_ingress",
-                    reason="policy-route has no ingress zone/interface; PAN-OS "
-                           "PBF requires one (no 'any' ingress) - rule dropped",
-                    fallback="re-create it manually with the intended ingress"))
+                    reason="policy-route has no ingress zone/interface. PAN-OS "
+                           "PBF requires one (no 'any' ingress), rule dropped",
+                    fallback="not pushed: re-create it on the target with the intended ingress"))
                 root.remove(entry)
                 continue
             _member_list(ET.SubElement(entry, "source"),
@@ -3532,7 +3657,7 @@ class PanwDriver(DeployDriver):
                         rule_id=name, field="pbf_service",
                         reason=f"service {_txt!r} has no PA service object and "
                                "can't be materialized",
-                        fallback="service narrowed to any"))
+                        fallback="replaced by any (service)"))
                     _svcs.append("any")
                     continue
                 _svcs.append(_txt)
@@ -3595,7 +3720,7 @@ class PanwDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=s.get("name") or f"#{i+1}", field="decryption_type",
                     reason=f"'{ssl_type}' out of V1 scope (HTTPS forward-proxy "
-                           "only) - collected, not pushed"))
+                           "only), collected, not pushed"))
                 continue
             name = _safe_pa_name(s.get("name") or f"decrypt-{i+1:03d}")
             entry = ET.SubElement(root, "entry", name=name)
@@ -3727,6 +3852,19 @@ class PanwDriver(DeployDriver):
             gw_name = _safe_pa_name(v.get("gateway_name") or v.get("name") or "")
             if not gw_name:
                 continue
+            if not (v.get("local_interface") or "").strip():
+                # Same rule as the FortiGate phase1: a PAN-OS IKE gateway needs
+                # a local interface, and an empty <local-address/> fails the
+                # candidate validation for EVERY gateway (matrix 0.9.3 cp2pa:
+                # 'local-address is invalid' x4, commit blocked). The source
+                # carries none (Check Point communities) - the operator picks
+                # it in the VPN tab ('set local IF').
+                dropped.append(DroppedField(
+                    rule_id=gw_name, field="local_interface",
+                    reason="PAN-OS IKE gateway needs a local egress interface. "
+                           "The source carries none (e.g. Check Point "
+                           "communities): set it in the VPN tab"))
+                continue
             auth_type = (v.get("auth_type") or "psk")
             cert_name = v.get("cert_name")
             # cert-auth needs an uploaded identity cert (CR-2). Without one the
@@ -3758,8 +3896,9 @@ class PanwDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=gw_name, field="pre_shared_key",
                     reason="PSK: a placeholder is pushed unless one is set in Gateshift "
-                           "(then injected, encrypted, at push-time) - source secrets "
-                           "are never migrated"))
+                           "(then injected, encrypted, at push-time). Source secrets "
+                           "are never migrated",
+                    fallback="placeholder pushed"))
             proto = ET.SubElement(entry, "protocol")
             ikev = v.get("ike_version") or "ikev2"
             ET.SubElement(proto, "version").text = ikev
@@ -3802,6 +3941,8 @@ class PanwDriver(DeployDriver):
                 continue
             if (v.get("auth_type") or "psk") == "cert" and not v.get("cert_name"):
                 continue  # no identity cert uploaded → gateway skipped → skip tunnel
+            if not (v.get("local_interface") or "").strip():
+                continue  # no local interface → gateway skipped → skip tunnel
             name = _safe_pa_name(v.get("name") or "")
             if not name:
                 continue
@@ -4039,11 +4180,11 @@ class PanwDriver(DeployDriver):
             msg = (res.findtext(".//line") or res.findtext(".//msg") or "").strip()
             return StepResult(
                 step="revert candidate", success=True,
-                detail="push failed mid-way - reverted the candidate to the "
+                detail="push failed mid-way: reverted the candidate to the "
                        "running config so follow-up pushes start from a "
                        f"consistent state ({msg or 'reverted'}). Note: this "
                        "discards ALL uncommitted candidate changes on the "
-                       "target - including a previously pushed but "
+                       "target, including a previously pushed but "
                        "uncommitted Network strand. If your Network push "
                        "was not committed yet, push Network again before "
                        "retrying this strand.")
@@ -4056,12 +4197,12 @@ class PanwDriver(DeployDriver):
                 # it back. One successful full push + commit rewrites the
                 # node and clears the condition.
                 hint = (" Known cause: an earlier push left an empty "
-                        "rulebase node in the committed config; a "
+                        "rulebase node in the committed config. A "
                         "successful full push followed by a commit "
                         "clears it.")
             return StepResult(
                 step="revert candidate", success=True,
-                detail=f"could not revert the candidate ({e}) - the target "
+                detail=f"could not revert the candidate ({e}): the target "
                        "may keep a partially-wiped candidate. Re-run a full "
                        "push, or revert manually before making other "
                        f"changes on the device.{hint}")
@@ -4091,7 +4232,7 @@ class PanwDriver(DeployDriver):
             if device.get("mgmt_ip") != _orig_ip:
                 yield StepResult(
                     step="HA active-node", success=True,
-                    detail=f"registered node is passive - pushing to the active "
+                    detail=f"registered node is passive: pushing to the active "
                            f"member {device.get('mgmt_ip')}")
             ctx = self._deploy_ctx(device)  # refresh connection after any peer-switch
         base_url = ctx["base_url"]
@@ -4165,7 +4306,7 @@ class PanwDriver(DeployDriver):
                            "configured (Device > Certificates > SSL "
                            "Decryption). Forward-proxy rules will push fine "
                            "but the COMMIT will fail with 'forward decrypt "
-                           "trust cert is not configured' - provision the cert "
+                           "trust cert is not configured': provision the cert "
                            "before committing. Gateshift never migrates key "
                            "material.")
 
@@ -4259,7 +4400,7 @@ class PanwDriver(DeployDriver):
                 _app_names = None
                 yield StepResult(
                     step="normalize applications", success=True,
-                    detail=f"could not read the target app catalog ({e}) - "
+                    detail=f"could not read the target app catalog ({e}): "
                            "application refs pushed verbatim")
             if _app_names:
                 def _app_key(v: str) -> str:

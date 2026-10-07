@@ -20,7 +20,7 @@
      data-target-platform="{{ target_platform or '' }}">
 
   <div style="display:flex;align-items:center;margin-bottom:8px;">
-    <span style="font-size:12px;color:var(--tx);font-weight:500;">
+    <span style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
       Zones <span class="mut">({{ zones_list | length }})</span>
     </span>
   </div>
@@ -49,7 +49,7 @@
              re-enable the toggle UI. #}
           {% set _show_external = false %}
           {% if _show_external %}
-          <th style="white-space:nowrap;" title="WAN / untrusted zone - read by NAT inference (27_infer_nat_rules)">External</th>
+          <th style="white-space:nowrap;" title="WAN / untrusted zone: read by NAT inference (27_infer_nat_rules)">External</th>
           {% endif %}
           <th style="white-space:nowrap;" title="Interfaces bound to this zone (fw_interfaces.zone_name). × to release; + bind to add/move one.">Interfaces</th>
           <th class="sel-col" style="width:32px;"></th>
@@ -59,7 +59,7 @@
         {% if not zones_list %}
         <tr>
           <td colspan="{{ (4 if _show_external else 3) + (fields | length) }}" class="empty" style="text-align:center;padding:16px;font-style:italic;">
-            No zones for this device yet - use <strong style="color:var(--tx);">+ Add zone</strong> to create one.
+            No zones for this device yet, use <strong style="color:var(--tx);">+Add Zone</strong> to create one.
           </td>
         </tr>
         {% endif %}
@@ -99,7 +99,8 @@
                     onclick="zoneStartRename(this)"
                     onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx)';"
                     title="Click to rename">{{ z.name }}</span>
-              {% if _z_inherited %}<span style="color:#BACCDE;font-size:10px;" title="Inherited from template {{ z.src_scope }} - read-only in this effective (stack) view; switch the network scope to {{ z.src_scope }} to edit">&#8627; {{ z.src_scope }}</span>{% endif %}
+              {% if z.source_name and z.source_name != z.name %}<span class="dash" style="font-size:var(--fs-caption);" title="Name as imported: this project shows it as {{ z.name }}">(source: <span style="color:var(--amber);">{{ z.source_name }}</span>)</span>{% endif %}
+              {% if _z_inherited %}<span style="color:#BACCDE;font-size:var(--fs-caption);" title="Inherited from template {{ z.src_scope }}: read-only in this effective (stack) view. Switch the network scope to {{ z.src_scope }} to edit">&#8627; {{ z.src_scope }}</span>{% endif %}
             </div>
           </td>
           {% for f in fields %}
@@ -114,8 +115,8 @@
                 {% set catalog = (zone_catalogs.get(f.catalog_kind) or []) %}
                 {% set known = (catalog | selectattr('name', 'equalto', val) | list | length) > 0 %}
                 <span style="color:var(--tx2);">{{ val }}</span>
-                {% if not known %}<span class="tag warn" style="margin-left:4px;padding:1px 5px;font-size:10px;text-transform:uppercase;"
-                                       title="Not in target snapshot - refresh to verify">?</span>{% endif %}
+                {% if not known %}<span class="tag warn" style="margin-left:4px;padding:1px 5px;font-size:var(--fs-caption);"
+                                       title="Not in target snapshot, refresh to verify">?</span>{% endif %}
               {% else %}
                 <span class="dash">-</span>
               {% endif %}
@@ -127,7 +128,7 @@
           {% if _show_external %}
           <td style="text-align:center;">
             <button type="button" onclick="zoneToggleExternal({{ z.id }}, {{ 1 if z.is_external else 0 }})"
-                    style="cursor:pointer;font-size:10px;padding:1px 7px;border-radius:0;
+                    style="cursor:pointer;font-size:var(--fs-small);padding:1px 7px;border-radius:0;
                            border:1px solid {{ 'var(--green-line)' if z.is_external else 'var(--line)' }};
                            background:{{ 'var(--green-fill)' if z.is_external else 'transparent' }};
                            color:{{ 'var(--green)' if z.is_external else 'var(--tx3)' }};"
@@ -138,12 +139,12 @@
           {% endif %}
           <td style="line-height:1.9;">
             {% for iz in _zn_ifaces %}
-            <span style="display:inline-flex;align-items:center;gap:3px;background:var(--bg2);border:1px solid var(--line);border-radius:0;padding:0 3px 0 5px;margin:1px;font-size:11px;color:var(--tx2);white-space:nowrap;"
+            <span style="display:inline-flex;align-items:center;gap:3px;background:var(--bg2);border:1px solid var(--line);border-radius:0;padding:0 3px 0 5px;margin:1px;font-size:var(--fs-small);color:var(--tx2);white-space:nowrap;"
                   title="{{ iz.ip_addresses | join(', ') if iz.ip_addresses else 'no IP' }}">
               {{ iz.interface_name }}
               {% if not _z_inherited %}<button type="button" onclick="zoneUnbindIface({{ iz.id }})"
                       title="Release {{ iz.interface_name }} from {{ z.name }}"
-                      style="background:none;border:none;color:var(--tx3);cursor:pointer;padding:0;font-size:11px;line-height:1;"
+                      style="background:none;border:none;color:var(--tx3);cursor:pointer;padding:0;font-size:var(--fs-small);line-height:1;"
                       onmouseover="this.style.color='var(--danger)';" onmouseout="this.style.color='var(--tx3)';">&times;</button>{% endif %}
             </span>
             {% endfor %}
@@ -152,8 +153,8 @@
             {% if _other %}
             <select onchange="if(this.value){zoneBindIface(this.value, '{{ z.name | e }}');this.value='';}"
                     title="Bind an interface to {{ z.name }}"
-                    style="background:var(--bg2);border:1px dashed var(--line);border-radius:0;color:var(--tx3);font-size:11px;padding:1px 3px;margin:1px;cursor:pointer;">
-              <option value="">+ bind</option>
+                    style="background:var(--bg2);border:1px dashed var(--line);border-radius:0;color:var(--tx3);font-size:var(--fs-small);padding:1px 3px;margin:1px;cursor:pointer;">
+              <option value="">+ Bind</option>
               {% for iz in _other %}<option value="{{ iz.id }}">{{ iz.interface_name }}{% if iz.zone_name %} &nbsp;(in {{ iz.zone_name }}){% endif %}</option>{% endfor %}
             </select>
             {% endif %}
@@ -180,18 +181,18 @@
           <td></td>
           <td colspan="{{ 3 + (fields | length) }}">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <input type="text" id="zone-add-name" placeholder="zone name"
-                     class="inp" style="font-size:12px;padding:5px 8px;width:176px;"
+              <input type="text" id="zone-add-name" placeholder="Zone name"
+                     class="inp" style="font-size:var(--fs-body);padding:5px 8px;width:176px;"
                      oninput="zoneAddValidate()"
                      onkeydown="if(event.key==='Enter')zoneSubmitAdd();if(event.key==='Escape')zoneHideAddRow()">
               {% if target_platform == 'panw' %}
-              <select id="zone-add-type" class="inp" style="font-size:12px;padding:5px 8px;">
+              <select id="zone-add-type" class="inp" style="font-size:var(--fs-body);padding:5px 8px;">
                 <option value="layer3">layer3</option>
               </select>
               {% endif %}
-              <button type="button" onclick="zoneSubmitAdd()" id="zone-add-submit" disabled class="btn primary sm">Add</button>
-              <button type="button" onclick="zoneHideAddRow()" class="btn ghost sm">Cancel</button>
-              <span id="zone-add-err" class="mut" style="color:var(--amber);font-size:12px;"></span>
+              <button type="button" onclick="zoneSubmitAdd()" id="zone-add-submit" disabled class="btn">Add</button>
+              <button type="button" onclick="zoneHideAddRow()" class="btn">Cancel</button>
+              <span id="zone-add-err" class="mut" style="color:var(--amber);font-size:var(--fs-body);"></span>
             </div>
           </td>
           <td></td>
@@ -204,9 +205,9 @@
      add-row at the table's bottom, directly above this button. #}
   <div style="margin-top:8px;">
     <button type="button" onclick="zoneShowAddRow()"
-            class="btn primary sm"
+            class="btn"
             {% if not source_device_id %}disabled title="No source device selected"{% endif %}>
-      + Add zone
+      +Add Zone
     </button>
   </div>
 
@@ -216,9 +217,9 @@
   {% set _all_ifaces = (iface_zones or []) %}
   {% set _unassigned = _all_ifaces | rejectattr('zone_name') | list %}
   {% if _all_ifaces %}
-  <div style="margin-top:10px;display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;font-size:11px;">
-    <span style="color:var(--tx3);text-transform:uppercase;letter-spacing:.04em;font-size:10px;padding-top:4px;white-space:nowrap;">
-      {{ (_all_ifaces | length) - (_unassigned | length) }}/{{ _all_ifaces | length }} iface mapped
+  <div style="margin-top:10px;display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;font-size:var(--fs-small);">
+    <span style="color:var(--tx3);font-size:var(--fs-caption);padding-top:4px;white-space:nowrap;">
+      {{ (_all_ifaces | length) - (_unassigned | length) }}/{{ _all_ifaces | length }} interfaces mapped
     </span>
     {% if _unassigned %}
     <span style="color:var(--amber);padding-top:4px;white-space:nowrap;">unassigned:</span>
@@ -228,8 +229,8 @@
       {{ iz.interface_name }}
       <select onchange="if(this.value)zoneBindIface({{ iz.id }}, this.value);"
               title="Assign {{ iz.interface_name }} to a zone"
-              style="background:var(--bg1);border:1px solid var(--line);border-radius:0;color:var(--tx3);font-size:10px;padding:0 2px;cursor:pointer;">
-        <option value="">&rarr; zone</option>
+              style="background:var(--bg1);border:1px solid var(--line);border-radius:0;color:var(--tx3);font-size:var(--fs-small);padding:0 2px;cursor:pointer;">
+        <option value="">&rarr; Zone</option>
         {% for _zc in zones_list %}{% if not (_zc.editable is defined and not _zc.editable) %}<option value="{{ _zc.name }}">{{ _zc.name }}</option>{% endif %}{% endfor %}
       </select>
     </span>
@@ -244,51 +245,51 @@
   <div id="zone-bulk-panel" {% if not zones_list %}class="hidden"{% endif %}
        style="margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-      <span style="font-size:12px;color:var(--tx);font-weight:500;">
+      <span style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
         Bulk apply to <span id="zone-bulk-count" style="color:var(--blue);">0</span> zone<span id="zone-bulk-plural">s</span>
       </span>
-      <button type="button" onclick="zoneClearSelection()" class="btn ghost sm">Clear selection</button>
+      <button type="button" onclick="zoneClearSelection()" class="btn">Clear Selection</button>
     </div>
     <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
       {% for f in fields %}
       <div style="display:flex;flex-direction:column;">
-        <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">{{ f.label }}</label>
+        <label class="seclbl" style="padding:0;font-size:var(--fs-caption);margin-bottom:2px;">{{ f.label }}</label>
         {% if f.type == 'bool' %}
-        <select data-bulk-field="{{ f.key }}" data-bulk-type="bool" class="inp" style="font-size:12px;padding:6px 10px;">
-          <option value="">(no change)</option>
-          <option value="true">on</option>
-          <option value="false">off</option>
+        <select data-bulk-field="{{ f.key }}" data-bulk-type="bool" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+          <option value="">(No change)</option>
+          <option value="true">On</option>
+          <option value="false">Off</option>
         </select>
         {% elif f.type == 'enum' %}
         {% set is_ro = f.read_only_existing | default(false) %}
         <select data-bulk-field="{{ f.key }}" data-bulk-type="enum"
-                {% if is_ro %}disabled title="Read-only for existing zones - set at add-time"{% endif %}
-                class="inp" style="font-size:12px;padding:6px 10px;">
-          <option value="">(no change)</option>
+                {% if is_ro %}disabled title="Read-only for existing zones, set at add-time"{% endif %}
+                class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+          <option value="">(No change)</option>
           {% for opt in f.options or [] %}
           <option value="{{ opt }}">{{ opt }}</option>
           {% endfor %}
         </select>
         {% elif f.type == 'catalog' %}
         {% set items = (zone_catalogs.get(f.catalog_kind) or []) %}
-        <select data-bulk-field="{{ f.key }}" data-bulk-type="catalog" class="inp" style="font-size:12px;padding:6px 10px;">
-          <option value="">(no change)</option>
-          <option value="__clear__">- clear -</option>
+        <select data-bulk-field="{{ f.key }}" data-bulk-type="catalog" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+          <option value="">(No change)</option>
+          <option value="__clear__">- Clear -</option>
           {% for it in items %}
           <option value="{{ it.name }}">{{ it.name }}</option>
           {% endfor %}
         </select>
         {% if not items %}
-        <span style="color:var(--amber);font-size:10px;margin-top:2px;">No catalog - refresh target snapshot</span>
+        <span style="color:var(--amber);font-size:var(--fs-caption);margin-top:2px;">No catalog, refresh target snapshot</span>
         {% endif %}
         {% else %}
-        <input type="text" data-bulk-field="{{ f.key }}" data-bulk-type="string" placeholder="(no change)"
-               class="inp" style="font-size:12px;padding:6px 10px;width:160px;">
+        <input type="text" data-bulk-field="{{ f.key }}" data-bulk-type="string" placeholder="(No change)"
+               class="inp" style="font-size:var(--fs-body);padding:6px 10px;width:160px;">
         {% endif %}
       </div>
       {% endfor %}
-      <button type="button" onclick="zoneBulkApply()" id="zone-bulk-apply-btn" disabled class="btn primary sm">Apply to selection</button>
-      <span id="zone-bulk-status" class="mut" style="font-size:12px;"></span>
+      <button type="button" onclick="zoneBulkApply()" id="zone-bulk-apply-btn" disabled class="btn">Apply to Selection</button>
+      <span id="zone-bulk-status" class="mut" style="font-size:var(--fs-body);"></span>
     </div>
   </div>
   {% endif %}

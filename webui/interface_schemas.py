@@ -32,6 +32,8 @@ SCHEMA: dict[str, dict] = {
     "checkpoint": {"fields": []},
     "fortigate":  {"fields": []},
     "firepower":  {"fields": []},
+    # Interface addressing is not pushable on OPNsense (no API for it).
+    "opnsense":   {"fields": []},
 }
 
 

@@ -32,7 +32,8 @@ USE gateshift;
 -- log_traffic / capture_packet are FortiOS per-policy fields; log_start is
 -- shared (PA log-at-start = Forti logtraffic-start). log_end is PA-only.
 CREATE TABLE IF NOT EXISTS fw_rule_log_overrides (
-  rule_hash      BINARY(20)                       NOT NULL PRIMARY KEY,
+  project_id  INT                   NOT NULL DEFAULT 0,
+  rule_hash      BINARY(20)                       NOT NULL,
   log_forwarding VARCHAR(255)                     NULL,
   log_start      TINYINT(1)                       NOT NULL DEFAULT 0,
   log_end        TINYINT(1)                       NOT NULL DEFAULT 1,
@@ -40,5 +41,7 @@ CREATE TABLE IF NOT EXISTS fw_rule_log_overrides (
   capture_packet TINYINT(1)                       NULL,
   source         ENUM('manual','auto')            NOT NULL DEFAULT 'manual',
   updated_at     TIMESTAMP                        NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                                    ON UPDATE CURRENT_TIMESTAMP
+                                                    ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (project_id, rule_hash),
+  KEY ix_fw_rule_log_overrides_key (rule_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

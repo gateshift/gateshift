@@ -49,7 +49,7 @@
          apply it. ── #}
     {% if nat_consol is defined and nat_consol and nat_rules %}
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:9px 12px;border:1px solid var(--line);background:var(--bg2);">
-      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tx);white-space:nowrap;{% if not nat_consol.supported %}opacity:.55;cursor:not-allowed;{% else %}cursor:pointer;{% endif %}">
+      <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);white-space:nowrap;{% if not nat_consol.supported %}opacity:.55;cursor:not-allowed;{% else %}cursor:pointer;{% endif %}">
         <input type="checkbox" id="nat-consolidate-toggle"
                {% if nat_consol.flag %}checked{% endif %}
                {% if not nat_consol.supported %}disabled{% endif %}
@@ -58,11 +58,11 @@
         Consolidate hide-NAT
       </label>
       {% if not nat_consol.supported and nat_consol.hint %}
-      <span class="mut" style="font-size:12px;">{{ nat_consol.hint }}</span>
+      <span class="mut" style="font-size:var(--fs-body);">{{ nat_consol.hint }}</span>
       {% elif nat_consol.effective %}
-      <span class="mut" style="font-size:12px;">interface-hide rules sharing an egress are shown and pushed as one rule per egress</span>
+      <span class="mut" style="font-size:var(--fs-body);">interface-hide rules sharing an egress are shown and pushed as one rule per egress</span>
       {% else %}
-      <span class="mut" style="font-size:12px;">combines per-policy hide NAT into one rule per egress - sources will then NAT on all outbound traffic, not only flows of the original rules</span>
+      <span class="mut" style="font-size:var(--fs-body);">combines per-policy hide NAT into one rule per egress. Sources will then NAT on all outbound traffic, not only flows of the original rules</span>
       {% endif %}
     </div>
     {% endif %}
@@ -70,7 +70,7 @@
     {# ── Per-policy NAT fold summary (FGT target in policy NAT mode):
          one line telling the engineer whether the drop list needs review.
          Same shared resolver as the push. ── #}
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:9px 12px;border:1px solid var(--line);background:var(--bg2);font-size:12px;color:var(--tx);">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:9px 12px;border:1px solid var(--line);background:var(--bg2);font-size:var(--fs-body);color:var(--tx);">
       <span>Target uses per-policy NAT{% if nat_fold_ui.mode_source == 'observed' %} <span class="mut">(detected)</span>{% endif %}:</span>
       <span>{{ nat_fold_ui.summary.get('folds', 0) }} rule{{ 's' if nat_fold_ui.summary.get('folds', 0) != 1 }} fold into policy NAT flags</span>
       <span class="mut">&middot;</span>
@@ -90,13 +90,13 @@
     <div id="nat-enr-bulk-panel"
          style="margin-bottom:12px;padding:12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-        <span style="font-size:12px;color:var(--tx);font-weight:500;">
+        <span style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
           Vendor properties
           <span class="mut">- apply to
             <span id="nat-enr-bulk-count" style="color:var(--blue);">0</span> selected
             rule<span id="nat-enr-bulk-plural">s</span></span>
         </span>
-        <button type="button" onclick="natEnrClearSelection()" class="btn ghost sm">Clear selection</button>
+        <button type="button" onclick="natEnrClearSelection()" class="btn">Clear Selection</button>
       </div>
       <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
         {% if _nat_zones_relevant is not defined %}{% set _nat_zones_relevant = target_platform in ('panw', 'fortigate') %}{% endif %}
@@ -104,19 +104,19 @@
         {# Zone bulk - writes the same manual overlay the per-row dropdowns
            use; '- clear -' reverts the selection to derive/imported. #}
         <div style="display:flex;flex-direction:column;">
-          <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">Source Zone</label>
-          <select data-natenr-zone="src_zone" class="inp" style="font-size:12px;padding:6px 10px;">
-            <option value="">(no change)</option>
-            <option value="__clear__">- clear -</option>
+          <label class="seclbl" style="padding:0;font-size:var(--fs-caption);margin-bottom:2px;">Source Zone</label>
+          <select data-natenr-zone="src_zone" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+            <option value="">(No change)</option>
+            <option value="__clear__">- Clear -</option>
             <option value="any">any</option>
             {% for zn in (zone_names or []) %}<option value="{{ zn }}">{{ zn }}</option>{% endfor %}
           </select>
         </div>
         <div style="display:flex;flex-direction:column;">
-          <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">Destination Zone</label>
-          <select data-natenr-zone="dst_zone" class="inp" style="font-size:12px;padding:6px 10px;">
-            <option value="">(no change)</option>
-            <option value="__clear__">- clear -</option>
+          <label class="seclbl" style="padding:0;font-size:var(--fs-caption);margin-bottom:2px;">Destination Zone</label>
+          <select data-natenr-zone="dst_zone" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+            <option value="">(No change)</option>
+            <option value="__clear__">- Clear -</option>
             <option value="any">any</option>
             {% for zn in (zone_names or []) %}<option value="{{ zn }}">{{ zn }}</option>{% endfor %}
           </select>
@@ -124,59 +124,59 @@
         {% endif %}
         {% for f in fields %}
         <div style="display:flex;flex-direction:column;">
-          <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">{{ f.label }}</label>
+          <label class="seclbl" style="padding:0;font-size:var(--fs-caption);margin-bottom:2px;">{{ f.label }}</label>
           {% if f.type == 'bool' %}
-          <select data-natenr-field="{{ f.key }}" data-natenr-type="bool" class="inp" style="font-size:12px;padding:6px 10px;">
-            <option value="">(no change)</option>
-            <option value="true">on</option>
-            <option value="false">off</option>
+          <select data-natenr-field="{{ f.key }}" data-natenr-type="bool" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+            <option value="">(No change)</option>
+            <option value="true">On</option>
+            <option value="false">Off</option>
           </select>
           {% elif f.type == 'enum' %}
-          <select data-natenr-field="{{ f.key }}" data-natenr-type="enum" class="inp" style="font-size:12px;padding:6px 10px;">
-            <option value="">(no change)</option>
+          <select data-natenr-field="{{ f.key }}" data-natenr-type="enum" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+            <option value="">(No change)</option>
             {% for opt in f.options or [] %}
             <option value="{{ opt }}">{{ opt }}</option>
             {% endfor %}
           </select>
           {% elif f.type == 'catalog' %}
           {% set items = (nat_catalogs.get(f.catalog_kind) or []) %}
-          <select data-natenr-field="{{ f.key }}" data-natenr-type="catalog" class="inp" style="font-size:12px;padding:6px 10px;">
-            <option value="">(no change)</option>
-            <option value="__clear__">- clear -</option>
+          <select data-natenr-field="{{ f.key }}" data-natenr-type="catalog" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+            <option value="">(No change)</option>
+            <option value="__clear__">- Clear -</option>
             {% for it in items %}
             <option value="{{ it.name }}">{{ it.name }}</option>
             {% endfor %}
           </select>
           {% if not items %}
-          <span style="color:var(--amber);font-size:10px;margin-top:2px;">No catalog - refresh target snapshot</span>
+          <span style="color:var(--amber);font-size:var(--fs-caption);margin-top:2px;">No catalog, refresh target snapshot</span>
           {% endif %}
           {% else %}
-          <input type="text" data-natenr-field="{{ f.key }}" data-natenr-type="string" placeholder="(no change)"
-                 class="inp" style="font-size:12px;padding:6px 10px;width:160px;">
+          <input type="text" data-natenr-field="{{ f.key }}" data-natenr-type="string" placeholder="(No change)"
+                 class="inp" style="font-size:var(--fs-body);padding:6px 10px;width:160px;">
           {% endif %}
         </div>
         {% endfor %}
-        <button type="button" onclick="natEnrBulkApply()" id="nat-enr-bulk-apply-btn" disabled class="btn primary sm">Apply to selection</button>
-        <span id="nat-enr-bulk-status" class="mut" style="font-size:12px;"></span>
+        <button type="button" onclick="natEnrBulkApply()" id="nat-enr-bulk-apply-btn" disabled class="btn">Apply to Selection</button>
+        <span id="nat-enr-bulk-status" class="mut" style="font-size:var(--fs-body);"></span>
       </div>
     </div>
     {% else %}
-    <div class="dash" style="margin-bottom:12px;padding:8px 12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);font-size:10px;font-style:italic;">
+    <div class="dash" style="margin-bottom:12px;padding:8px 12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);font-size:var(--fs-caption);font-style:italic;">
       No vendor properties defined for target platform <code style="color:var(--tx);">{{ target_platform or '-' }}</code>.
     </div>
     {% endif %}
   {% endif %}
 
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-    <span style="font-size:12px;color:var(--tx);font-weight:500;">
+    <span style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
       NAT{% if not _is_enrichment %} Rules{% else %}-Rules{% endif %}
       <span class="mut">({{ nat_rules | length }})</span>
     </span>
     {% if not _is_enrichment %}
     <div style="display:flex;align-items:center;gap:8px;">
-      <button type="button" onclick="natShowAddRow()" class="btn primary sm"
+      <button type="button" onclick="natShowAddRow()" class="btn"
               {% if not source_device_id %}disabled title="No source device selected"{% endif %}>
-        + Add NAT-rule
+        +Add NAT Rule
       </button>
     </div>
     {% endif %}
@@ -239,7 +239,7 @@
         {% if not nat_rules and not _is_enrichment %}
         <tr>
           <td colspan="13" class="empty" style="text-align:center;padding:16px;font-style:italic;">
-            No NAT rules for this device yet - use <strong style="color:var(--tx);">+ Add NAT-rule</strong> to create one,
+            No NAT rules for this device yet, use <strong style="color:var(--tx);">+Add NAT Rule</strong> to create one,
             or re-import from the source.
           </td>
         </tr>
@@ -270,15 +270,15 @@
                     title="Click to rename">{{ n.name }}</span>
             {% endif %}
             {% if (n.properties or {}).get('consolidated') %}
-            <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:10px;text-transform:uppercase;vertical-align:middle;color:var(--blue);border-color:var(--blue-line);"
+            <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:var(--fs-caption);vertical-align:middle;color:var(--blue);border-color:var(--blue-line);"
                   title="Consolidated from {{ (n.properties or {}).get('member_count') }} interface-hide rules sharing this egress">
-              consolidated
+              Consolidated
             </span>
             {% endif %}
             {% if (n.properties or {}).get('synthesized') %}
-            <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:10px;text-transform:uppercase;vertical-align:middle;"
-                  title="Synthesized from a Fortinet security policy (policy.nat=enable) - not an explicit NAT-rulebase entry">
-              from policy
+            <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:var(--fs-caption);vertical-align:middle;"
+                  title="Synthesized from a Fortinet security policy (policy.nat=enable), not an explicit NAT rule">
+              From policy
             </span>
             {% endif %}
             {% if _is_enrichment and nat_fold_ui %}
@@ -288,17 +288,17 @@
               {% set _fate = nat_fold_ui.fates_by_name.get(n.name or '') %}
               {% if _fate %}
                 {% if _fate.kind == 'folds' %}
-                <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:10px;vertical-align:middle;color:var(--green);border-color:var(--green);"
-                      title="folds into 'nat enable' on: {{ _fate.rules | join(', ') }}">
+                <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:var(--fs-caption);vertical-align:middle;color:var(--green);border-color:var(--green);"
+                      title="Folds into 'nat enable' on: {{ _fate.rules | join(', ') }}">
                   &rarr; nat enable on {{ _fate.rules[0] }}{% if _fate.rules|length > 1 %} +{{ _fate.rules|length - 1 }}{% endif %}
                 </span>
                 {% elif _fate.kind == 'vip' %}
-                <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:10px;vertical-align:middle;color:var(--blue);border-color:var(--blue-line);"
-                      title="becomes a firewall VIP object on the target (DNAT works the same in both NAT modes)">
+                <span class="tag" style="margin-left:5px;padding:1px 5px;font-size:var(--fs-caption);vertical-align:middle;color:var(--blue);border-color:var(--blue-line);"
+                      title="Becomes a firewall VIP object on the target (DNAT works the same in both NAT modes)">
                   &rarr; VIP
                 </span>
                 {% elif _fate.kind == 'declared' %}
-                <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:10px;vertical-align:middle;"
+                <span class="tag warn" style="margin-left:5px;padding:1px 5px;font-size:var(--fs-caption);vertical-align:middle;"
                       title="{{ _fate.reason }}">
                   not pushable
                 </span>
@@ -331,13 +331,13 @@
               {% set _sz = (n.src_zones[0] if n.src_zones else '') %}
               {% set _sza = (not _sz) and n.derived_src_zones %}
               {% if _synth %}
-              <span style="font-size:11px;color:{% if _sza %}var(--amber){% else %}var(--tx2){% endif %};">
+              <span style="font-size:var(--fs-small);color:{% if _sza %}var(--amber){% else %}var(--tx2){% endif %};">
                 {%- if _sz %}{{ _sz }}{% elif _sza %}{{ n.derived_src_zones[0] }} (auto){% else %}-{% endif -%}
               </span>
               {% else %}
               <select onchange="natZoneSet({{ n.id }}, 'src_zone', this.value)" class="inp"
-                      style="font-size:11px;padding:2px 4px;max-width:120px;color:{% if _sza %}var(--amber){% else %}var(--tx2){% endif %};"
-                      {% if _sza %}title="route-derived - pick a zone to override"{% endif %}>
+                      style="font-size:var(--fs-small);padding:2px 4px;max-width:120px;color:{% if _sza %}var(--amber){% else %}var(--tx2){% endif %};"
+                      {% if _sza %}title="Route-derived: pick a zone to override"{% endif %}>
                 {% if _sza %}<option value="" selected>{{ n.derived_src_zones[0] }} (auto)</option>
                 {% else %}<option value="">-</option>{% endif %}
                 <option value="any" {% if _sz == 'any' %}selected{% endif %}>any</option>
@@ -360,13 +360,13 @@
               {% set _dz = (n.dst_zones[0] if n.dst_zones else '') %}
               {% set _dza = (not _dz) and n.derived_dst_zones %}
               {% if _synth %}
-              <span style="font-size:11px;color:{% if _dza %}var(--amber){% else %}var(--tx2){% endif %};">
+              <span style="font-size:var(--fs-small);color:{% if _dza %}var(--amber){% else %}var(--tx2){% endif %};">
                 {%- if _dz %}{{ _dz }}{% elif _dza %}{{ n.derived_dst_zones[0] }} (auto){% else %}-{% endif -%}
               </span>
               {% else %}
               <select onchange="natZoneSet({{ n.id }}, 'dst_zone', this.value)" class="inp"
-                      style="font-size:11px;padding:2px 4px;max-width:120px;color:{% if _dza %}var(--amber){% else %}var(--tx2){% endif %};"
-                      {% if _dza %}title="route-derived - pick a zone to override"{% endif %}>
+                      style="font-size:var(--fs-small);padding:2px 4px;max-width:120px;color:{% if _dza %}var(--amber){% else %}var(--tx2){% endif %};"
+                      {% if _dza %}title="Route-derived: pick a zone to override"{% endif %}>
                 {% if _dza %}<option value="" selected>{{ n.derived_dst_zones[0] }} (auto)</option>
                 {% else %}<option value="">-</option>{% endif %}
                 <option value="any" {% if _dz == 'any' %}selected{% endif %}>any</option>
@@ -465,8 +465,8 @@
             <td style="text-align:center;">
               <button type="button" onclick="natToggleDisabled({{ n.id }}, {{ 'true' if n.disabled else 'false' }})"
                       class="chip {% if n.disabled %}any{% else %}trust{% endif %}"
-                      style="cursor:pointer;border-style:solid;font-size:11px;">
-                {% if n.disabled %}disabled{% else %}active{% endif %}
+                      style="cursor:pointer;border-style:solid;font-size:var(--fs-small);">
+                {% if n.disabled %}Disabled{% else %}Active{% endif %}
               </button>
             </td>
             <td style="text-align:center;">
@@ -488,31 +488,31 @@
           <td></td>
           <td></td>
           <td>
-            <input type="text" id="nat-add-name" placeholder="rule-name"
-                   class="inp" style="font-size:12px;padding:5px 8px;width:160px;"
+            <input type="text" id="nat-add-name" placeholder="Rule name"
+                   class="inp" style="font-size:var(--fs-body);padding:5px 8px;width:160px;"
                    oninput="natAddValidate()" onkeydown="if(event.key==='Enter')natSubmitAdd();if(event.key==='Escape')natHideAddRow()">
           </td>
           <td>
-            <select id="nat-add-type" class="inp" style="font-size:12px;padding:5px 8px;">
+            <select id="nat-add-type" class="inp" style="font-size:var(--fs-body);padding:5px 8px;">
               <option value="snat">SNAT</option>
               <option value="dnat">DNAT</option>
               <option value="static">static</option>
             </select>
           </td>
           <td colspan="6">
-            <span class="dash" style="font-size:10px;font-style:italic;">
+            <span class="dash" style="font-size:var(--fs-caption);font-style:italic;">
               Orig/trans IPs &amp; ports: edit after add (or re-import for hash-stable rules)
             </span>
           </td>
           <td>
-            <input type="text" id="nat-add-desc" placeholder="description (optional)"
-                   class="inp" style="font-size:12px;padding:5px 8px;width:100%;">
+            <input type="text" id="nat-add-desc" placeholder="Description (optional)"
+                   class="inp" style="font-size:var(--fs-body);padding:5px 8px;width:100%;">
           </td>
           <td colspan="2" style="text-align:center;">
             <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end;">
-              <button type="button" onclick="natSubmitAdd()" id="nat-add-submit" disabled class="btn primary sm">Add</button>
-              <button type="button" onclick="natHideAddRow()" class="btn ghost sm">Cancel</button>
-              <span id="nat-add-err" class="mut" style="color:var(--amber);font-size:12px;margin-left:8px;"></span>
+              <button type="button" onclick="natSubmitAdd()" id="nat-add-submit" disabled class="btn">Add</button>
+              <button type="button" onclick="natHideAddRow()" class="btn">Cancel</button>
+              <span id="nat-add-err" class="mut" style="color:var(--amber);font-size:var(--fs-body);margin-left:8px;"></span>
             </div>
           </td>
         </tr>
@@ -526,23 +526,23 @@
   <div id="nat-bulk-panel" class="hidden"
        style="margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-      <span style="font-size:12px;color:var(--tx);font-weight:500;">
+      <span style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
         Bulk apply to <span id="nat-bulk-count" style="color:var(--blue);">0</span> rule<span id="nat-bulk-plural">s</span>
       </span>
-      <button type="button" onclick="natClearSelection()" class="btn ghost sm">Clear selection</button>
+      <button type="button" onclick="natClearSelection()" class="btn">Clear Selection</button>
     </div>
     <div style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;">
       <div style="display:flex;flex-direction:column;">
-        <label class="seclbl" style="padding:0;font-size:10px;margin-bottom:2px;">State</label>
-        <select id="nat-bulk-disabled" class="inp" style="font-size:12px;padding:6px 10px;">
-          <option value="">(no change)</option>
-          <option value="false">enable</option>
-          <option value="true">disable</option>
+        <label class="seclbl" style="padding:0;font-size:var(--fs-caption);margin-bottom:2px;">State</label>
+        <select id="nat-bulk-disabled" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+          <option value="">(No change)</option>
+          <option value="false">Enable</option>
+          <option value="true">Disable</option>
         </select>
       </div>
-      <button type="button" onclick="natBulkApply()" id="nat-bulk-apply-btn" disabled class="btn primary sm">Apply</button>
-      <button type="button" onclick="natBulkDelete()" class="btn danger sm">Delete selection</button>
-      <span id="nat-bulk-status" class="mut" style="font-size:12px;"></span>
+      <button type="button" onclick="natBulkApply()" id="nat-bulk-apply-btn" disabled class="btn">Apply</button>
+      <button type="button" onclick="natBulkDelete()" class="btn danger">Delete Selection</button>
+      <span id="nat-bulk-status" class="mut" style="font-size:var(--fs-body);"></span>
     </div>
   </div>
   {% endif %}

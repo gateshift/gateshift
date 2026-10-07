@@ -5,18 +5,18 @@
 {% block content %}
 <div style="max-width:920px;margin:0 auto;">
   <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:4px;flex-wrap:wrap;">
-    <h1 style="font-size:20px;margin:0;">Optimize
+    <h1 style="font-size:var(--fs-page);margin:0;">Optimize
       <span class="dash">·</span>
       <span style="">{{ device_name }}</span></h1>
-    <span class="dash" style="font-size:12px;">in-place config hygiene - same-vendor, reversible</span>
+    <span class="dash" style="font-size:var(--fs-body);">in-place config hygiene, same-vendor, reversible</span>
     <span style="flex:1;"></span>
-    <a href="/devices" class="btn ghost sm">&larr; Devices</a>
+    <a href="/devices" class="btn">&larr; Devices</a>
   </div>
-  <p class="dash" style="margin:0 0 18px;font-size:13px;line-height:1.5;">
+  <p class="dash" style="margin:0 0 18px;font-size:var(--fs-body);line-height:1.5;">
     Gateshift finds objects <b>nothing references</b> (safe to delete), you curate, and it deletes the
-    selected ones - on PAN-OS the <b>candidate</b> config (commit/revert on the box); on Check Point
-    staged in a Mgmt session you <b>Publish or Discard</b> here; on FortiGate deleted <b>LIVE</b> (a
-    full-config backup is taken first - FortiOS has no candidate/undo). Each apply re-validates so a
+    selected ones: on PAN-OS in the <b>candidate</b> config (commit/revert on the box), on Check Point
+    staged in a Mgmt session you <b>Publish or Discard</b> here, on FortiGate deleted <b>LIVE</b> (a
+    full-config backup is taken first, FortiOS has no candidate/undo). Each apply re-validates so a
     still-referenced object can never be deleted.
   </p>
 
@@ -29,29 +29,29 @@
     <div id="unused-wrap" style="display:none;">
       <div style="display:flex;align-items:center;gap:14px;margin-bottom:10px;">
         <b id="unused-count"></b>
-        <label class="dash" style="font-size:12px;cursor:pointer;">
-          <input type="checkbox" id="sel-all" onchange="optToggleAll(this)"> select all</label>
+        <label class="dash" style="font-size:var(--fs-body);cursor:pointer;">
+          <input type="checkbox" id="sel-all" onchange="optToggleAll(this)"> Select all</label>
       </div>
-      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <table style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
         <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
           <th style="width:34px;padding:6px 4px;"></th><th style="padding:6px 4px;">Name</th>
           <th style="padding:6px 4px;">Type</th></tr></thead>
         <tbody id="unused-body"></tbody>
       </table>
       <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-        <button class="btn danger sm" id="apply-btn" onclick="optApply()">Delete selected</button>
-        <span id="apply-status" class="dash" style="font-size:12px;"></span>
+        <button class="btn danger" id="apply-btn" onclick="optApply()">Delete Selected</button>
+        <span id="apply-status" class="dash" style="font-size:var(--fs-body);"></span>
       </div>
     </div>
 
     <!-- Check Point: staged deletes held on a Mgmt session, pending publish/discard -->
     <div id="pending-wrap" style="display:none;margin-top:16px;padding:14px;border:1px solid var(--green);border-radius:0;background:var(--bg1);">
-      <b>Staged on a Check Point session - not live yet</b>
-      <div id="pending-list" class="dash" style="font-size:12px;margin:8px 0;line-height:1.5;"></div>
+      <b>Staged on a Check Point session, not live yet</b>
+      <div id="pending-list" class="dash" style="font-size:var(--fs-body);margin:8px 0;line-height:1.5;"></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <button class="btn primary sm" onclick="optResolve('publish')">Publish (commit)</button>
-        <button class="btn ghost sm" onclick="optResolve('discard')">Discard (revert)</button>
-        <span id="pending-status" class="dash" style="font-size:12px;"></span>
+        <button class="btn" onclick="optResolve('publish')">Publish (Commit)</button>
+        <button class="btn" onclick="optResolve('discard')">Discard (Revert)</button>
+        <span id="pending-status" class="dash" style="font-size:var(--fs-body);"></span>
       </div>
     </div>
   </div>
@@ -95,8 +95,8 @@ async function optApply(){
   const q = isCP
     ? `Stage delete of ${sel.length} object(s) on a Check Point session?\nNothing goes live until you Publish.`
     : isFG
-    ? `Delete ${sel.length} object(s) LIVE on the FortiGate?\nFortiOS has no candidate/undo - a full-config backup is taken first (downloadable). Proceed?`
-    : `Delete ${sel.length} object(s) on the CANDIDATE config?\n(reversible - commit or revert on the box)`;
+    ? `Delete ${sel.length} object(s) LIVE on the FortiGate?\nFortiOS has no candidate/undo: a full-config backup is taken first (downloadable). Proceed?`
+    : `Delete ${sel.length} object(s) on the CANDIDATE config?\n(reversible, commit or revert on the box)`;
   if(!confirm(q)) return;
   const st=document.getElementById('apply-status'); st.textContent = isCP?'Staging…':isFG?'Backing up + deleting…':'Applying…';
   let d;
@@ -136,11 +136,11 @@ async function optResolve(action){   // 'publish' | 'discard' (Check Point)
   try { d = await (await fetch(`/optimize/${OPT_DEV}/${action}`,{method:'POST'})).json(); }
   catch(e){ ps.textContent=action+' failed: '+e; return; }
   if(d.error){ ps.textContent=action+' failed: '+d.error; return; }
-  if(action==='publish' && d.ok===false){ ps.textContent='Publish failed - see the box; session left staged.'; return; }
+  if(action==='publish' && d.ok===false){ ps.textContent='Publish failed, see the box. Session left staged.'; return; }
   const names=(d.published||d.discarded||[]);
   const msg = action==='publish'
-    ? `Published - ${names.length} object(s) deleted on the box.`
-    : `Discarded - nothing changed.`;
+    ? `Published: ${names.length} object(s) deleted on the box.`
+    : `Discarded, nothing changed.`;
   if(window.showToast) showToast(msg, action==='publish'?'success':'info', 7000);
   document.getElementById('pending-wrap').style.display='none';
   setTimeout(optAnalyze, 600);

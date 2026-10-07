@@ -28,6 +28,7 @@ import requests
 
 from . import integrity as _integ
 from .base import (
+    DropTagger,
     DeployDriver,
     DroppedField,
     StepResult,
@@ -232,7 +233,7 @@ def _login(device: dict, *, fresh: bool = False) -> tuple[str, str]:
             except ValueError:
                 snippet = (resp.text or "").strip()[:120]
                 raise RuntimeError(
-                    f"login HTTP {resp.status_code}: response was not JSON - "
+                    f"login HTTP {resp.status_code}: response was not JSON. "
                     f"{base_url} likely points at the Gateway/Gaia, not the "
                     f"Mgmt-API. Set config.cp.mgmt.ip to the Mgmt-Server. "
                     f"Body: {snippet!r}"
@@ -506,7 +507,7 @@ def _call(base_url: str, sid: str, command: str, payload: dict) -> dict:
             # API server does not accept this client IP.
             snippet = (resp.text or "").strip()[:120]
             raise RuntimeError(
-                f"{command} → HTTP {resp.status_code}: non-JSON answer - the "
+                f"{command} → HTTP {resp.status_code}: non-JSON answer. The "
                 f"Mgmt API refused the request. Check that the API user is "
                 f"published and that the API server accepts requests from "
                 f"this client. Body: {snippet!r}")
@@ -560,7 +561,7 @@ def _gaia_login(device: dict, *, retries: int = 2) -> tuple[str, str]:
     if not user or not password:
         raise NotImplementedError(
             f"CheckpointDriver: Gaia credentials missing on device "
-            f"{device.get('host_name')!r} - set gaia_user and gaia_password "
+            f"{device.get('host_name')!r}. Set gaia_user and gaia_password "
             "to enable Gateway-side discover (interfaces, routes)"
         )
     resp = _post_with_retry(
@@ -574,7 +575,7 @@ def _gaia_login(device: dict, *, retries: int = 2) -> tuple[str, str]:
     except ValueError:
         snippet = (resp.text or "").strip()[:120]
         raise RuntimeError(
-            f"gaia login HTTP {resp.status_code}: response was not JSON - "
+            f"gaia login HTTP {resp.status_code}: response was not JSON. "
             f"{base_url} likely does not expose Gaia REST. Body: {snippet!r}"
         )
     sid = data.get("sid")
@@ -1603,10 +1604,14 @@ def _render_address_objects(
         # An all-addresses object maps to the builtin 'Any' (see
         # _build_addr_lookup) - don't emit it as a concrete object (BUG-020).
         if _is_any_address(otype, v):
+            # "replaced by X" is not a reduction in the Review's vocabulary,
+            # so this object vanished from the objects row (-1 on every
+            # Check Point leg with an all-addresses object, matrix 0.9.4).
             dropped.append(DroppedField(
                 rule_id=raw_name, field="value",
-                reason="0.0.0.0/0 'any' object - mapped to builtin Any, not pushed",
-            ))
+                reason="0.0.0.0/0 'any' object: rule references resolve to "
+                       "the builtin Any",
+                fallback="not pushed: the target has Any", explained=True))
             continue
 
         if otype == "ip-netmask":
@@ -1622,13 +1627,13 @@ def _render_address_objects(
                         rule_id=raw_name, field="fqdn",
                         reason="Check Point has no single-host FQDN object "
                                "(dns-domain objects are suffix-matchers, "
-                               f"different semantics) - {_host!r} not migrated",
-                    ))
+                               f"different semantics), {_host!r} not migrated",
+                        fallback="not pushed"))
                 else:
                     dropped.append(DroppedField(
                         rule_id=raw_name, field="value",
                         reason=f"unparseable CIDR {v!r}",
-                    ))
+                        fallback="not pushed"))
                 continue
             ip, prefix = parsed
             payload: dict[str, Any] = {
@@ -1650,7 +1655,7 @@ def _render_address_objects(
                 dropped.append(DroppedField(
                     rule_id=raw_name, field="value",
                     reason=f"unparseable IP range {v!r}",
-                ))
+                    fallback="not pushed"))
                 continue
             first, last = parsed
             payload = {
@@ -1668,7 +1673,7 @@ def _render_address_objects(
                 rule_id=raw_name, field="fqdn",
                 reason="Check Point has no single-host FQDN object "
                        "(dns-domain objects are suffix-matchers, different semantics)",
-            ))
+                fallback="not pushed"))
 
         else:
             dropped.append(DroppedField(
@@ -1735,18 +1740,21 @@ def _render_service_objects(
         # (box-pass B2-1). Reference-only on CP targets.
         if val.get("predefined"):
             dropped.append(DroppedField(
-                rule_id=raw_name, field="object",
-                reason="Check Point predefined service - resolved from "
+                rule_id=raw_name, field="service",
+                reason="Check Point predefined service: resolved from "
                        "the target's own catalog, not pushed",
+                fallback="not pushed: already on the target",
+                explained=True,
             ))
             continue
         # All-traffic service (Forti 'ALL') → builtin 'Any', not a pushable
         # object (mirrors the _is_any_address skip). Rule refs resolve to 'Any'.
         if _is_any_service(val):
             dropped.append(DroppedField(
-                rule_id=raw_name, field="protocol",
-                reason="all-protocols service - mapped to builtin Any, not pushed",
-            ))
+                rule_id=raw_name, field="service",
+                reason="all-protocols service: rule references resolve to the "
+                       "builtin Any",
+                fallback="not pushed: the target has Any", explained=True))
             continue
         proto = (val.get("protocol") or "").lower().strip()
         port = str(val.get("port") or "").strip()
@@ -1787,6 +1795,19 @@ def _render_service_objects(
                     "command": "add-service-group",
                     "payload": {"name": name, "members": members,
                                 "ignore-warnings": True}})
+                # one source service became two ranges and a group - the
+                # second range and the group are the generate's own
+                for mname in members[1:]:
+                    dropped.append(DroppedField(
+                        rule_id=mname, field="service", synthesized=True,
+                        reason=f"'{raw_name}' negates port {n}. Check Point "
+                               "takes one range per service",
+                        fallback=f"created by splitting '{raw_name}'"))
+                dropped.append(DroppedField(
+                    rule_id=name, field="service_group", synthesized=True,
+                    reason=f"'{raw_name}' negates port {n}. The group keeps "
+                           "the source name so references stay valid",
+                    fallback=f"created by splitting '{raw_name}'"))
                 continue
             # Port LIST ("80,8080" / "1-442,444-65535"): PAN-OS services
             # carry comma lists - both genuine PA port lists and the
@@ -1809,8 +1830,9 @@ def _render_service_objects(
                             dropped.append(DroppedField(
                                 rule_id=raw_name, field="port",
                                 reason=f"list entry {piece!r} is not a "
-                                       "valid Check Point port - entry "
+                                       "valid Check Point port, entry "
                                        "skipped",
+                                fallback="pushed without that entry",
                             ))
                             continue
                         mname = _safe_name(f"{raw_name}-{idx}")
@@ -1821,13 +1843,28 @@ def _render_service_objects(
                         dropped.append(DroppedField(
                             rule_id=raw_name, field="port",
                             reason=f"port list {port!r} has no valid "
-                                   "Check Point port - not pushed",
+                                   "Check Point port",
+                            fallback="not pushed",
                         ))
                         continue
                     out.setdefault("Service Groups", []).append({
                         "command": "add-service-group",
                         "payload": {"name": name, "members": members,
                                     "ignore-warnings": True}})
+                    # one source service became one range per entry and a
+                    # group - all but the first range, and the group, are
+                    # the generate's own
+                    for mname in members[1:]:
+                        dropped.append(DroppedField(
+                            rule_id=mname, field="service", synthesized=True,
+                            reason=f"'{raw_name}' lists several ports. Check "
+                                   "Point takes one range per service",
+                            fallback=f"created by splitting '{raw_name}'"))
+                    dropped.append(DroppedField(
+                        rule_id=name, field="service_group", synthesized=True,
+                        reason=f"'{raw_name}' lists several ports. The group "
+                               "keeps the source name so references stay valid",
+                        fallback=f"created by splitting '{raw_name}'"))
                     continue
                 port = pieces[0] if pieces else port  # stray comma
             # Port 0 is not a valid CP port ("'Port' value is not 'any' or a
@@ -1839,7 +1876,7 @@ def _render_service_objects(
                 dropped.append(DroppedField(
                     rule_id=raw_name, field="port",
                     reason=f"port {port!r} is not a valid Check Point port "
-                           "(sentinel/placeholder service) - not pushed",
+                           "(sentinel/placeholder service), not pushed",
                 ))
                 continue
             payload = {**base, "port": norm}
@@ -1862,7 +1899,7 @@ def _render_service_objects(
                 icmp_type = 99  # CP "Any ICMP type" wildcard
                 dropped.append(DroppedField(
                     rule_id=raw_name, field="icmp_type",
-                    reason="icmp service without icmp-type - defaulted to 99 (Any)",
+                    reason="icmp service without icmp-type: defaulted to 99 (Any)",
                 ))
             payload = {**base, "icmp-type": int(icmp_type)}
             icmp_code = val.get("icmp_code")
@@ -1888,6 +1925,7 @@ def _render_service_objects(
             dropped.append(DroppedField(
                 rule_id=raw_name, field="protocol",
                 reason=f"unsupported protocol {proto!r}",
+                fallback="not pushed",
             ))
 
     return out
@@ -1937,15 +1975,15 @@ def _render_service_groups(
             if emitted is not None and sm not in emitted:
                 dropped.append(DroppedField(
                     rule_id=raw_name, field="member",
-                    reason=f"member {m!r} not among pushed objects - "
+                    reason=f"member {m!r} not among pushed objects: "
                            "pruned (would dangle)",
                 ))
                 continue
             members.append(sm)
         if not members:
             dropped.append(DroppedField(
-                rule_id=raw_name, field="members",
-                reason="all members unresolved - group skipped",
+                rule_id=raw_name, field="service_group",
+                reason="all members unresolved, group skipped",
             ))
             continue
         payload: dict[str, Any] = {
@@ -2041,8 +2079,8 @@ def _prune_unpushable(names: list[str], pushable: set[str] | None,
         dropped.append(DroppedField(
             rule_id=rule_id, field=field,
             reason=f"reference(s) {lost} point at object(s) this push does not "
-                   "create (IPv6 / unsupported type) - pruned",
-            fallback=("side became empty → matches Any" if not kept
+                   "create (IPv6 / unsupported type), pruned",
+            fallback=("replaced by Any (the side became empty)" if not kept
                       else "remaining refs kept"),
         ))
     return kept
@@ -2200,7 +2238,7 @@ def _render_tags(tags: list[dict],
         if color and not tag_color_valid("checkpoint", color):
             dropped.append(DroppedField(
                 rule_id=name, field="cp_color",
-                reason=f"unknown CP color {color!r} - falling back to {dflt}",
+                reason=f"unknown CP color {color!r}: falling back to {dflt}",
                 fallback=dflt,
             ))
             color = dflt
@@ -2222,7 +2260,7 @@ def _render_tags(tags: list[dict],
             dropped.append(DroppedField(
                 rule_id=name, field="cp_icon",
                 reason="Check Point's add-tag API has no 'icon' parameter",
-                fallback="tag created without icon"))
+                fallback="pushed without icon"))
         comments = (props.get("cp_comments") or "").strip()
         if comments:
             payload["comments"] = comments
@@ -2383,9 +2421,9 @@ def _render_schedules(schedules: list[dict],
             if len(intervals) > 1:
                 dropped.append(DroppedField(
                     rule_id=name, field="schedule",
-                    reason=(f"{len(intervals)} intervals in source - CP "
+                    reason=(f"{len(intervals)} intervals in source: CP "
                             "time-object only carries one"),
-                    fallback="first interval pushed, rest skipped",
+                    fallback="only the first interval pushed",
                 ))
             first = intervals[0]
             kind = (first.get("kind") or "").lower()
@@ -2396,7 +2434,7 @@ def _render_schedules(schedules: list[dict],
                     dropped.append(DroppedField(
                         rule_id=name, field="schedule",
                         reason="group-kind interval with no members",
-                        fallback="object skipped at push",
+                        fallback="not pushed",
                     ))
                     continue
                 payload: dict = {
@@ -2414,7 +2452,7 @@ def _render_schedules(schedules: list[dict],
                 dropped.append(DroppedField(
                     rule_id=name, field="schedule",
                     reason=f"cannot render interval to CP payload: {err}",
-                    fallback="object skipped at push",
+                    fallback="not pushed",
                 ))
                 continue
             payload = {
@@ -2431,9 +2469,9 @@ def _render_schedules(schedules: list[dict],
         if not legacy_cp:
             dropped.append(DroppedField(
                 rule_id=name, field="schedule",
-                reason="no intervals slot - cross-vendor import without "
+                reason="no intervals slot: cross-vendor import without "
                        "any schedule mapping",
-                fallback="object skipped at push",
+                fallback="not pushed",
             ))
             continue
         interval = legacy_cp[0]
@@ -2509,9 +2547,9 @@ def _render_url_categories(url_categories: list[dict],
         if not urls:
             dropped.append(DroppedField(
                 rule_id=name, field="url_category",
-                reason="no cp_list slot - cross-vendor import without "
-                       "CP mapping",
-                fallback="object skipped at push",
+                reason="custom URL category of another vendor: Check Point needs "
+                       "its URL list, which the import did not carry",
+                fallback="not pushed",
             ))
             continue
         payload: dict = {
@@ -2569,12 +2607,14 @@ def _render_security_rules(
     package = settings.get("policy_package") or "Standard"
     prefix = settings.get("rule_prefix") or "Gateshift-"
 
+    dropped = DropTagger(dropped)  # every drop below carries the rule's hash (Review change log, R2)
     out: list[dict] = []
     seen_names: dict[str, int] = {}
     prev_name: str | None = None
 
     for i, rule in enumerate(rules):
         rule_id = str(rule.get("rule_name") or rule.get("id") or f"#{i+1}")
+        dropped.current = (rule.get("rhash") or "")
 
         # Default-policy fidelity: marked vendor defaults classify per
         # target (skip-as-matching / express / declared drop).
@@ -2606,15 +2646,15 @@ def _render_security_rules(
                 _src_any = not rule.get("sources") or rule.get("sources") == ["any"]
                 dropped.append(DroppedField(
                     rule_id=rule_id, field=zfld,
-                    reason="CP rule source/destination OR-match members; mixing "
+                    reason="CP rule source/destination OR-match members. Mixing "
                            "zones with addresses widens the rule. Zones dropped. "
                            "Mitigate on the gateway: configure Anti-Spoofing topology "
-                           "(assign each network to its interface) - rules with "
+                           "(assign each network to its interface). Rules with "
                            "specific sources are then enforced as before"
-                           + ("; THIS rule has source=any and stays genuinely wider "
-                              "- review manually" if (zfld == "src_zones" and _src_any)
+                           + (". THIS rule has source=any and stays genuinely wider, "
+                              "review manually" if (zfld == "src_zones" and _src_any)
                               else ""),
-                    fallback=f"{zfld}={zv}",
+                    fallback=f"replaced by Any (was {', '.join(str(z) for z in zv)})",
                 ))
 
         # Rule name (de-dup, sanitize, truncate)
@@ -2647,7 +2687,7 @@ def _render_security_rules(
                 dropped.append(DroppedField(
                     rule_id=rule_name, field="source_identity",
                     reason=f"PA keyword '{nm}' has no CP Access-Role equivalent",
-                    fallback="identity ref dropped",
+                    fallback="pushed without the identity reference",
                 ))
                 continue
             identity_names.append(nm)
@@ -2694,7 +2734,7 @@ def _render_security_rules(
                 dropped.append(DroppedField(
                     rule_id=rule_id, field="service",
                     reason=f"no service object for {proto}/{port_str}",
-                    fallback="using builtin Any",
+                    fallback="replaced by Any",
                 ))
         else:
             services = ["Any"]
@@ -2707,7 +2747,7 @@ def _render_security_rules(
                 rule_id=rule_id, field="service",
                 reason="application-default not resolvable for: "
                        + ", ".join(unresolved_app),
-                fallback="service left as Any - set manually",
+                fallback="replaced by Any: set the service on the target",
             ))
 
         # ── L7 Applications (App-Sites) ─────────────────────────
@@ -2737,7 +2777,7 @@ def _render_security_rules(
                 if nm.lower() not in _CP_APP_SITE_NAMES:
                     dropped.append(DroppedField(
                         rule_id=rule_id, field="application",
-                        reason="not a Check Point App-Site - dropped (port stays "
+                        reason="not a Check Point App-Site: dropped (port stays "
                                "covered by the service object)",
                         fallback=nm,
                     ))
@@ -2773,7 +2813,7 @@ def _render_security_rules(
             dropped.append(DroppedField(
                 rule_id=rule_id, field="track_type",
                 reason=f"{track_type!r} requires extra blades on the Layer",
-                fallback="downgraded to 'Log'",
+                fallback="replaced by 'Log'",
             ))
             track_type = "Log"
         if (rule.get("accounting") or rule.get("per_session")
@@ -2837,7 +2877,7 @@ def _render_security_rules(
                     field="schedule",
                     reason=(f"schedule '{schedule_ref}' has no CP time-object "
                             "at the target (no cp_intervals mapping in source)"),
-                    fallback="rule pushed without schedule (always-active)",
+                    fallback="pushed without schedule (always active)",
                 ))
             else:
                 payload["time"] = [cp_sched]
@@ -3006,7 +3046,7 @@ def _render_https_rules(
                     rule_id=name, field="ssl_service",
                     reason=f"service ref(s) {_lost_svcs} are not objects this "
                            "push creates (vendor-predefined group)",
-                    fallback=("service narrowed to Any" if not svcs
+                    fallback=("replaced by Any (service)" if not svcs
                               else "remaining services kept")))
         if svcs and svcs != ["Any"]:
             payload["service"] = svcs
@@ -3033,9 +3073,9 @@ def _render_https_rules(
                     rule_id=name, field="site-category",
                     reason=(f"URL categor{'y' if _n == 1 else 'ies'} "
                             f"{', '.join(unmapped)} {'has' if _n == 1 else 'have'} "
-                            f"no mapping to a target category - rule dropped"),
-                    fallback=("attach " + ("it" if _n == 1 else "them")
-                              + " in Enrichment > Decryption"),
+                            f"no mapping to a target category, rule dropped"),
+                    fallback=("not pushed, map " + ("it" if _n == 1 else "them")
+                              + " in Target Settings > Decryption"),
                 ))
                 continue  # skip the whole rule; don't advance `prev`
             payload["site-category"] = resolved
@@ -3085,7 +3125,7 @@ def _render_nat_rules(
         if len(vals) > 1:
             dropped.append(DroppedField(
                 rule_id=rid, field=field,
-                reason=f"CP NAT accepts a single {label}; first used, rest dropped",
+                reason=f"CP NAT accepts a single {label}. First used, rest dropped",
                 fallback=f"used {vals[0]!r}, dropped {vals[1:]!r}",
             ))
         return vals[0] if vals else None
@@ -3109,8 +3149,8 @@ def _render_nat_rules(
             dropped.append(DroppedField(
                 rule_id=rid, field=field,
                 reason=f"reference(s) {lost} point at object(s) this push "
-                       "does not create (FQDN / unsupported type) - pruned",
-                fallback=("rule dropped - an emptied side would widen the "
+                       "does not create (FQDN / unsupported type), pruned",
+                fallback=("rule dropped: an emptied side would widen the "
                           "NAT match to Any" if not kept
                           else "remaining refs kept"),
             ))
@@ -3139,6 +3179,14 @@ def _render_nat_rules(
         _osrc = _prune_nat_refs(n.get("orig_src"), "orig_src", rid)
         _odst = _prune_nat_refs(n.get("orig_dst"), "orig_dst", rid)
         if _osrc is None or _odst is None:
+            # _prune_nat_refs explains WHY (under orig_src / orig_dst); that the
+            # whole rule goes has to be said as well, or the NAT row of the build
+            # statistics is short without a reason (matrix 0.9.4, fgt2cp: -31).
+            dropped.append(DroppedField(
+                rule_id=rid, field="nat_rule",
+                reason="an original side lost all references this push can "
+                       "create: an emptied side would widen the NAT match to Any",
+                fallback="not pushed"))
             continue
         if pushable_addrs is not None:
             n = {**n, "orig_src": _osrc, "orig_dst": _odst}
@@ -3149,8 +3197,8 @@ def _render_nat_rules(
             if zv and zv != ["any"]:
                 dropped.append(DroppedField(
                     rule_id=rid, field=zfld,
-                    reason="CP NAT rules don't match on zones - dropped",
-                    fallback=f"{zfld}={zv}",
+                    reason="CP NAT rules don't match on zones, dropped",
+                    fallback=f"replaced by Any (was {', '.join(str(z) for z in zv)})",
                 ))
 
         # Reduce list-fields to a single item
@@ -3184,7 +3232,7 @@ def _render_nat_rules(
         if len(svc_list) > 1:
             dropped.append(DroppedField(
                 rule_id=rid, field="orig_service",
-                reason="CP NAT accepts a single service; first used, rest dropped",
+                reason="CP NAT accepts a single service. First used, rest dropped",
                 fallback=f"used {svc_list[0]!r}, dropped {svc_list[1:]!r}",
             ))
         orig_svc_raw = svc_list[0] if svc_list else None
@@ -3228,8 +3276,8 @@ def _render_nat_rules(
                 dropped.append(DroppedField(
                     rule_id=rid, field="trans_src",
                     reason="interface-address NAT without resolvable IP "
-                           "(expected 'iface|ip' literal) - rule dropped",
-                ))
+                           "(expected 'iface|ip' literal), rule dropped",
+                    fallback="not pushed"))
                 continue
             translated_source = host_name
             translated_destination = "Original"
@@ -3252,7 +3300,7 @@ def _render_nat_rules(
         else:
             dropped.append(DroppedField(
                 rule_id=rid, field="nat_type",
-                reason=f"nat_type {nat_type!r} with no translation target - rule dropped",
+                reason=f"nat_type {nat_type!r} with no translation target, rule dropped",
             ))
             continue
 
@@ -3276,7 +3324,7 @@ def _render_nat_rules(
             dropped.append(DroppedField(
                 rule_id=rid, field="trans_dst_port",
                 reason="orig_service=Any with port translation is rejected "
-                       "by CP - translation dropped, rule keeps Original svc",
+                       "by CP: translation dropped, rule keeps Original svc",
                 fallback=f"port {trans_dst_port} not applied",
             ))
         elif trans_dst_port:
@@ -3288,7 +3336,7 @@ def _render_nat_rules(
             else:
                 dropped.append(DroppedField(
                     rule_id=rid, field="trans_dst_port",
-                    reason=f"port translation requires tcp/udp; orig_proto={orig_proto!r}",
+                    reason=f"port translation requires tcp/udp. orig_proto={orig_proto!r}",
                     fallback=f"port {trans_dst_port} not applied",
                 ))
 
@@ -3340,7 +3388,7 @@ def _render_nat_rules(
                 dropped.append(DroppedField(
                     rule_id=rid, field=aspect,
                     reason="Check Point NAT rules do not support negation",
-                    fallback="ignored",
+                    fallback="pushed without the negate",
                 ))
 
         desc = n.get("description") or ""
@@ -3382,7 +3430,7 @@ def _render_zones(zones: list[dict], dropped: list[DroppedField]) -> list[dict]:
             # also Gateshift's inferred no-zone placeholder - so skip it with a warn.
             dropped.append(DroppedField(
                 rule_id=raw_name, field="zone",
-                reason="'default' collides with multiple CP predefined objects - "
+                reason="'default' collides with multiple CP predefined objects, "
                        "zone not pushed"))
             continue
         seen.add(name)
@@ -3431,14 +3479,14 @@ def _render_interfaces(
             dropped.append(DroppedField(
                 rule_id=name, field="interface",
                 reason=f"iface_type={itype!r} not in CP-Network-Push V1 scope",
-                fallback="skipped - configure manually on gateway",
+                fallback="not pushed: configure it on the gateway",
             ))
             continue
         if itype not in ("physical", "vlan", "loopback", "bond"):
             dropped.append(DroppedField(
                 rule_id=name, field="interface",
                 reason=f"iface_type={itype!r} unrecognized",
-                fallback="skipped",
+                fallback="not pushed",
             ))
             continue
 
@@ -3465,9 +3513,9 @@ def _render_interfaces(
         if dhcp_on and itype != "physical":
             dropped.append(DroppedField(
                 rule_id=name, field="dhcp_enabled",
-                reason=(f"DHCP-client on iface_type={itype!r} not in "
-                        "CP-Network-Push V1 scope"),
-                fallback="dropped - static-IP / no-IP path used instead",
+                reason=(f"DHCP client on a {itype} interface is not pushed "
+                        "to Check Point"),
+                fallback="dropped: static-IP / no-IP path used instead",
             ))
             dhcp_on = False
 
@@ -3487,7 +3535,7 @@ def _render_interfaces(
                 dropped.append(DroppedField(
                     rule_id=name, field="vlan_tag/parent_iface_name",
                     reason="VLAN missing parent or tag",
-                    fallback="skipped",
+                    fallback="not pushed",
                 ))
                 continue
             record["parent"] = parent
@@ -3503,8 +3551,8 @@ def _render_interfaces(
             if not cleaned:
                 dropped.append(DroppedField(
                     rule_id=name, field="member_iface_names",
-                    reason="bond has no members - Gaia rejects add-bond-interface without members",
-                    fallback="skipped - add members in Network > Interfaces",
+                    reason="bond has no members: Gaia rejects add-bond-interface without members",
+                    fallback="not pushed: add members in Network > Interfaces",
                 ))
                 continue
             record["members"] = cleaned
@@ -3535,11 +3583,30 @@ def _render_static_routes(
         plen = rt.get("prefix_len")
         nh = (rt.get("next_hop") or "").strip()
         is_bh = (rt.get("route_type") or "static") == "blackhole"
-        if rt.get("is_connected") or not prefix:
+        if not prefix:
+            continue
+        if rt.get("is_connected"):
+            # Gaia derives connected networks from the interface addresses -
+            # declared so the Review accounts for every source route.
+            _cp = prefix if ("/" in prefix or plen in (None, "")) else f"{prefix}/{int(plen)}"
+            dropped.append(DroppedField(
+                rule_id=_cp, field="connected_route",
+                reason="connected network: Gaia derives it from the interface address",
+                fallback="not pushed",
+            ))
             continue
         # Blackhole routes don't need a next-hop - Gaia's `set static-route
         # <prefix> blackhole on` discards the traffic in the routing engine.
+        # An interface-only route (next-hop "none", e.g. a PAN-OS route via a
+        # tunnel interface) has no gateway address for Gaia: declared, not
+        # silently skipped (the Review accounts for every route).
         if not is_bh and not nh:
+            _p = prefix if ("/" in prefix or plen in (None, "")) else f"{prefix}/{int(plen)}"
+            dropped.append(DroppedField(
+                rule_id=_p, field="static_route",
+                reason="interface-only route (no next-hop address): Gaia static routes need a gateway",
+                fallback="not pushed",
+            ))
             continue
         if "/" not in prefix and plen not in (None, ""):
             prefix = f"{prefix}/{int(plen)}"
@@ -3547,7 +3614,7 @@ def _render_static_routes(
             dropped.append(DroppedField(
                 rule_id=prefix, field="static_route",
                 reason="default route preserved on gateway, not pushed",
-                fallback="manage via clish on gateway directly",
+                fallback="not pushed: set it in clish on the gateway",
             ))
             continue
         try:
@@ -3556,7 +3623,7 @@ def _render_static_routes(
             dropped.append(DroppedField(
                 rule_id=prefix or "<unknown>", field="prefix",
                 reason="invalid CIDR",
-                fallback="skipped",
+                fallback="not pushed",
             ))
             continue
         rec: dict = {"prefix": prefix, "next_hop": nh, "comment": ""}
@@ -3571,7 +3638,7 @@ def _render_static_routes(
             dropped.append(DroppedField(
                 rule_id=prefix, field="metric",
                 reason="Gaia static routes have no admin-distance/metric",
-                fallback="route installed at Gaia's default distance",
+                fallback="pushed with Gaia's default distance",
             ))
         out.append(rec)
     return out
@@ -3633,13 +3700,13 @@ def _render_address_groups(
                     dropped.append(DroppedField(
                         rule_id=raw_name, field="member",
                         reason="pruned member(s) not among pushed objects "
-                               "(dropped/FQDN - would dangle)",
+                               "(dropped/FQDN, would dangle)",
                     ))
                 members = kept
             if not members:
                 dropped.append(DroppedField(
-                    rule_id=raw_name, field="members",
-                    reason="all members unresolved - group skipped",
+                    rule_id=raw_name, field="address_group",
+                    reason="all members unresolved, group skipped",
                 ))
                 continue
             payload: dict[str, Any] = {
@@ -3652,13 +3719,13 @@ def _render_address_groups(
             out.append({"command": "add-group", "payload": payload})
         elif gtype == "dynamic":
             dropped.append(DroppedField(
-                rule_id=raw_name, field="dynamic_filter",
+                rule_id=raw_name, field="address_group",
                 reason="dynamic / filter-based address-groups are not modeled "
-                       "the same way on Check Point - group dropped",
+                       "the same way on Check Point, group dropped",
             ))
         else:
             dropped.append(DroppedField(
-                rule_id=raw_name, field="type",
+                rule_id=raw_name, field="address_group",
                 reason=f"unknown address-group type {gtype!r}",
             ))
     return _toposort_cp_groups(out)
@@ -3835,7 +3902,8 @@ def _cp_pick(vals, mapping, default, dropped, rid, field):
     if len(vals) > 1:
         dropped.append(DroppedField(
             rule_id=rid, field=field,
-            reason=f"CP community is single-valued; kept {chosen!r}, dropped {vals[1:]}"))
+            reason=f"CP community is single-valued. Kept {chosen!r}, dropped {vals[1:]}",
+            fallback=f"only {chosen!r} pushed"))
     return chosen
 
 
@@ -3941,7 +4009,7 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
         return {}
     if not gw_name:
         dropped.append(DroppedField(rule_id="vpn", field="gateway",
-            reason="no target CP gateway name - VPN not rendered"))
+            reason="no target CP gateway name, VPN not rendered"))
         return {}
 
     nets: list[dict] = []
@@ -3991,7 +4059,7 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
             iod_payload["vpn-settings"] = {"vpn-domain": peer_grp, "vpn-domain-type": "manual"}
         else:
             dropped.append(DroppedField(rule_id=name, field="peer_domain",
-                reason="no peer encryption domain derivable (route-based, no tunnel routes / selectors) - set it on the target"))
+                reason="no peer encryption domain derivable (route-based, no tunnel routes / selectors): set it on the target"))
         peers.append({"command": "add-interoperable-device", "payload": iod_payload})
 
         if domain_mode != "topology":   # manual: collect the local subnets
@@ -4021,8 +4089,9 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
             rec["psk_token"] = f"__GATESHIFT_PSK_{_vh}__" if _vh else _VPN_PSK_PLACEHOLDER
             dropped.append(DroppedField(rule_id=name, field="shared_secret",
                 reason="PSK: a placeholder is pushed unless one is set in Gateshift "
-                       "(then injected, encrypted, at push-time) - source secrets "
-                       "are never migrated"))
+                       "(then injected, encrypted, at push-time). Source secrets "
+                       "are never migrated",
+                       fallback="placeholder pushed"))
         else:
             # CP gateways get their VPN identity cert from the management ICA
             # (there is no mgmt-API command to import an external cert+key - it's
@@ -4030,9 +4099,9 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
             # provisioned the way PA/Forti are. Deferred: PSK is the CP path for
             # now; the operator configures cert-auth + peer-CA trust on the GW.
             dropped.append(DroppedField(rule_id=name, field="certificate",
-                reason="cert-auth not migrated for Check Point - the gateway's VPN "
+                reason="cert-auth not migrated for Check Point: the gateway's VPN "
                        "cert is ICA-managed (configure cert-auth + trusted CA on "
-                       "the gateway directly); use PSK to migrate via Gateshift"))
+                       "the gateway directly). Use PSK to migrate via Gateshift"))
         records.append(rec)
 
     # Build communities from the per-tunnel records. Meshed = one community per
@@ -4142,7 +4211,7 @@ def _fetch_gateway_topology(base_url: str, sid: str,
                      {"name": names[0], "details-level": "full"})
     raise RuntimeError(
         (f"pinned gateway not found and {len(names)} gateways exist on the "
-         "management - can't auto-pick; re-add the device via the Add-CP "
+         "management: can't auto-pick. Re-add the device via the Add-CP "
          "wizard to pin the right one")
         if names else "no simple-gateway found on the management")
 
@@ -4173,18 +4242,18 @@ def _check_tp_blade(
     gw_uid = cp_cfg.get("gateway_uid")
     gw_type = cp_cfg.get("gateway_type") or ""
     if not gw_uid:
-        return None, "no gateway_uid in config.cp - skipping blade check"
+        return None, "no gateway_uid in config.cp, skipping blade check"
     try:
         gw = _fetch_gateway_topology(base_url, sid, gw_uid, gw_type)
     except Exception as e:
-        return None, f"show-gateway failed: {e} - proceeding anyway"
+        return None, f"show-gateway failed: {e}, proceeding anyway"
     enabled = [b for b in _TP_BLADE_FLAGS if gw.get(b) is True]
     if enabled:
         return True, f"TP-blade(s) on: {', '.join(enabled)}"
     return False, (
         f"no Threat-Prevention sub-blade enabled on gateway "
         f"{gw.get('name') or gw_uid!r} (looked for "
-        f"{', '.join(_TP_BLADE_FLAGS)}) - enable at least one blade in "
+        f"{', '.join(_TP_BLADE_FLAGS)}): enable at least one blade in "
         "SmartConsole before pushing TP-rules"
     )
 
@@ -4299,9 +4368,9 @@ def _synthesize_routes_from_topology(iface_obj: dict, gateway_name: str
         if isinstance(spec, dict):
             warnings.extend(_expand_specific_network(spec, _add_route, iface_name))
         elif isinstance(spec, str) and spec:
-            warnings.append(f"{iface_name}: specific-network is uid {spec[:8]}… (not inlined - re-fetch with full)")
+            warnings.append(f"{iface_name}: specific-network is uid {spec[:8]}… (not inlined, re-fetch with full)")
     elif behind == "network defined by routing":
-        warnings.append(f"{iface_name}: topology 'defined by routing' - needs Gaia for routes")
+        warnings.append(f"{iface_name}: topology 'defined by routing'. Needs Gaia for routes")
     elif behind == "not defined":
         # External/uplink - no connected subnet to derive
         pass
@@ -4353,12 +4422,6 @@ _CP_APP_SITE_NAMES: frozenset[str] = frozenset(
 @register_driver
 class CheckpointDriver(DeployDriver):
     platform = "checkpoint"
-    migration_note = (
-        "Network strand (needs Gaia credentials): interface addresses / "
-        "cluster VIPs and static routes are pushed via Gaia; dynamic routing "
-        "and system config are not. Policy strand: rules, address/service "
-        "objects, security zones, NAT."
-    )
 
     def default_settings(self) -> list[dict]:
         return [
@@ -4979,8 +5042,8 @@ class CheckpointDriver(DeployDriver):
                           {"name": layers[0], "details-level": "full"})
             if not layer.get("applications-and-url-filtering"):
                 return (f"Layer {layers[0]!r} has the Applications & URL "
-                        "Filtering blade disabled - the push will strip the "
-                        "derived applications (they stay bound here; enable "
+                        "Filtering blade disabled: the push will strip the "
+                        "derived applications (they stay bound here. Enable "
                         "the blade on the layer and push again to apply them).")
         except Exception:
             return None
@@ -5189,7 +5252,7 @@ class CheckpointDriver(DeployDriver):
             rows = [dict(r) for r in (imported_tp or [])]
             if not rows:
                 raise ValueError(
-                    "no imported TP rules for this source - re-import the "
+                    "no imported TP rules for this source: re-import the "
                     "source device")
             src_layers = sorted({(r.get("source_layer") or "").strip()
                                  for r in rows
@@ -5200,7 +5263,7 @@ class CheckpointDriver(DeployDriver):
                     want = src_layers[0]
                 else:
                     raise ValueError(
-                        f"params.source_layer required - source has "
+                        f"params.source_layer required: source has "
                         f"{len(src_layers)} TP layers: "
                         f"{', '.join(src_layers)}")
             rows = [r for r in rows
@@ -5437,6 +5500,36 @@ class CheckpointDriver(DeployDriver):
                 })
         if _vip_hosts:
             address_objects = _vip_hosts + list(address_objects or [])
+        # A VIP the source wires to no policy carries no dest-NAT the importer
+        # could synthesise a rule from (properties.vip_ref names the one it
+        # did), so its translation does not travel - only the external address
+        # above does. Said out loud: on a FortiGate source these were invisible
+        # in both directions, present on the box and absent here (matrix 0.9.4).
+        _wired_vips = {str(((_n.get("properties") or {}).get("vip_ref") or "")).strip()
+                       for _n in (nat_rules or [])}
+        for _vip in (nat_vips or []):
+            _vn = str(_vip.get("name") or "").strip()
+            if _vn and _vn not in _wired_vips:
+                dropped.append(DroppedField(
+                    rule_id=_vn, field="vip",
+                    reason="VIP with no policy on the source, no dest-NAT rule "
+                           "was derived from it",
+                    fallback="not pushed: the external address is created, the "
+                             "translation is not"))
+        # The hosts materialised above for VIPs are objects the source does not
+        # have as such - the Review's surplus check needs to hear that.
+        for _o in _vip_hosts:
+            dropped.append(DroppedField(
+                rule_id=_o["name"], field="address", synthesized=True,
+                reason="a FortiGate VIP is an object of its own. Check Point "
+                       "needs its external address as a host",
+                fallback="created from the VIP's external address"))
+        for _o in _pool_objs + _pool_ranges:
+            dropped.append(DroppedField(
+                rule_id=_o["name"], field="address", synthesized=True,
+                reason="a FortiGate SNAT pool is referenced by name. Check "
+                       "Point resolves that against an address object",
+                fallback="created from the SNAT pool"))
 
         # Policy-Based Forwarding is Gaia-OS tier on Check Point (route-policy),
         # not a Mgmt-API rulebase - deferred per project_phase_3_pbf (CP source
@@ -5448,8 +5541,8 @@ class CheckpointDriver(DeployDriver):
                 rule_id=_pbf.get("name") or "pbf-rule",
                 field="pbf_rule",
                 reason="Check Point PBR is Gaia-OS tier (route-policy), not a "
-                       "Mgmt-API rulebase - not migrated",
-            ))
+                       "Mgmt-API rulebase, not migrated",
+                fallback="not pushed"))
 
         # All sections accumulate here as command-dict lists; NAT rendering
         # may extend Hosts / Services-TCP / Services-UDP via _ensure_host /
@@ -5460,7 +5553,7 @@ class CheckpointDriver(DeployDriver):
         # into single-proto CP services + a synthetic same-named group, before
         # lookups/rendering see them (BUG-024).
         service_objects, service_groups = expand_multiproto_services(
-            service_objects, service_groups)
+            service_objects, service_groups, dropped=dropped)
 
         # Lookups built upfront so address-group members can rewrite raw IPs
         # to object names (symmetry with security-rule rendering below).
@@ -5650,7 +5743,7 @@ class CheckpointDriver(DeployDriver):
                     rule_id=f"TP layer {layer}",
                     field="tp_strategy",
                     reason=f"{strat!r}: {e}",
-                    fallback="TP section skipped",
+                    fallback="not pushed, the TP section",
                 ))
                 continue
             if strat == "source":
@@ -5663,7 +5756,7 @@ class CheckpointDriver(DeployDriver):
                             rule_id=_r.get("rule_name") or "?",
                             field="track.packet-capture",
                             reason="add-threat-rule takes track as a "
-                                   "plain type string - packet capture "
+                                   "plain type string: packet capture "
                                    "not migrated",
                         ))
             tp_section.append({
@@ -5847,7 +5940,7 @@ class CheckpointDriver(DeployDriver):
                     yield StepResult(
                         step="tp: prune dangling refs", success=True,
                         detail=(f"{_tp_pruned} ref(s) to never-materialized objects "
-                                f"pruned (e.g. {', '.join(_tp_sample)}); "
+                                f"pruned (e.g. {', '.join(_tp_sample)}). "
                                 f"{_tp_dropped} rule(s) with emptied scope skipped"),
                     )
             except Exception as e:
@@ -5897,7 +5990,7 @@ class CheckpointDriver(DeployDriver):
             if not (device.get("gaia_user") and device.get("gaia_password")):
                 yield StepResult(
                     step="gaia auth", success=False,
-                    detail="Gaia credentials missing - IFs/Routes skipped, "
+                    detail="Gaia credentials missing: IFs/Routes skipped, "
                            "Zones still pushed",
                 )
             else:
@@ -6030,7 +6123,7 @@ class CheckpointDriver(DeployDriver):
                                     step="strip apps", success=True,
                                     detail=(
                                         f"layer {resolved_layer!r} has no "
-                                        "applications-and-url-filtering blade; "
+                                        "applications-and-url-filtering blade. "
                                         f"stripped {stripped_apps} app(s) from "
                                         f"{stripped_rules} rule(s)"
                                     ),
@@ -6041,7 +6134,7 @@ class CheckpointDriver(DeployDriver):
                                     detail=(
                                         f"dropped {stripped_idents} Access-Role "
                                         f"ref(s) absent at target from "
-                                        f"{stripped_ident_rules} rule(s) - rule "
+                                        f"{stripped_ident_rules} rule(s): rule "
                                         "pushed without that identity constraint"
                                     ),
                                 )
@@ -6051,9 +6144,9 @@ class CheckpointDriver(DeployDriver):
                                 step="resolve layer", success=False,
                                 detail=(
                                     f"package {package!r} has {len(layers)} "
-                                    f"access-layers ({layers!r}); Gateshift requires "
-                                    "exactly one (multi-layer policies are V2 "
-                                    "territory)"
+                                    f"access-layers ({layers!r}). Gateshift requires "
+                                    "exactly one (multi-layer policies are not "
+                                    "supported)"
                                 ),
                             )
                             ok = False
@@ -6296,7 +6389,7 @@ class CheckpointDriver(DeployDriver):
                         if gaia_sid is None:
                             yield StepResult(
                                 step="Push Interfaces", success=False,
-                                detail="skipped - no Gaia session",
+                                detail="skipped, no Gaia session",
                             )
                             continue
                         for step in _gaia_push_interfaces(
@@ -6325,7 +6418,7 @@ class CheckpointDriver(DeployDriver):
                         if gaia_sid is None:
                             yield StepResult(
                                 step="Push Static Routes", success=False,
-                                detail="skipped - no Gaia session",
+                                detail="skipped, no Gaia session",
                             )
                             continue
                         for step in _gaia_push_static_routes(
@@ -6353,7 +6446,7 @@ class CheckpointDriver(DeployDriver):
                                 yield StepResult(
                                     step=f"Push TP Rules [{layer}]",
                                     success=True,
-                                    detail="layer not present on target - skipped")
+                                    detail="layer not present on target, skipped")
                                 continue
                             for step in _push_tp_rules_for_layer(
                                     base_url, sid, layer, rules,
@@ -6454,7 +6547,7 @@ class CheckpointDriver(DeployDriver):
                         break
                     detail = f"{pushed} item(s) pushed"
                     if skipped_ro:
-                        detail += (f"; skipped {skipped_ro} read-only "
+                        detail += (f". Skipped {skipped_ro} read-only "
                                    f"(first: {first_ro!r})")
                     yield StepResult(step=step, success=True, detail=detail)
 
@@ -6498,7 +6591,7 @@ class CheckpointDriver(DeployDriver):
             detail = "All changes staged. Awaiting Publish or Discard."
             if gaia_committed:
                 detail = ("Gaia changes already live (save-config OK). "
-                          "Mgmt-API changes staged - Publish or Discard.")
+                          "Mgmt-API changes staged, Publish or Discard.")
             yield StepResult(
                 step="staged", success=True, detail=detail,
                 data={"session_handle": handle,
@@ -6690,14 +6783,14 @@ def _wipe_access_layer(
     if deleted == 0 and first_err:
         yield StepResult(
             step=f"Wipe {layer!r}", success=False,
-            detail=f"could not delete any of {len(rule_uids)} rule(s); "
+            detail=f"could not delete any of {len(rule_uids)} rule(s). "
                    f"first error: {first_err}",
         )
         return
     if deleted == 0 and cleanup_blocked:
         yield StepResult(
             step=f"Wipe {layer!r}", success=True,
-            detail="layer holds only the Cleanup rule (kept by CP) - "
+            detail="layer holds only the Cleanup rule (kept by CP), "
                    "treated as empty",
         )
         return
@@ -6767,7 +6860,7 @@ def _wipe_nat_rulebase(
     if deleted == 0 and first_err:
         yield StepResult(
             step=f"Wipe NAT in {package!r}", success=False,
-            detail=f"could not delete any of {len(rule_uids)} rule(s); "
+            detail=f"could not delete any of {len(rule_uids)} rule(s). "
                    f"first error: {first_err}",
         )
         return
@@ -6842,7 +6935,7 @@ def _wipe_https_layer(
     except Exception as e:
         if "not found" in str(e).lower():
             yield StepResult(step=f"https: wipe {layer!r}", success=True,
-                             detail="layer not present on target - skipped")
+                             detail="layer not present on target, skipped")
             return
         yield StepResult(step=f"https: wipe {layer!r}", success=False,
                          detail=f"could not list rules: {e}")
@@ -6960,7 +7053,7 @@ def _wipe_stale_tp_rules(
                     first_err = str(e)
     if not (deleted or neutralized or first_err):
         yield StepResult(step="tp: stale sweep", success=True,
-                         detail=f"{len(layers)} layer(s) checked - clean")
+                         detail=f"{len(layers)} layer(s) checked, clean")
         return
     detail = f"{deleted} stale rule(s) deleted across {len(layers)} layer(s)"
     if neutralized:
@@ -7016,7 +7109,7 @@ def _wipe_tp_layer(
         if "not found" in str(e).lower():
             yield StepResult(
                 step=f"tp: wipe {layer!r}", success=True,
-                detail="layer not present on target - skipped",
+                detail="layer not present on target, skipped",
                 data={"layer_missing": True})
             return
         yield StepResult(step=f"tp: wipe {layer!r}", success=False,
@@ -7055,14 +7148,14 @@ def _wipe_tp_layer(
     if deleted == 0 and first_err:
         yield StepResult(
             step=f"tp: wipe {layer!r}", success=False,
-            detail=f"could not delete any of {len(rule_uids)} rule(s); "
+            detail=f"could not delete any of {len(rule_uids)} rule(s). "
                    f"first error: {first_err}",
         )
         return
     if deleted == 0 and cleanup_blocked:
         yield StepResult(
             step=f"tp: wipe {layer!r}", success=True,
-            detail="layer holds only the Cleanup-Rule (kept by CP) - "
+            detail="layer holds only the Cleanup-Rule (kept by CP), "
                    "treated as empty",
             data=data,
         )
@@ -7135,7 +7228,7 @@ def _push_tp_rules_for_layer(
                 exc_failed.append(f"{ename}: {e}")
     for msg in exc_failed[:5]:
         yield StepResult(step=f"tp: exception {layer!r}", success=False,
-                         detail=f"add-threat-exception failed - {msg}")
+                         detail=f"add-threat-exception failed, {msg}")
     if len(exc_failed) > 5:
         yield StepResult(step=f"tp: exception {layer!r}", success=False,
                          detail=f"... {len(exc_failed) - 5} more exception "
@@ -7256,7 +7349,7 @@ def _push_cluster_routes(
     a member error stops the push so the caller marks the strand failed."""
     if not members:
         yield StepResult(step="Push Static Routes", success=False,
-                         detail="no cluster members resolved - cannot push routes")
+                         detail="no cluster members resolved, cannot push routes")
         return
     for mem in members:
         who = mem.get("name") or mem.get("gaia_ip") or "?"
@@ -7306,7 +7399,7 @@ def _push_cluster_interfaces(
     interface REPLACE - out of CP-4 V1 scope."""
     if not cluster_name:
         yield StepResult(step="Push Interfaces", success=False,
-                         detail="cluster topology not resolved - cannot push interfaces")
+                         detail="cluster topology not resolved, cannot push interfaces")
         return
     pushed = 0
     skipped: list[str] = []
@@ -7336,7 +7429,7 @@ def _push_cluster_interfaces(
             return
     detail = f"{pushed} cluster interface VIP(s) staged"
     if skipped:
-        detail += (f"; {len(skipped)} skipped - no name-match on the cluster "
+        detail += (f". {len(skipped)} skipped, no name-match on the cluster "
                    f"(rename source IFs to the cluster's names): "
                    f"{', '.join(skipped[:6])}")
     yield StepResult(step="Push Interfaces", success=True, detail=detail)
@@ -7677,7 +7770,7 @@ def _gaia_force_mgmt_iface(
         if (r.get("type") or "physical") != "physical":
             yield StepResult(step=step, success=False,
                              detail=f"{name}: only physical mgmt ifaces can be "
-                                    "force-set (V1) - reconfigure manually")
+                                    "force-set (V1), reconfigure manually")
             continue
         ipv4 = r.get("ipv4") or ""
         mask = r.get("mask_len")
@@ -7699,7 +7792,7 @@ def _gaia_force_mgmt_iface(
             # This is the success path: the change is in the running config.
             yield StepResult(
                 step=step, success=True,
-                detail=(f"{name} reconfigured (force) - Gaia session dropped as "
+                detail=(f"{name} reconfigured (force): Gaia session dropped as "
                         "expected (its IP changed). The change is in the running "
                         "config but NOT yet saved: re-attach at the new IP, run "
                         "save-config to persist, and update the device's mgmt IP "
@@ -7714,8 +7807,8 @@ def _gaia_force_mgmt_iface(
                                     "IP in Gateshift.")
         except Exception:
             yield StepResult(step=step, success=True,
-                             detail=f"{name} reconfigured (force) - session "
-                                    "dropped before save-config; re-attach at the "
+                             detail=f"{name} reconfigured (force): session "
+                                    "dropped before save-config. Re-attach at the "
                                     "new IP and run save-config to persist.")
 
 

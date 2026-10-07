@@ -90,11 +90,15 @@ services:
       # is disabled and the push falls back to the placeholder.
       GATESHIFT_SECRET_KEY: ${GATESHIFT_SECRET_KEY:-}
     ports:
-      # Loopback by default. Set WEBUI_BIND=0.0.0.0 in .env to reach the UI
-      # from elsewhere - do that only behind a reverse proxy or on a trusted
-      # management network: the application has no authentication of its own.
-      - "${WEBUI_BIND:-127.0.0.1}:8080:8080"
+      # HTTPS on 443 from the certificate under ./certs (make-cert.sh writes a
+      # self-signed one; replace the two files with your CA's), plain HTTP on
+      # 80 only redirects there. All addresses by default - the UI has its own
+      # login; WEBUI_BIND=<address> in .env restricts it to one interface.
+      - "${WEBUI_BIND:-0.0.0.0}:443:8443"
+      - "${WEBUI_BIND:-0.0.0.0}:80:8080"
     volumes:
+      # The TLS certificate and key (docs/OPERATING.md, Access).
+      - ./certs:/certs:ro
       # Required: the application execs into the python sidecar through the
       # Docker API. This grants the container root-equivalent control of the
       # host's Docker daemon.
@@ -103,7 +107,7 @@ services:
       # uploaded syslog captures land next to the live-received files, the
       # ingest reads the same directory through the python sidecar.
       - ./syslog-ng/logs:/ingest-logs
-    command: ["sh", "-c", "tailwindcss -c tailwind.config.js -i ./styles/input.css -o ./static/app.css --minify && uvicorn main:app --host 0.0.0.0 --port 8080"]
+    command: ["sh", "start.sh"]
 
   syslog:
     image: balabit/syslog-ng:latest

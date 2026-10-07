@@ -135,7 +135,7 @@ def validate_cert_key(cert_pem: str, key_pem: str,
     try:
         key = load_pem_private_key(key_pem.encode(), password=pw)
     except TypeError:
-        raise ValueError("private key is passphrase-protected - supply the passphrase")
+        raise ValueError("private key is passphrase-protected, supply the passphrase")
     except ValueError:
         raise ValueError("private key is not valid PEM, or the passphrase is wrong")
     except Exception:

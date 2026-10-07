@@ -52,11 +52,14 @@ CREATE TABLE IF NOT EXISTS fw_tags (
 -- consolidated_1 wipe runs (T7 audit, mirrors fw_rule_negate_overrides).
 
 CREATE TABLE IF NOT EXISTS fw_rule_tag_overrides (
-  rule_hash       BINARY(20)            NOT NULL PRIMARY KEY,
+  project_id  INT                   NOT NULL DEFAULT 0,
+  rule_hash       BINARY(20)            NOT NULL,
   pa_tags         JSON                  NULL,
   pa_group_tag    VARCHAR(127)          NULL,
   cp_tags         JSON                  NULL,
   source          ENUM('manual','auto') NOT NULL DEFAULT 'manual',
   updated_at      TIMESTAMP             NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                            ON UPDATE CURRENT_TIMESTAMP
+                                            ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (project_id, rule_hash),
+  KEY ix_fw_rule_tag_overrides_key (rule_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

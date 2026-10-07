@@ -22,10 +22,10 @@
 
 {% elif not devices %}
   <div class="text-gray-500 text-sm mt-10 text-center">
-    No rules found - the pipeline has not run for this source yet.
+    No rules found: the pipeline has not run for this source yet.
     <div style="margin-top:10px;">
-      <button type="button" onclick="startRun('generate')" class="btn primary sm run-btn">
-        Run pipeline (Generate)</button>
+      <button type="button" onclick="startRun('generate')" class="btn run-btn">
+        Run Pipeline (Generate)</button>
     </div>
   </div>
 
@@ -38,28 +38,39 @@
     <svg class="w-3.5 h-3.5 flex-shrink-0 animate-spin" viewBox="0 0 24 24" fill="none">
       <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
     </svg>
-    Results are outdated - generating updated view…
+    Results are outdated, generating updated view…
   </div>
   {% else %}
   <div class="mb-4 flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-950/50 border border-amber-800/60 text-amber-300 text-xs">
-    <span>Results are outdated - re-generating automatically…</span>
+    <span id="regen-banner-text">Results are outdated, re-generating automatically…</span>
     <button type="button" onclick="startRun('generate')"
-            class="btn danger sm run-btn" style="margin-left:auto;">Re-generate</button>
+            class="btn run-btn" style="margin-left:auto;">Re-generate</button>
   </div>
   <script>
     // Auto-trigger the pipeline ONCE per page load; the red button stays as
     // the fallback (a failed run would otherwise loop - see the re-heal
-    // warning at main.py's needs_generate handling). On the Objects and
-    // Network tabs the auto-fire is SUPPRESSED - cleanup flows (object
-    // deletes, zone mapping) batch there; the pending dot marks the state
-    // and switching to a rules-dependent tab re-triggers this render.
+    // warning at main.py's needs_generate handling). A finished run reloads
+    // the page (base.html pollStatus), so the guard only bites after a run
+    // that did not clear the flag. On the Objects and Network tabs the
+    // auto-fire is SUPPRESSED - cleanup flows (object deletes, zone mapping)
+    // batch there; the pending marker (rules.html #regen-pending-dot) shows
+    // the state and switching to a rules-dependent tab re-triggers this
+    // render. The banner says what really happens: "automatically" only
+    // when this render fires the run, otherwise the button is the way.
     (function() {
-      var _tab = '';
+      var _tab = '', fired = false;
       try { _tab = localStorage.getItem('primary-tab') || ''; } catch (e) {}
-      if (_tab === 'objects' || _tab === 'network') return;
-      if (!window._autoRegenFired && typeof startRun === 'function') {
+      if (_tab !== 'objects' && _tab !== 'network'
+          && !window._autoRegenFired && typeof startRun === 'function') {
         window._autoRegenFired = true;
+        fired = true;
         startRun('generate');
+      }
+      if (!fired) {
+        var t = document.getElementById('regen-banner-text');
+        if (t) t.textContent = (_tab === 'objects' || _tab === 'network')
+          ? 'Results are outdated: they are recomputed when you open a rules view.'
+          : 'Results are outdated: the automatic run did not complete. Re-generate by hand.';
       }
     })();
   </script>
@@ -98,9 +109,14 @@
     </select>
 
     {# CSV export - neutral .btn.sm with inline icon. #}
+    {# The export reads the pair's project: target + project ride along
+       (the standalone fragment route passes target/project_id, the page
+       include has selected_target/selected_project). #}
+    {% set _csv_t = (target if (target is defined and target) else (selected_target.id if (selected_target is defined and selected_target) else '')) %}
+    {% set _csv_p = (project_id if (project_id is defined and project_id) else (selected_project.id if (selected_project is defined and selected_project) else '')) %}
     <a id="csv-export-btn"
-       href="/export.csv{% if device %}?device={{ device | urlencode }}{% endif %}"
-       class="btn sm" style="text-decoration:none;">
+       href="/export.csv{% if device %}?device={{ device | urlencode }}{% if _csv_t %}&target={{ _csv_t }}{% endif %}{% if _csv_p %}&project={{ _csv_p }}{% endif %}{% endif %}"
+       class="btn" style="text-decoration:none;">
       <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
       </svg>
@@ -114,7 +130,7 @@
        display row - there's no stable rule_hash per row, so checkboxes
        and bulk-delete are disabled while it's on. #}
     {% if module == 'endpoint_pairs' %}
-    <span class="tag warn" style="font-size:11px;padding:3px 9px;font-style:italic;"
+    <span class="tag warn" style="font-size:var(--fs-small);padding:3px 9px;font-style:italic;"
           title="The Endpoint-pairs aggregation collapses many imported rules into one display row, so a single rule-hash per row isn't available. Disable `Endpoint pairs` in the Consolidation panel (Ruleset &gt; Security) to select rows.">
       Bulk-select disabled in Endpoint-pairs mode
     </span>
@@ -124,40 +140,40 @@
        Match semantics follow the selected target (CP = zoneless). #}
     <button type="button" id="rules-shadow-chip"
             onclick="toggleShadowFilter()"
-            class="btn sm"
+            class="chipbtn"
             title="Find rules made unreachable by an earlier, broader rule (full shadowing and duplicates). Analysis follows the selected target's semantics.">
       Shadowed (<span id="rules-shadow-count">?</span>)
     </button>
     <button type="button" id="rules-bulk-disable-btn"
             onclick="rulesBulkDisable()" disabled
-            class="btn sm">
-      Disable selected (<span id="rules-bulk-disable-count">0</span>)
+            class="btn">
+      <span>Disable Selected (<span id="rules-bulk-disable-count">0</span>)</span>
     </button>
     <button type="button" id="rules-bulk-delete-btn"
             onclick="rulesBulkDelete()" disabled
-            class="btn danger sm">
-      Delete selected (<span id="rules-bulk-count">0</span>)
+            class="btn danger">
+      <span>Delete Selected (<span id="rules-bulk-count">0</span>)</span>
     </button>
-    <span id="rules-bulk-status" class="mut" style="font-size:11px;"></span>
+    <span id="rules-bulk-status" class="mut" style="font-size:var(--fs-small);"></span>
     {% endif %}
 
     <div class="sp"></div>
 
     {# Pagination chip-row. #}
     {% if total_pages > 1 %}
-    <div style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--tx2);">
+    <div style="display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-body);color:var(--tx2);">
       {% if page > 1 %}
         <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
-                class="btn sm" style="height:28px;padding:0 10px;">&larr; Prev</button>
+                class="btn">&larr; Prev</button>
       {% else %}
-        <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
+        <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
       {% endif %}
       <span class="mut" style="padding:0 6px;">{{ page }} / {{ total_pages }}</span>
       {% if page < total_pages %}
         <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
-                class="btn sm" style="height:28px;padding:0 10px;">Next &rarr;</button>
+                class="btn">Next &rarr;</button>
       {% else %}
-        <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
+        <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
       {% endif %}
     </div>
     {% endif %}
@@ -166,7 +182,7 @@
   {% set group_by = group_by | default("device") %}
   {% set show_groups = multi_group or group_by in ("zone", "src_zone", "dst_zone", "dst_port") %}
   {% if effective_layers %}
-  <div style="margin:0 0 10px;padding:8px 12px;border:1px solid var(--line2);border-radius:0;background:var(--bg2);font-size:12px;color:var(--tx2);">
+  <div style="margin:0 0 10px;padding:8px 12px;border:1px solid var(--line2);border-radius:0;background:var(--bg2);font-size:var(--fs-body);color:var(--tx2);">
     <b style="color:var(--tx);">Effective view</b> - inherited rules from
     <span style="color:var(--tx);">{{ effective_layers[:-1] | join(", ") }}</span>
     are read-only (origin = group header ↓). Order matches evaluation: inherited first, own rules below.
@@ -211,7 +227,7 @@
                  style="accent-color:var(--green);vertical-align:middle;"
                  title="Select all visible rules">
         </th>
-        <th class="num" style="width:60px;" title="{% if can_reorder and group_by == 'device' %}Rule sequence - use ▲▼ to reorder{% endif %}">#</th>
+        <th class="num" style="width:60px;" title="{% if can_reorder and group_by == 'device' %}Rule sequence: use ▲▼ to reorder{% endif %}">#</th>
         <th>Name</th>
         <th class="zone-col">{% if target_platform == 'fortigate' %}Incoming Interface{% else %}Src Zone{% endif %}</th>
         <th>Sources</th>
@@ -316,39 +332,39 @@
           {% if group_by == "zone" %}
             {% set gm = group_meta[group_label] %}
             {% if gm[0] or gm[1] %}
-              <span class="mut" style="font-size:11px;">Zone Pair:</span>
-              <span class="chip {{ zone_cls(gm[0]) }}" style="font-weight:600;font-size:12px;padding:3px 9px;">{{ gm[0] or '?' }}</span>
+              <span class="mut" style="font-size:var(--fs-small);">Zone Pair:</span>
+              <span class="chip {{ zone_cls(gm[0]) }}" style="font-weight:600;font-size:var(--fs-body);padding:3px 9px;">{{ gm[0] or '?' }}</span>
               <svg style="width:12px;height:12px;color:var(--tx3);flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
               </svg>
-              <span class="chip {{ zone_cls(gm[1]) }}" style="font-weight:600;font-size:12px;padding:3px 9px;">{{ gm[1] or '?' }}</span>
+              <span class="chip {{ zone_cls(gm[1]) }}" style="font-weight:600;font-size:var(--fs-body);padding:3px 9px;">{{ gm[1] or '?' }}</span>
             {% else %}
-              <span style="color:var(--tx2);font-size:12px;font-style:italic;">{{ group_label }}</span>
+              <span style="color:var(--tx2);font-size:var(--fs-body);font-style:italic;">{{ group_label }}</span>
             {% endif %}
           {% elif group_by in ("src_zone", "dst_zone") %}
             {% set gz = group_meta[group_label] %}
             {% if gz %}
-              <span class="mut" style="font-size:11px;">{{ 'Source Zone:' if group_by == 'src_zone' else 'Destination Zone:' }}</span>
-              <span class="chip {{ zone_cls(gz) }}" style="font-weight:600;font-size:12px;padding:3px 9px;">{{ gz }}</span>
+              <span class="mut" style="font-size:var(--fs-small);">{{ 'Source Zone:' if group_by == 'src_zone' else 'Destination Zone:' }}</span>
+              <span class="chip {{ zone_cls(gz) }}" style="font-weight:600;font-size:var(--fs-body);padding:3px 9px;">{{ gz }}</span>
             {% else %}
-              <span style="color:var(--tx2);font-size:12px;font-style:italic;">{{ group_label }}</span>
+              <span style="color:var(--tx2);font-size:var(--fs-body);font-style:italic;">{{ group_label }}</span>
             {% endif %}
           {% elif group_by == "dst_port" %}
-            <span class="mut" style="font-size:11px;">Destination Port:</span>
-            <span style="color:var(--tx);font-size:12px;font-weight:600;">{{ group_label }}</span>
+            <span class="mut" style="font-size:var(--fs-small);">Destination Port:</span>
+            <span style="color:var(--tx);font-size:var(--fs-body);font-weight:600;">{{ group_label }}</span>
           {% elif group_by == "pa_group_tag" %}
             {% set _gt_name = group_meta[group_label] %}
             <span class="seclbl" style="padding:0;">Group-Tag</span>
             {% if _gt_name == "(none)" %}
-              <span class="mut" style="font-size:11px;font-style:italic;">none</span>
+              <span class="mut" style="font-size:var(--fs-small);font-style:italic;">none</span>
             {% else %}
               <span class="chip red" style="padding:3px 9px;">{{ _gt_name }}</span>
             {% endif %}
           {% else %}
-            <span style="color:var(--tx);font-size:12px;font-weight:600;">{{ group_label }}</span>
-            {% if _ginh %}<span style="font-size:10px;padding:2px 7px;margin-left:8px;border:1px solid var(--line2);border-radius:0;color:var(--tx3);white-space:nowrap;">↳ vererbt · read-only</span>{% endif %}
+            <span style="color:var(--tx);font-size:var(--fs-body);font-weight:600;">{{ group_label }}</span>
+            {% if _ginh %}<span style="font-size:var(--fs-caption);padding:2px 7px;margin-left:8px;border:1px solid var(--line2);border-radius:0;color:var(--tx3);white-space:nowrap;">↳ vererbt · read-only</span>{% endif %}
           {% endif %}
-          <span class="device-count mut" style="font-size:11px;margin-left:4px;"
+          <span class="device-count mut" style="font-size:var(--fs-small);margin-left:4px;"
                 data-total="{{ rules | length }}"
                 data-unit="entries">
             {{ rules | length }} entries
@@ -400,7 +416,7 @@
                      style="accent-color:var(--green);vertical-align:middle;"
                      data-rid="{{ rule.id }}"
                      data-rhash="{{ rule.rhash }}"
-                     title="Selects this visible row. Backend operations (Apply / Reset) work on the underlying rule's content-hash - multiple rows can share one rule, so the rule-count in the action status may be lower than the row count.">
+                     title="Selects this visible row. Backend operations (Apply / Reset) work on the underlying rule's content-hash: multiple rows can share one rule, so the rule-count in the action status may be lower than the row count.">
               {% endif %}
             </td>
 
@@ -409,10 +425,10 @@
               <div style="display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;">
                 <div style="display:flex;flex-direction:column;">
                   <button onclick="moveRule({{ rule.id }}, 'up')"
-                          style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:11px;line-height:1;padding:0 2px;"
+                          style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:var(--fs-small);line-height:1;padding:0 2px;"
                           onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx3)';">▲</button>
                   <button onclick="moveRule({{ rule.id }}, 'down')"
-                          style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:11px;line-height:1;padding:0 2px;"
+                          style="background:none;border:none;cursor:pointer;color:var(--tx3);font-size:var(--fs-small);line-height:1;padding:0 2px;"
                           onmouseover="this.style.color='var(--green)';" onmouseout="this.style.color='var(--tx3)';">▼</button>
                 </div>
                 <span style="color:var(--tx2);">{{ rule.sequence or ns.row }}</span>
@@ -427,7 +443,7 @@
               <div id="name-cell-{{ rule.id }}" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
                 {% if rule.rule_name %}
                   <span class="rname" style="{% if rule.disabled %}text-decoration:line-through;color:var(--tx3);{% endif %}">{{ rule.rule_name }}</span>
-                  {% if rule.default_rule_kind %}<span class="pp" style="margin-left:6px;opacity:0.55;border:1px solid var(--line2);padding:0 5px;" title="Vendor default rule ({{ rule.default_rule_kind }}) - part of the source's effective policy. Pushed explicitly, skipped when the target enforces the same behavior built-in, or declared when inexpressible.">default</span>{% endif %}
+                  {% if rule.default_rule_kind %}<span class="pp" style="margin-left:6px;opacity:0.55;border:1px solid var(--line2);padding:0 5px;" title="Vendor default rule ({{ rule.default_rule_kind }}): part of the source's effective policy. Pushed explicitly, skipped when the target enforces the same behavior built-in, or declared when inexpressible.">default</span>{% endif %}
                 {% else %}
                   <span class="dash">-</span>
                 {% endif %}
@@ -447,7 +463,7 @@
                 <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
                 {% if rule.rule_name %}
                   <span class="rname" style="{% if rule.disabled %}text-decoration:line-through;color:var(--tx3);{% endif %}">{{ rule.rule_name }}</span>
-                  {% if rule.default_rule_kind %}<span class="pp" style="margin-left:6px;opacity:0.55;border:1px solid var(--line2);padding:0 5px;" title="Vendor default rule ({{ rule.default_rule_kind }}) - part of the source's effective policy. Pushed explicitly, skipped when the target enforces the same behavior built-in, or declared when inexpressible.">default</span>{% endif %}
+                  {% if rule.default_rule_kind %}<span class="pp" style="margin-left:6px;opacity:0.55;border:1px solid var(--line2);padding:0 5px;" title="Vendor default rule ({{ rule.default_rule_kind }}): part of the source's effective policy. Pushed explicitly, skipped when the target enforces the same behavior built-in, or declared when inexpressible.">default</span>{% endif %}
                 {% else %}
                   <span class="dash">-</span>
                 {% endif %}
@@ -460,16 +476,16 @@
                badge. Auto-map / Reset preserve manual overrides. #}
             <td class="zone-col"{% if rule.zone_override_source == 'manual' %} style="background:var(--violet-fill);"{% endif %}>
               <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;"
-                   {% if rule.zone_override_source == 'manual' %}title="Manual override - preserved by Auto-map / Reset"{% endif %}>
+                   {% if rule.zone_override_source == 'manual' %}title="Manual override: preserved by Auto-map / Reset"{% endif %}>
                 {% for z in (rule.src_zones or []) %}
                   {% if z %}
-                    <span class="chip {{ zone_cls(z) }}" style="">{{ z }}{% if zone_editable and z != 'any' %}<button type="button" onclick="zoneRemoveOne('{{ rule.rhash }}','src','{{ z }}')" title="Remove {{ z }}" style="background:none;border:none;cursor:pointer;color:inherit;opacity:0.55;padding:0 1px 0 3px;font-size:11px;line-height:1;">&times;</button>{% endif %}</span>
+                    <span class="chip {{ zone_cls(z) }}" style="">{{ z }}{% if zone_editable and z != 'any' %}<button type="button" onclick="zoneRemoveOne('{{ rule.rhash }}','src','{{ z }}')" title="Remove {{ z }}" class="iconbtn">&times;</button>{% endif %}</span>
                   {% endif %}
                 {% else %}
                   <span class="dash">-</span>
                 {% endfor %}
                 {% if rule.zone_override_source == 'manual' %}
-                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:var(--fs-caption);font-weight:700;background:var(--violet);color:var(--green-ink);"
                       title="Manual override">M</span>
                 {% endif %}
               </div>
@@ -510,7 +526,7 @@
                   <span class="dash">-</span>
                 {% endfor %}
                 {% if rule.identity_override_source == 'manual' %}
-                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:var(--fs-caption);font-weight:700;background:var(--violet);color:var(--green-ink);"
                       title="Manual override">M</span>
                 {% endif %}
               </div>
@@ -519,16 +535,16 @@
 
             <td class="zone-col"{% if rule.zone_override_source == 'manual' %} style="background:var(--violet-fill);"{% endif %}>
               <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;"
-                   {% if rule.zone_override_source == 'manual' %}title="Manual override - preserved by Auto-map / Reset"{% endif %}>
+                   {% if rule.zone_override_source == 'manual' %}title="Manual override: preserved by Auto-map / Reset"{% endif %}>
                 {% for z in (rule.dst_zones or []) %}
                   {% if z %}
-                    <span class="chip {{ zone_cls(z) }}" style="">{{ z }}{% if zone_editable and z != 'any' %}<button type="button" onclick="zoneRemoveOne('{{ rule.rhash }}','dst','{{ z }}')" title="Remove {{ z }}" style="background:none;border:none;cursor:pointer;color:inherit;opacity:0.55;padding:0 1px 0 3px;font-size:11px;line-height:1;">&times;</button>{% endif %}</span>
+                    <span class="chip {{ zone_cls(z) }}" style="">{{ z }}{% if zone_editable and z != 'any' %}<button type="button" onclick="zoneRemoveOne('{{ rule.rhash }}','dst','{{ z }}')" title="Remove {{ z }}" class="iconbtn">&times;</button>{% endif %}</span>
                   {% endif %}
                 {% else %}
                   <span class="dash">-</span>
                 {% endfor %}
                 {% if rule.zone_override_source == 'manual' %}
-                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:10px;font-weight:700;background:var(--violet);color:var(--green-ink);"
+                <span style="margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:0;font-size:var(--fs-caption);font-weight:700;background:var(--violet);color:var(--green-ink);"
                       title="Manual override">M</span>
                 {% endif %}
               </div>
@@ -587,7 +603,7 @@
                 {{ negate_btn(rule.rhash, 'service', rule.negate_service, rule.negate_override_source, target_platform, 'security') | safe }}
                 {% if rule.service_override %}
                   <span class="chip dmz" style=""
-                        title="Service override - replaces proto/port at deploy time">{{ rule.service_override }}</span>
+                        title="Service override: replaces proto/port at deploy time">{{ rule.service_override }}</span>
                 {% elif rule.ports_list_orig %}
                   {% for _orig in rule.ports_list_orig %}
                     <span class="chip any" style="">{{ _orig }}</span>
@@ -621,9 +637,9 @@
             {% set _nfl = nat_fold_ui.flags.get(rule.rule_name or '') %}
             <td class="natflag-col" style="white-space:nowrap;">
               {% if _nfl %}
-                <span class="chip trust" title="gets 'nat enable'{% if _nfl.pool %} + pool {{ _nfl.pool }}{% endif %} - from source NAT intent{{ 's' if _nfl.intents|length > 1 }} {{ _nfl.intents | join(', ') }}">NAT</span>
+                <span class="chip trust" title="Gets 'nat enable'{% if _nfl.pool %} + pool {{ _nfl.pool }}{% endif %} - from source NAT intent{{ 's' if _nfl.intents|length > 1 }} {{ _nfl.intents | join(', ') }}">NAT</span>
               {% elif (rule.rule_name or '') in nat_fold_ui.conflicts %}
-                <span class="chip" title="conflicting SNAT pools match this policy - nat not auto-set (set it manually on the target)">(!)</span>
+                <span class="chip" title="Conflicting SNAT pools match this policy: nat not auto-set (set it manually on the target)">(!)</span>
               {% else %}
                 <span class="mut">-</span>
               {% endif %}
@@ -648,33 +664,33 @@
               {% if target_platform == 'fortigate' and rule.log_traffic %}
                 <span class="chip{% if rule.log_traffic == 'disable' %} any{% elif _auto_log %} amber{% else %} dmz{% endif %}"
                       style=""
-                      title="logtraffic{% if _auto_log %} (auto from source - pending review){% endif %}">{{ rule.log_traffic }}</span>
+                      title="Logtraffic{% if _auto_log %} (auto from source, pending review){% endif %}">{{ rule.log_traffic }}</span>
                 {% if rule.log_traffic != 'disable' %}
                 <span class="chip{% if rule.log_start %} trust{% else %} any{% endif %}"
-                      style="font-size:10px;padding:1px 5px;margin-left:4px;"
-                      title="logtraffic-start: {{ 'yes' if rule.log_start else 'no' }}">S</span>
+                      style="font-size:var(--fs-caption);padding:1px 5px;margin-left:4px;"
+                      title="Logtraffic-start: {{ 'yes' if rule.log_start else 'no' }}">S</span>
                 <span class="chip{% if rule.capture_packet %} trust{% else %} any{% endif %}"
-                      style="font-size:10px;padding:1px 5px;"
-                      title="capture-packet: {{ 'yes' if rule.capture_packet else 'no' }}">PCAP</span>
+                      style="font-size:var(--fs-caption);padding:1px 5px;"
+                      title="Capture-packet: {{ 'yes' if rule.capture_packet else 'no' }}">PCAP</span>
                 {% endif %}
               {% elif target_platform == 'panw' and rule.log_forwarding %}
                 <span class="chip{% if _auto_log %} amber{% else %} dmz{% endif %}"
                       style=""
                       title="{{ rule.log_forwarding }}{% if _auto_log %} (auto from source){% endif %}">{{ rule.log_forwarding }}</span>
                 <span class="chip{% if rule.log_start %} trust{% else %} any{% endif %}"
-                      style="font-size:10px;padding:1px 5px;margin-left:4px;"
+                      style="font-size:var(--fs-caption);padding:1px 5px;margin-left:4px;"
                       title="Log at session start: {{ 'yes' if rule.log_start else 'no' }}">S</span>
                 <span class="chip{% if rule.log_end %} trust{% else %} any{% endif %}"
-                      style="font-size:10px;padding:1px 5px;"
+                      style="font-size:var(--fs-caption);padding:1px 5px;"
                       title="Log at session end: {{ 'yes' if rule.log_end else 'no' }}">E</span>
               {% elif target_platform == 'checkpoint' and rule.track_type %}
                 {% set _auto_track = (rule.track_override_source == 'auto') %}
                 <span class="chip{% if _auto_track %} amber{% else %} dmz{% endif %}"
                       style=""
-                      title="{{ rule.track_type }}{% if _auto_track %} (auto from source - pending review){% endif %}">{{ rule.track_type }}</span>
-                {% if rule.accounting %}<span class="chip trust" style="font-size:10px;padding:1px 5px;margin-left:4px;" title="Accounting">A</span>{% endif %}
-                {% if rule.per_session %}<span class="chip trust" style="font-size:10px;padding:1px 5px;margin-left:4px;" title="Per session">PS</span>{% endif %}
-                {% if rule.per_connection %}<span class="chip trust" style="font-size:10px;padding:1px 5px;margin-left:4px;" title="Per connection">PC</span>{% endif %}
+                      title="{{ rule.track_type }}{% if _auto_track %} (auto from source, pending review){% endif %}">{{ rule.track_type }}</span>
+                {% if rule.accounting %}<span class="chip trust" style="font-size:var(--fs-caption);padding:1px 5px;margin-left:4px;" title="Accounting">A</span>{% endif %}
+                {% if rule.per_session %}<span class="chip trust" style="font-size:var(--fs-caption);padding:1px 5px;margin-left:4px;" title="Per session">PS</span>{% endif %}
+                {% if rule.per_connection %}<span class="chip trust" style="font-size:var(--fs-caption);padding:1px 5px;margin-left:4px;" title="Per connection">PC</span>{% endif %}
               {% else %}
                 <span class="dash">-</span>
               {% endif %}
@@ -698,7 +714,7 @@
                   {% for slot_label, slot_val in _utm_slots %}
                     {% if slot_val %}
                       <span class="pp on" {% if _auto_prof %}style="color:var(--amber);border-color:var(--amber-line);background:var(--amber-fill);"{% endif %}
-                            title="{{ slot_label }}: {{ slot_val }}{% if _auto_prof %} (auto from source - pending review){% endif %}">{{ slot_label }}</span>
+                            title="{{ slot_label }}: {{ slot_val }}{% if _auto_prof %} (auto from source, pending review){% endif %}">{{ slot_label }}</span>
                     {% else %}
                       <span class="pp" title="{{ slot_label }}: (none)">{{ slot_label }}</span>
                     {% endif %}
@@ -724,7 +740,7 @@
                   {% for slot_label, slot_val in _pa_slots %}
                     {% if slot_val %}
                       <span class="pp on" {% if _auto_pa %}style="color:var(--amber);border-color:var(--amber-line);background:var(--amber-fill);"{% endif %}
-                            title="{{ slot_label }}: {{ slot_val }}{% if _auto_pa %} (auto from source - pending review){% endif %}">{{ slot_label }}</span>
+                            title="{{ slot_label }}: {{ slot_val }}{% if _auto_pa %} (auto from source, pending review){% endif %}">{{ slot_label }}</span>
                     {% else %}
                       <span class="pp" title="{{ slot_label }}: (none)">{{ slot_label }}</span>
                     {% endif %}
@@ -746,7 +762,7 @@
                 {% set _manual_sched = (rule.schedule_override_source == 'manual') %}
                 <span class="chip{% if _auto_sched %} amber{% elif _manual_sched %} wan{% else %} any{% endif %}"
                       style=""
-                      title="schedule: {{ rule.schedule }}{% if _auto_sched %} (auto from source - pending review){% elif _manual_sched %} (manual override){% endif %}">{{ rule.schedule }}</span>
+                      title="Schedule: {{ rule.schedule }}{% if _auto_sched %} (auto from source, pending review){% elif _manual_sched %} (manual override){% endif %}">{{ rule.schedule }}</span>
               {% else %}
                 <span class="dash">-</span>
               {% endif %}
@@ -813,19 +829,19 @@
 
   {# ── Bottom pagination - mirrors the top-bar chip row. ── #}
   {% if total_pages > 1 %}
-  <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px;font-size:12px;color:var(--tx2);margin:6px 20px 22px;">
+  <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px;font-size:var(--fs-body);color:var(--tx2);margin:6px 20px 22px;">
     {% if page > 1 %}
       <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
-              class="btn sm" style="height:28px;padding:0 10px;">&larr; Prev</button>
+              class="btn">&larr; Prev</button>
     {% else %}
-      <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
+      <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
     {% endif %}
     <span class="mut" style="padding:0 6px;">{{ page }} / {{ total_pages }}</span>
     {% if page < total_pages %}
       <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
-              class="btn sm" style="height:28px;padding:0 10px;">Next &rarr;</button>
+              class="btn">Next &rarr;</button>
     {% else %}
-      <span class="btn sm" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
+      <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
     {% endif %}
   </div>
   {% endif %}
@@ -843,7 +859,7 @@
       body: JSON.stringify({rule_id: ruleId, direction: direction}),
     }).then(r => r.json()).then(data => {
       if (data.moved) htmx.trigger(document.body, 'configSaved');
-    }).catch(() => { showToast('Reorder failed - please try again', 'error'); });
+    }).catch(() => { showToast('Reorder failed, please try again', 'error'); });
   }
 </script>
 {% endif %}
@@ -897,7 +913,7 @@
         cancelled = false;  // allow retry
         input.classList.add('border-red-500', 'focus:border-red-500');
         input.classList.remove('border-gray-600', 'focus:border-blue-500');
-        showToast('Failed to save name - please try again', 'error');
+        showToast('Failed to save name, please try again', 'error');
       });
     }
     input.addEventListener('keydown', e => {

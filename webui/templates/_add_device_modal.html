@@ -1,0 +1,448 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# Shared add-device modal (inventory page + project list, docs/PROJECTS_UI_DESIGN.md D7/D8).
+   Expects `tenant_id`, `platform_labels`, `manager_ui`. Opens via openAddModal();
+   Esc + backdrop click cancel. The script below defines everything the modal
+   needs - include it once per page. #}
+{# ── Add-device modal - opens via openAddModal(); Esc + backdrop click cancel. ── #}
+<div id="add-device-modal" class="hidden fixed inset-0 z-50 items-center justify-center"
+     style="background:rgba(4,7,11,0.6);"
+     onclick="if (event.target === this) closeAddModal();">
+  <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:440px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h2 style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);">Add Device</h2>
+      <button type="button" onclick="closeAddModal()" class="x" aria-label="Close">×</button>
+    </div>
+    <form method="post" action="/devices/add" id="add-device-form" style="display:flex;flex-direction:column;gap:12px;">
+      {# The device joins the tenant this page shows (P1.4). #}
+      <input type="hidden" name="tenant_id" value="{{ tenant_id }}">
+      {# Opened from the project wizard: where the add returns to (D8). #}
+      <input type="hidden" id="gs-add-next" class="gs-add-next" name="next" value="">
+
+      <div class="field">
+        <label>Platform</label>
+        <select name="platform" id="add-device-platform" onchange="onAddPlatformChange(this.value)" class="inp">
+          {# Check Point splits by tier: a single Gateway (CE - via its mgmt API) vs a management
+             server / MDS (EE - fans into scopes). Render both explicitly; skip the generic
+             'checkpoint' loop entry. The Mgmt/MDS entry only when the Enterprise module is present.
+             OPNsense enters as a CONFIGURATION UPLOAD, never as an API host, so its
+             generic loop entry is skipped too. Reading a whole configuration is the one
+             large response this platform's web server mishandles (KNOWN_LIMITATIONS.md),
+             and a browser export sidesteps that entirely. The two entries below are
+             therefore the ways a box ENTERS Gateshift - an exported configuration, or
+             discovery from its logs. Credentials are added on the device row afterwards,
+             which is what turns a box into a push TARGET: same platform key throughout,
+             one device row per firewall, whatever roles it ends up carrying. #}
+          {% for val, label in platform_labels.items() if val not in ('checkpoint', 'opnsense') %}
+          <option value="{{ val }}">{{ label }}</option>
+          {% endfor %}
+          <option value="checkpoint_gw">Check Point (Single Gateway)</option>
+          {# Mgmt/MDS renders in CE too - selecting it there shows the EE hint
+             (same conversion message the Panorama/FMG import detection gives). #}
+          <option value="checkpoint">Check Point (SMS / MDS)</option>
+          <option value="opnsense_upload">OPNsense (configuration upload)</option>
+          <option value="logsource">Log source (OPNsense), discover from logs</option>
+        </select>
+      </div>
+
+      {# CE only: selecting Mgmt/MDS without the Enterprise module shows the same
+         conversion hint the Panorama/FMG import detection gives. #}
+      {% if not manager_ui %}
+      <div id="cp-ee-hint" class="tag" style="display:none;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.55;">
+        Connecting a Check Point management server (SmartCenter or MDS) needs the
+        Enterprise module. A single gateway can be added via the
+        "Check Point (Single Gateway)" entry.
+      </div>
+      {% endif %}
+
+      {# Cisco FTD = source-only via the on-box FDM REST API (admin user/password -
+         FDM has no static API keys). FMC-managed boxes have no FDM API. #}
+      <div id="ftd-hint" class="tag" style="display:none;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
+        Connect a standalone (FDM-managed) FTD as a migration <b>source</b>.
+        FMC is not yet supported.
+      </div>
+      <div id="ftd-fields" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field">
+          <label>FDM User</label>
+          <input type="text" name="ftd_username" class="inp" autocomplete="off">
+        </div>
+      </div>
+
+      {# OPNsense has no fields here on purpose: it is not added as an API host
+         (see the Platform comment above). Its credential pair is entered on the
+         device row, where the key id sits beside the secret field. #}
+
+      {# optional Gaia creds - CP only; used for cluster/gateway network collect #}
+      <div id="cp-mds-gaia" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field">
+          <label>Gaia user <span class="dash">(optional, for network/interface collect)</span></label>
+          <input type="text" name="gaia_user" class="inp" autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Gaia password <span class="dash">(optional)</span></label>
+          <input type="password" name="gaia_password" class="inp" autocomplete="new-password">
+        </div>
+      </div>
+
+      <div id="add-device-legacy-fields" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="field">
+          <label>Management IP / Hostname</label>
+          <input id="add-device-mgmt" type="text" name="mgmt_ip" required
+                 class="inp" style="">
+        </div>
+        <div class="field">
+          <label id="add-device-apikey-label">API Key <span class="dash">(optional)</span></label>
+          <input type="password" name="api_key" class="inp" autocomplete="new-password">
+        </div>
+        <div class="field">
+          <label>Notes <span class="dash">(optional)</span></label>
+          <input type="text" name="notes" placeholder="E.g. datacenter edge FW" class="inp">
+        </div>
+      </div>
+
+      {% if manager_ui %}
+      <div id="panw-panorama-block" style="display:none;flex-direction:column;gap:12px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
+          <input type="checkbox" name="panorama_enabled" id="pano-enabled" onchange="onPanoramaToggle(this.checked)">
+          Managed by Panorama <span class="dash">(push via device-group + template)</span>
+        </label>
+        <div id="pano-fields" style="display:none;flex-direction:column;gap:12px;">
+          <div class="field">
+            <label>Panorama IP / Host</label>
+            <input type="text" name="panorama_host" id="pano-host"
+                   class="inp" style="">
+          </div>
+          <div class="field">
+            <label>Panorama API Key</label>
+            <input type="password" name="panorama_api_key" id="pano-key" class="inp" autocomplete="new-password">
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button type="button" onclick="panoramaDiscover()" class="btn">Discover</button>
+            <span id="pano-discover-status" class="dash" style="font-size:var(--fs-small);"></span>
+          </div>
+          <div class="field">
+            <label>Device-group <span class="dash">(policy target)</span></label>
+            <input type="text" name="panorama_device_group" id="pano-dg" list="pano-dg-list"
+                   placeholder="devicegroup1" class="inp">
+            <datalist id="pano-dg-list"></datalist>
+          </div>
+          <div class="field">
+            <label>Template <span class="dash">(network target)</span></label>
+            <input type="text" name="panorama_template" id="pano-tmpl" list="pano-tmpl-list"
+                   placeholder="template1" class="inp">
+            <datalist id="pano-tmpl-list"></datalist>
+          </div>
+        </div>
+      </div>
+
+      <div id="fgt-fmg-block" style="display:none;flex-direction:column;gap:12px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
+          <input type="checkbox" name="fmg_enabled" id="fmg-enabled" onchange="onFmgToggle(this.checked)">
+          Managed by FortiManager <span class="dash">(push via ADOM package + device-DB)</span>
+        </label>
+        <div id="fmg-fields" style="display:none;flex-direction:column;gap:12px;">
+          <div class="field"><label>FortiManager IP / Host</label>
+            <input type="text" name="fmg_host" id="fmg-host"
+                   class="inp" style=""></div>
+          <div class="field"><label>FortiManager API Key</label>
+            <input type="password" name="fmg_api_key" id="fmg-key" class="inp" autocomplete="new-password"></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button type="button" onclick="fmgDiscover()" class="btn">Discover</button>
+            <span id="fmg-discover-status" class="dash" style="font-size:var(--fs-small);"></span></div>
+          <div class="field"><label>ADOM</label>
+            <input type="text" name="fmg_adom" id="fmg-adom" list="fmg-adom-list"
+                   class="inp"><datalist id="fmg-adom-list"></datalist></div>
+          <div class="field"><label>Policy package <span class="dash">(policy target)</span></label>
+            <input type="text" name="fmg_policy_package" id="fmg-pkg" list="fmg-pkg-list"
+                   placeholder="default" class="inp"><datalist id="fmg-pkg-list"></datalist></div>
+          <div class="field"><label>Managed device <span class="dash">(network target, optional)</span></label>
+            <input type="text" name="fmg_device" id="fmg-dev" list="fmg-dev-list"
+                   placeholder="fortigate-name" class="inp"><datalist id="fmg-dev-list"></datalist></div>
+        </div>
+      </div>
+      {% endif %}
+
+      <div id="add-device-actions" style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+        <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
+        <button type="submit" id="add-device-submit" class="btn">Add</button>
+      </div>
+    </form>
+
+    {# Inline CP GATEWAY wizard (CE) - a SIBLING of the form (its step fragments carry their own
+       <form>). #wizard-content is the HTMX swap target; shown for the 'Check Point Gateway' entry. #}
+    <div id="cp-wizard-inline" style="display:none;">
+      <div id="wizard-content"></div>
+    </div>
+
+    {# Inline log-source discovery - a SIBLING of the form (own <form>, POSTs to
+       /devices/discover). Log sources are never entered manually: the device is
+       registered from the syslog stream by hostname. #}
+    <div id="logsource-inline" style="display:none;">
+      <form method="post" action="/devices/discover" style="display:flex;flex-direction:column;gap:12px;"
+            onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
+        <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.55;">
+          Log-source devices are not entered manually: they are discovered from the syslog
+          stream by hostname. On the firewall, configure remote logging to this Gateshift host
+          (UDP port 514), make sure the relevant rules log, let traffic flow for a few
+          minutes, then discover.
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+          <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
+          <button type="submit" class="btn">Discover from Logs</button>
+        </div>
+      </form>
+      {# Capture upload - the UI alternative to copying files into
+         syslog-ng/logs/ by hand. Own multipart form (sibling pattern of
+         the ASA uploader); the endpoint pre-checks the format, places the
+         file next to the live-received logs and runs discover. #}
+      <form method="post" action="/devices/logs/upload" enctype="multipart/form-data"
+            style="display:flex;flex-direction:column;gap:10px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"
+            onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Uploading…';">
+        <div class="mut" style="font-size:var(--fs-small);">…or upload a syslog capture file: it is placed next to the
+          live-received logs and scanned right away.</div>
+        <input type="file" name="log_file" required accept=".log,.txt,text/plain"
+               class="inp" style="font-size:var(--fs-small);padding:6px;">
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button type="submit" class="btn">Upload &amp; Discover</button>
+        </div>
+      </form>
+    </div>
+
+    {# Inline OPNsense uploader - sibling form, same reason as the ASA one.
+       For projects where the box being replaced is no longer reachable: the
+       exported configuration goes through the same parser as the API path. #}
+    <div id="opn-upload-inline" style="display:none;">
+      <form method="post" action="/devices/add/opnsense" enctype="multipart/form-data"
+            style="display:flex;flex-direction:column;gap:12px;">
+        <input type="hidden" class="gs-add-next" name="next" value="">
+        <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
+          Export it on the firewall under <b>System &gt; Configuration &gt; Backups</b>.
+          Secrets are stripped before anything is stored - private keys, pre-shared
+          keys and password hashes never reach the database.
+          <div style="margin-top:7px;">To use this firewall as a migration
+            <b>target</b> as well, add an API key and secret on its device row
+            afterwards: pushing needs the box, reading it does not.</div>
+        </div>
+        <div class="field">
+          <label>Configuration file <span class="dash">(config.xml)</span></label>
+          <input type="file" name="config_file" accept=".xml" required class="inp" style="padding:6px 10px;">
+        </div>
+        <div class="field">
+          <label>Display name <span class="dash">(optional)</span></label>
+          <input type="text" name="display_name" placeholder="E.g. branch-opn-01" class="inp">
+        </div>
+        <div class="field">
+          <label>Notes <span class="dash">(optional)</span></label>
+          <input type="text" name="notes" placeholder="E.g. site to be decommissioned" class="inp">
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+          <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
+          <button type="submit" class="btn">Add</button>
+        </div>
+      </form>
+    </div>
+
+    {# Inline ASA uploader - a SIBLING of the form (needs its own multipart <form>).
+       Shown for the 'Cisco ASA' entry; the hostname comes from the config itself. #}
+    <div id="asa-inline" style="display:none;">
+      <form method="post" action="/devices/add/asa" enctype="multipart/form-data"
+            style="display:flex;flex-direction:column;gap:12px;">
+        <input type="hidden" class="gs-add-next" name="next" value="">
+        <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
+          Cisco ASA devices are added from a "show running-config" dump.
+        </div>
+        <div class="field">
+          <label>Config file</label>
+          <input type="file" name="config_file" required class="inp" style="padding:6px 10px;">
+        </div>
+        <div class="field">
+          <label>Display name <span class="dash">(optional)</span></label>
+          <input type="text" name="display_name" placeholder="E.g. branch-asa-01" class="inp">
+        </div>
+        <div class="field">
+          <label>Notes <span class="dash">(optional)</span></label>
+          <input type="text" name="notes" placeholder="E.g. datacenter edge FW" class="inp">
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+          <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
+          <button type="submit" class="btn">Add</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+function openAddModal(opts) {
+  const m = document.getElementById('add-device-modal');
+  if (!m) return;
+  // Where the add flow returns to: the project wizard passes its own
+  // page (next); the inventory page passes nothing and lands on /devices.
+  const nxt = (opts && opts.next) || '';
+  document.querySelectorAll('.gs-add-next').forEach(function (i) { i.value = nxt; });
+  m.classList.remove('hidden');
+  m.style.display = 'flex';
+  document.addEventListener('keydown', _addModalEsc, true);
+  const first = document.getElementById('add-device-mgmt');
+  if (first) first.focus();
+}
+function closeAddModal() {
+  const m = document.getElementById('add-device-modal');
+  if (!m) return;
+  m.classList.add('hidden');
+  m.style.display = '';
+  document.removeEventListener('keydown', _addModalEsc, true);
+}
+function _addModalEsc(e) {
+  if (e.key === 'Escape') { e.preventDefault(); closeAddModal(); }
+}
+function _cpWizardReset() {
+  const wc = document.getElementById('wizard-content');
+  if (wc && wc.dataset.loaded) { wc.innerHTML = ''; delete wc.dataset.loaded; }
+  const inline = document.getElementById('cp-wizard-inline');
+  if (inline) inline.style.display = 'none';
+}
+const MANAGER_UI = {{ 'true' if manager_ui else 'false' }};
+function onAddPlatformChange(value) {
+  const isCpMgmt = (value === 'checkpoint');       // Mgmt server / MDS (EE) - plain add; CE shows hint
+  const isCpGw   = (value === 'checkpoint_gw');    // single gateway (CE) - inline wizard
+  const isAsa    = (value === 'asa');
+  const isFtd    = (value === 'firepower');        // FDM user/password instead of API key
+  const isLogSrc = (value === 'logsource');        // syslog discovery - no manual add
+  const isOpnUp  = (value === 'opnsense_upload');  // exported config.xml - the only OPNsense entry
+  const asaInline = document.getElementById('asa-inline');
+  const opnUpInline = document.getElementById('opn-upload-inline');
+  const logInline = document.getElementById('logsource-inline');
+  const fields = document.getElementById('add-device-legacy-fields');
+  const submit = document.getElementById('add-device-submit');
+  const actions= document.getElementById('add-device-actions');
+  const mgmt   = document.getElementById('add-device-mgmt');
+  const gaia   = document.getElementById('cp-mds-gaia');
+  const cpInline = document.getElementById('cp-wizard-inline');
+  const ftdHint   = document.getElementById('ftd-hint');
+  const ftdFields = document.getElementById('ftd-fields');
+  const apiLabel  = document.getElementById('add-device-apikey-label');
+  if (asaInline) asaInline.style.display = isAsa ? 'block' : 'none';
+  if (opnUpInline) opnUpInline.style.display = isOpnUp ? 'block' : 'none';
+  if (logInline) logInline.style.display = isLogSrc ? 'block' : 'none';
+  const cpEeHint = document.getElementById('cp-ee-hint');
+  if (cpEeHint) cpEeHint.style.display = (isCpMgmt && !MANAGER_UI) ? 'block' : 'none';
+  if (gaia)   gaia.style.display   = (isCpMgmt && MANAGER_UI) ? 'flex' : 'none';
+  if (ftdHint)   ftdHint.style.display   = isFtd ? 'block' : 'none';
+  if (ftdFields) ftdFields.style.display = isFtd ? 'flex'  : 'none';
+  if (apiLabel)  apiLabel.innerHTML = isFtd
+    ? 'FDM Password'
+    : 'API Key <span class="dash">(optional)</span>';
+  // CP GATEWAY (CE): the inline 3-step wizard carries its own form + actions. Everything else
+  // (incl. CP Mgmt/MDS) uses the plain fields + Add. ASA shows its inline uploader form.
+  if (cpInline) cpInline.style.display = isCpGw ? 'block' : 'none';
+  if (isCpGw) {
+    const wc = document.getElementById('wizard-content');
+    if (wc && !wc.dataset.loaded) {
+      wc.dataset.loaded = '1';
+      if (window.htmx) htmx.ajax('GET', '/devices/add/cp/step1', '#wizard-content');
+    }
+  } else {
+    _cpWizardReset();
+  }
+  const plainHidden = isAsa || isOpnUp || isCpGw || isLogSrc || (isCpMgmt && !MANAGER_UI);
+  if (fields) fields.style.display = plainHidden ? 'none' : 'flex';
+  if (submit) submit.style.display = plainHidden ? 'none' : '';
+  if (actions)actions.style.display= plainHidden ? 'none' : 'flex';
+  if (mgmt)   mgmt.required = !plainHidden;
+  // Panorama-managed option is panw-only. Reset it when switching away so a
+  // hidden checkbox can't smuggle a config.panorama onto another platform.
+  const isPanw = (value === 'panw');
+  const panoBlock = document.getElementById('panw-panorama-block');
+  if (panoBlock) panoBlock.style.display = isPanw ? 'flex' : 'none';
+  if (!isPanw) {
+    const cb = document.getElementById('pano-enabled');
+    if (cb && cb.checked) { cb.checked = false; onPanoramaToggle(false); }
+  }
+  const isFgt = (value === 'fortigate');
+  const fmgBlock = document.getElementById('fgt-fmg-block');
+  if (fmgBlock) fmgBlock.style.display = isFgt ? 'flex' : 'none';
+  if (!isFgt) {
+    const fcb = document.getElementById('fmg-enabled');
+    if (fcb && fcb.checked) { fcb.checked = false; onFmgToggle(false); }
+  }
+}
+
+function onPanoramaToggle(checked) {
+  const f = document.getElementById('pano-fields');
+  if (f) f.style.display = checked ? 'flex' : 'none';
+  // The Panorama host/api_key replace the direct mgmt fields - hide them so the
+  // operator isn't asked twice, and swap the "required" flags accordingly.
+  const legacy = document.getElementById('add-device-legacy-fields');
+  const mgmt = document.getElementById('add-device-mgmt');
+  if (legacy) legacy.style.display = checked ? 'none' : 'flex';
+  if (mgmt) mgmt.required = !checked;
+  ['pano-host','pano-key','pano-dg','pano-tmpl'].forEach(function(id){
+    const el = document.getElementById(id); if (el) el.required = checked;
+  });
+}
+
+function panoramaDiscover() {
+  const host = (document.getElementById('pano-host').value || '').trim();
+  const key = (document.getElementById('pano-key').value || '').trim();
+  const status = document.getElementById('pano-discover-status');
+  if (!host || !key) { if (status) status.textContent = 'Enter host + API key first'; return; }
+  if (status) status.textContent = 'Discovering…';
+  fetch('/devices/panorama/discover', {
+    method: 'POST',
+    body: new URLSearchParams({host: host, api_key: key})
+  })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d.ok) { if (status) status.textContent = d.error || 'Failed'; return; }
+      const fill = function(listId, items){
+        const dl = document.getElementById(listId); if (!dl) return;
+        dl.innerHTML = (items||[]).map(function(x){ return '<option value="'+x+'">'; }).join('');
+      };
+      fill('pano-dg-list', d.device_groups);
+      fill('pano-tmpl-list', d.templates);
+      if (status) status.textContent = (d.model || 'Panorama') + ': ' +
+        (d.device_groups||[]).length + ' DG, ' + (d.templates||[]).length + ' templates';
+    })
+    .catch(function(e){ if (status) status.textContent = 'Error: ' + e; });
+}
+
+function onFmgToggle(checked) {
+  const f = document.getElementById('fmg-fields');
+  if (f) f.style.display = checked ? 'flex' : 'none';
+  const legacy = document.getElementById('add-device-legacy-fields');
+  const mgmt = document.getElementById('add-device-mgmt');
+  if (legacy) legacy.style.display = checked ? 'none' : 'flex';
+  if (mgmt) mgmt.required = !checked;
+  ['fmg-host','fmg-key','fmg-pkg'].forEach(function(id){
+    const el = document.getElementById(id); if (el) el.required = checked;
+  });
+}
+
+function fmgDiscover() {
+  const host = (document.getElementById('fmg-host').value || '').trim();
+  const key = (document.getElementById('fmg-key').value || '').trim();
+  const adom = (document.getElementById('fmg-adom').value || 'root').trim() || 'root';
+  const status = document.getElementById('fmg-discover-status');
+  if (!host || !key) { if (status) status.textContent = 'Enter host + API key first'; return; }
+  if (status) status.textContent = 'Discovering…';
+  fetch('/devices/fortimanager/discover', {
+    method: 'POST',
+    body: new URLSearchParams({host: host, api_key: key, adom: adom})
+  })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d.ok) { if (status) status.textContent = d.error || 'Failed'; return; }
+      const fill = function(listId, items){
+        const dl = document.getElementById(listId); if (!dl) return;
+        dl.innerHTML = (items||[]).map(function(x){ return '<option value="'+x+'">'; }).join('');
+      };
+      fill('fmg-adom-list', d.adoms);
+      fill('fmg-pkg-list', d.policy_packages);
+      fill('fmg-dev-list', d.devices);
+      if (status) status.textContent = (d.version || 'FMG') + ': ' + (d.adoms||[]).length +
+        ' ADOM, ' + (d.policy_packages||[]).length + ' pkg, ' + (d.devices||[]).length +
+        ' dev (adom ' + d.adom + ')';
+    })
+    .catch(function(e){ if (status) status.textContent = 'Error: ' + e; });
+}
+</script>

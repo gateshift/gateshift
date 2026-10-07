@@ -58,6 +58,9 @@ SCHEMA: dict[str, dict] = {
     # appears because target_zone_native covers firepower, but the
     # bulk-form renders no fields.
     "firepower": {"fields": []},
+    # OPNsense zones are interface groups - membership is the whole model,
+    # there are no per-zone knobs to carry.
+    "opnsense": {"fields": []},
 }
 
 

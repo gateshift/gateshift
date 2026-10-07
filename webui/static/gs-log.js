@@ -59,8 +59,10 @@
   function histRowHtml(j) {
     var tone = TONE[j.status] || 'var(--tx2)';
     var isPipe = (j.kind === 'pipeline');
-    // import/collect rows are device-scoped (no target): "import · <device>"
-    var isSrcOnly = (j.kind === 'import' || j.kind === 'collect');
+    // import/collect/backup/restore rows are device-scoped (no target):
+    // "import · <device>", "backup · <device>"
+    var isSrcOnly = (j.kind === 'import' || j.kind === 'collect'
+                     || j.kind === 'backup' || j.kind === 'restore');
     // upload rows are GLOBAL (no device at all): "upload · failed · reason"
     var isUpload = (j.kind === 'upload');
     var kindChip = (j.kind === 'generate')
@@ -74,7 +76,7 @@
       ? ' · <span style="color:var(--tx3);">' + esc(String(j.summary).slice(0, 120)) + '</span>'
       : '';
     var attach = (j.status === 'running' && typeof window.attachPushJob === 'function')
-      ? ' <button type="button" class="btn sm" onclick="event.stopPropagation();attachPushJob(\'' + j.job_id + '\', \'' + j.strand + '\')">attach</button>'
+      ? ' <button type="button" class="btn" onclick="event.stopPropagation();attachPushJob(\'' + j.job_id + '\', \'' + j.strand + '\')">attach</button>'
       : '';
     var who;
     if (isUpload) {

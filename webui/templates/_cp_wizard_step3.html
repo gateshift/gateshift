@@ -3,15 +3,16 @@
 {% with step = 3 %}{% include "_cp_wizard_progress.html" %}{% endwith %}
 
 {% if error %}
-<div class="tag bad" style="display:flex;width:auto;margin:0 0 12px;padding:8px 12px;border-radius:0;font-size:12px;color:var(--danger);border:1px solid var(--danger);">
+<div class="tag bad" style="display:flex;width:auto;margin:0 0 12px;padding:8px 12px;border-radius:0;font-size:var(--fs-body);color:var(--danger);border:1px solid var(--danger);">
   <span style="font-weight:600;margin-right:6px;">Error:</span>{{ error }}
   {% if existing_device_id %}
-  - see <a href="/devices" style="color:var(--danger);text-decoration:underline;">existing device #{{ existing_device_id }}</a>.
+  - see <a href="/projects?edit={{ existing_device_id }}" style="color:var(--danger);text-decoration:underline;">existing device #{{ existing_device_id }}</a>.
   {% endif %}
 </div>
 {% endif %}
 
 <form hx-post="/devices/add/cp/save"
+      hx-include="#gs-add-next"
       hx-target="#wizard-content"
       hx-swap="innerHTML"
       hx-disabled-elt="find button[type=submit]"
@@ -23,18 +24,18 @@
   <input type="hidden" name="package"   value="{{ form_package }}">
 
   <div class="field">
-    <label style="font-size:13px;color:var(--tx);font-weight:500;">
+    <label style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
       Pick the gateway running <span style="color:var(--blue);">{{ form_package }}</span>
     </label>
     {% if not gateways %}
-      <div class="tag warn" style="display:flex;width:auto;padding:10px 14px;border-radius:0;font-size:12px;">
+      <div class="tag warn" style="display:flex;width:auto;padding:10px 14px;border-radius:0;font-size:var(--fs-body);">
         No gateways are currently running this policy. In Check Point, install the policy on a gateway first (SmartConsole → Install Policy).
       </div>
     {% else %}
       <div style="display:flex;flex-direction:column;gap:6px;max-width:720px;">
         {% for gw in gateways %}
         {% set _disabled = not gw.supported %}
-        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg1);border:1px solid var(--line);border-radius:0;font-size:12px;{% if _disabled %}opacity:0.5;cursor:not-allowed;{% else %}cursor:pointer;{% endif %}"
+        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg1);border:1px solid var(--line);border-radius:0;font-size:var(--fs-body);{% if _disabled %}opacity:0.5;cursor:not-allowed;{% else %}cursor:pointer;{% endif %}"
                {% if _disabled %}title="{{ gw.reason }}"{% endif %}>
           <input type="radio" name="gateway_combo"
                  value="{{ gw.uid }}|{{ gw.type }}"
@@ -48,11 +49,11 @@
           {% if 'cluster' in gw.type %}
             <span class="chip wan">Cluster</span>
           {% else %}
-            <span class="tag" style="padding:1px 8px;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;">Gateway</span>
+            <span class="tag" style="padding:1px 8px;font-size:var(--fs-caption);">Gateway</span>
           {% endif %}
           <span class="dash" style="">{{ gw.ipv4 or '-' }}</span>
           {% if _disabled %}
-          <span style="margin-left:auto;color:var(--amber);opacity:0.7;font-style:italic;font-size:11px;">{{ gw.reason }}</span>
+          <span style="margin-left:auto;color:var(--amber);opacity:0.7;font-style:italic;font-size:var(--fs-small);">{{ gw.reason }}</span>
           {% endif %}
         </label>
         {% endfor %}
@@ -64,20 +65,21 @@
   <input type="hidden" name="gateway_type" id="gw_type_input" value="">
 
   <div style="padding-top:8px;border-top:1px solid var(--line);">
-    <div style="font-size:13px;color:var(--tx);font-weight:500;margin-bottom:6px;">
+    <div style="font-size:var(--fs-body);color:var(--tx);font-weight:500;margin-bottom:6px;">
       Gaia credentials <span class="dash" style="font-weight:400;">(optional)</span>
     </div>
-    <p class="dash" style="margin:0 0 12px;font-size:12px;">
-      Only needed if interfaces use "defined by routing" topology. Skip otherwise - Mgmt-API supplies the rest.
-    </p>
+    {# two columns in a 400px dialog: a grid cell will not shrink below its
+       input's intrinsic width unless told to, and a password field's default
+       width then pushes the right column past the dialog edge (user report
+       2026-10-07) - the cells and the inputs give up that minimum #}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:440px;">
-      <div class="field">
+      <div class="field" style="min-width:0;">
         <label>Gaia User</label>
-        <input type="text" name="gaia_user" class="inp" style="font-size:12px;padding:7px 10px;" autocomplete="off">
+        <input type="text" name="gaia_user" class="inp" style="font-size:var(--fs-body);padding:7px 10px;width:100%;min-width:0;box-sizing:border-box;" autocomplete="off">
       </div>
-      <div class="field">
+      <div class="field" style="min-width:0;">
         <label>Gaia Password</label>
-        <input type="password" name="gaia_password" class="inp" style="font-size:12px;padding:7px 10px;" autocomplete="new-password">
+        <input type="password" name="gaia_password" class="inp" style="font-size:var(--fs-body);padding:7px 10px;width:100%;min-width:0;box-sizing:border-box;" autocomplete="new-password">
       </div>
     </div>
   </div>
@@ -89,9 +91,9 @@
             hx-swap="innerHTML"
             hx-include="closest form"
             hx-disabled-elt="this"
-            class="btn ghost sm">← Back</button>
-    <button type="submit" class="btn primary sm">Save device</button>
-    <a href="/devices" class="btn ghost sm">Cancel</a>
+            class="btn">← Back</button>
+    <button type="submit" class="btn">Save Device</button>
+    <button type="button" class="btn" onclick="closeAddModal()">Cancel</button>
     <span class="htmx-indicator dash" style="font-style:italic;">Saving…</span>
   </div>
 </form>

@@ -73,7 +73,7 @@ def get_token(base_url: str, username: str, password: str) -> str:
         raise FtdAuthError(f"device unreachable: {exc}")
     if resp.status_code in (400, 401, 403):
         raise FtdAuthError(
-            f"FDM login rejected (HTTP {resp.status_code}) - check the "
+            f"FDM login rejected (HTTP {resp.status_code}): check the "
             "admin username/password")
     resp.raise_for_status()
     token = (resp.json() or {}).get("access_token")

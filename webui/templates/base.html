@@ -18,8 +18,14 @@
     /* header groups: plain text, no boxes (design handoff - no bordered
        elements anywhere in the header) */
     .hdr-grp { display:inline-flex; align-items:center; gap:6px; padding:0; border:none; border-radius:0; }
-    .hdr-grp-lbl { font-size:12px; color:var(--ctrl); text-transform:capitalize; letter-spacing:.04em; font-weight:700; }
-    .hdr-cap { font-size:10px; color:var(--tx3); text-transform:uppercase; letter-spacing:.05em; }
+    .hdr-grp-lbl { font-size:var(--fs-body); color:var(--ctrl); font-weight:700; }
+    /* the project line: the word and the name in one treatment (user decision 2026-10-03) */
+    .hdr-project { font-size:var(--fs-body); font-weight:600; color:var(--tx); letter-spacing:0; }
+    .hdr-cap { font-size:var(--fs-caption); color:var(--tx3); }
+    .hdr-logout { background:none; border:none; padding:0; cursor:pointer; font-family:var(--sans); font-size:var(--fs-caption); color:var(--tx3) !important; }
+    .hdr-logout:hover { color:var(--tx) !important; }
+    /* header project picker (U16, user decision 2026-10-04): left of the version chip, every tenant's projects */
+    .hdr-project-pick { width:260px; font-size:var(--fs-small); padding:4px 24px 4px 8px; appearance:none; -webkit-appearance:none; background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>'); background-repeat:no-repeat; background-position:right 8px center; text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }
     .hdr-pair { display:inline-flex; align-items:center; gap:4px; }
     /* header dropdowns must READ as dropdowns (user feedback): dark well,
        visible border, white text - the inline chevron background-image
@@ -29,7 +35,7 @@
     .hd select {
       background-color: var(--bg) !important; border: 1px solid var(--ctrl-line) !important;
       border-radius: 0 !important; color: var(--ctrl) !important;
-      font-family: var(--sans); font-size: 11.5px !important;
+      font-family: var(--sans); font-size:var(--fs-small) !important;
       padding-top: 3px !important; padding-bottom: 3px !important; padding-left: 8px !important;
     }
     .hd select:hover { border-color: var(--accent) !important; }
@@ -37,10 +43,10 @@
       background: transparent !important; border: none !important;
       border-bottom: 1px solid var(--ctrl-line) !important;
       border-radius: 0 !important; color: var(--ctrl);
-      font-family: var(--sans); font-size: 11.5px !important;
+      font-family: var(--sans); font-size:var(--fs-small) !important;
     }
     .hd select option { background: var(--surface); color: var(--tx); }
-    .scope-add { border:1px solid var(--line); background:var(--bg2); color:var(--tx2); border-radius:0; width:20px; height:20px; line-height:18px; text-align:center; font-size:14px; cursor:pointer; padding:0; margin-left:2px; }
+    .scope-add { border:1px solid var(--line); background:var(--bg2); color:var(--tx2); border-radius:0; width:20px; height:20px; line-height:18px; text-align:center; font-size:var(--fs-title); cursor:pointer; padding:0; margin-left:2px; }
     .scope-add:hover { color:var(--green); border-color:var(--green); }
     .scope-del:hover { color:var(--amber); border-color:var(--amber); }
   </style>
@@ -63,7 +69,7 @@
       <svg style="width:20px;height:20px;color:var(--green);flex-shrink:0;animation:gateshift-spin 1s linear infinite;" viewBox="0 0 24 24" fill="none">
         <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
       </svg>
-      <span style="color:var(--tx);font-size:13px;">Loading…</span>
+      <span style="color:var(--tx);font-size:var(--fs-body);">Loading…</span>
     </div>
   </div>
 
@@ -76,11 +82,11 @@
         <svg style="width:20px;height:20px;color:var(--green);flex-shrink:0;animation:gateshift-spin 1s linear infinite;" viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 20"/>
         </svg>
-        <span id="zone-busy-label" style="color:var(--tx);font-size:13px;">Applying zone changes…</span>
-        <span id="zone-busy-elapsed" class="dash" style="font-size:12px;margin-left:auto;"></span>
+        <span id="zone-busy-label" style="color:var(--tx);font-size:var(--fs-body);">Applying zone changes…</span>
+        <span id="zone-busy-elapsed" class="dash" style="font-size:var(--fs-body);margin-left:auto;"></span>
       </div>
       <div id="zone-busy-progress" class="hidden" style="margin-top:12px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--tx2);margin-bottom:4px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;font-size:var(--fs-body);color:var(--tx2);margin-bottom:4px;">
           <span id="zone-busy-step"></span>
           <span id="zone-busy-pct"></span>
         </div>
@@ -88,7 +94,7 @@
           <div id="zone-busy-bar" style="background:var(--green);height:100%;border-radius:0;width:0%;transition:width .3s;"></div>
         </div>
       </div>
-      <div id="zone-busy-log" class="hidden" style="margin-top:12px;max-height:240px;overflow-y:auto;font-size:12px;line-height:1.4;"></div>
+      <div id="zone-busy-log" class="hidden" style="margin-top:12px;max-height:240px;overflow-y:auto;font-size:var(--fs-body);line-height:1.4;"></div>
     </div>
   </div>
 
@@ -126,7 +132,7 @@
        56px surface bar per design handoff: live-text wordmark + claim,
        plain-text pickers (no boxes), source/target breadcrumb when inside
        a device workspace. ── #}
-  <header class="hd">
+  <header class="hd" style="position:relative;">
     {# Brand lockup: live-text wordmark, the 'a' replaced by the Lambda
        mark (inline SVG so it scales with the type and takes the accent
        token; legs on the baseline, 0.725em tall = height of the
@@ -135,11 +141,11 @@
        the lockup draft. Two-bar Lambda mark - same paths as the favicon.
        viewBox is the mark's tight bounding box so it sits snug in the
        lockup; fill comes from the .brand-a token (theme-aware). #}
-    <a href="/devices" title="Gateshift - back to devices"
+    <a href="/projects" title="Gateshift: back to the projects"
        style="display:inline-flex;align-items:center;text-decoration:none;">
       <span class="brand">g<svg class="brand-a" viewBox="12.644 1.055 38.712 62.945" aria-hidden="true"><path d="M28.127 1.055 L34.919 2.748 L19.647 64 L16.040 64 L12.644 63.153 Z"/><path d="M35.873 1.055 L29.081 2.748 L44.353 64 L47.960 64 L51.356 63.153 Z"/></svg>teshift</span>
       <span class="brand-rule" aria-hidden="true"></span>
-      <span class="brand-claim">the firewall<br>migration tool</span>
+      <span class="brand-claim">The firewall<br>migration tool</span>
     </a>
     {# Devices-First IA: source is picked on /devices, not via a header
        dropdown. Workspace shows source as mono label, target as picker.
@@ -148,16 +154,18 @@
     {% if request.url.path.startswith('/rules') and device %}
     <input type="hidden" id="device-select" name="device" value="{{ device }}">
     <div class="crumb">
-      <span class="arr">/</span>
-      {# ── SOURCE group: the source device + (for a Panorama) its network/policy scope ── #}
-      <span class="hdr-grp" title="Source device + scope">
-        <span class="hdr-grp-lbl">source</span>
-        {% if pano_dgs is defined and pano_dgs and pano_manager_id %}
-      <a href="/manager/{{ pano_manager_id }}" class="btn sm" title="Open the Manager-View (multi-scope workbench)">{{ pano_manager_label or device }}<span style="color:var(--tx3);font-size:10px;margin-left:5px;">&#9656;&nbsp;mgr</span></a>
-      {% else %}
-      <a href="/devices" class="btn sm" title="Source device - click to change (Devices page)">{{ device }}</a>
+      {# The project is named on the Overview tab (U8); the header carries only
+         the EE scope pickers below (user decision 2026-10-03). The snapshot
+         button sits in the workspace's top row, beside the view hint. #}
+      {# ── SOURCE group: only for an EE manager/scope source - its network/policy
+           scope pickers. A plain device is named on the Overview tab; the header
+           stays with the project (user decision 2026-10-03). ── #}
+      {% if pano_dgs is defined and pano_dgs %}
+      <span class="hdr-grp" title="Source scope">
+        <span class="hdr-grp-lbl">Source</span>
+        {% if pano_manager_id %}
+      <a href="/manager/{{ pano_manager_id }}" class="btn" title="Open the Manager-View (multi-scope workbench)">{{ pano_manager_label or device }}<span style="color:var(--tx3);font-size:var(--fs-caption);margin-left:5px;">&#9656;&nbsp;Manager</span></a>
       {% endif %}
-        {% if pano_dgs is defined and pano_dgs %}
         {% set _mgr_is_pano = (pano_manager_platform is not defined) or (pano_manager_platform == 'panw') %}
         {# link toggle + network dropdown render only when the manager HAS network scopes
            (templates / device-db / gateways) - an empty dropdown + a link with nothing to
@@ -168,7 +176,7 @@
            install-target device). #}
         <label class="picker" title="{% if _mgr_is_pano %}Link: network scope follows the device-group's bound template-stack{% elif pano_manager_platform == 'checkpoint' %}Link: network follows the package's installation-target gateway{% else %}Link: network follows the package's install-target device{% endif %}"
                style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none;">
-          <span style="display:inline-flex;align-items:center;color:var(--tx2);" aria-label="link - network follows the policy scope's bound network layer">
+          <span style="display:inline-flex;align-items:center;color:var(--tx2);" aria-label="link: network follows the policy scope's bound network layer">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           </span>
           <span style="position:relative;display:inline-flex;align-items:center;">
@@ -181,7 +189,7 @@
            stack); FMG = the managed devices (* = the package's install-target).
            data-net-relevant=1 = the policy scope's own composition (grayed when "link" is on) #}
         <span class="hdr-pair">
-          <span class="hdr-cap">{{ 'tmpl' if _mgr_is_pano else ('gateway' if pano_manager_platform == 'checkpoint' else 'device') }}</span>
+          <span class="hdr-cap">{{ 'Template' if _mgr_is_pano else ('Gateway' if pano_manager_platform == 'checkpoint' else 'Device') }}</span>
           <select id="pano-net-select" class="picker" title="{% if _mgr_is_pano %}Network scope - template or template-stack (interfaces/routes/zones){% elif pano_manager_platform == 'checkpoint' %}Network layer - a gateway/cluster's interfaces/routes (topology + Gaia){% else %}Network layer - a managed device's interfaces/routes/zones (device-db){% endif %}"
                   style="appearance:none;-webkit-appearance:none;padding-right:22px;"
                   onchange="if(this.value)location.href='/rules?device={{ device | urlencode }}&template='+encodeURIComponent(this.value)">
@@ -198,7 +206,7 @@
         {% endif %}{# /pano_templates #}
         {# policy scope switcher - drives the rule/NAT/PBF/SSL tabs; no empty option #}
         <span class="hdr-pair">
-          <span class="hdr-cap">{{ 'dg' if _mgr_is_pano else 'scope' }}</span>
+          <span class="hdr-cap">{{ 'Device Group' if _mgr_is_pano else 'Scope' }}</span>
           <select class="picker" title="{{ 'Device-group (policy scope)' if _mgr_is_pano else 'Scope (global / ADOM / policy package)' }}"
                   style="appearance:none;-webkit-appearance:none;padding-right:22px;"
                   onchange="_panoGoDG(this.value)">
@@ -223,8 +231,8 @@
             {% endif %}
           </select>
         </span>
-        {% endif %}
       </span>
+      {% endif %}
       {% if pano_dgs is defined and pano_dgs %}
       <script>
         function _panoLinked(){ return localStorage.getItem('pano_net_linked') !== '0'; }  /* default LINKED */
@@ -259,25 +267,21 @@
       </script>
       {% endif %}
       {% if target_devices is defined and target_devices and selected_device %}
+      {# The project defines the target (D3): the hidden input the HTMX includes
+         (#target-device-select) read. The device itself is named on the Overview
+         tab; the header shows only an EE manager target's egress scope. #}
+      <input type="hidden" id="target-device-select" name="target" value="{{ selected_target.id if selected_target else '' }}">
+      {% if (target_pano_dgs is defined and target_pano_dgs) or (target_cp_packages is defined and target_cp_packages) %}
       <span class="arr flow" aria-hidden="true"><span class="a1">&gt;</span><span class="a2">&gt;</span></span>
-      {# ── TARGET group: the migration destination device + (for a Panorama target) the egress scope ── #}
-      <span class="hdr-grp" title="Target device + egress scope (migration destination)">
-        <span class="hdr-grp-lbl">target</span>
-        {# Target picker - native <select> styled to the token .picker pill; chevron via background-image. #}
-        <select id="target-device-select" name="target" title="Target device for migration"
-                onchange="changeTargetDevice(this.value)" class="picker"
-                style="appearance:none;-webkit-appearance:none;padding-right:24px;background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>');background-repeat:no-repeat;background-position:right 8px center;">
-          {# No empty "- target device -" state: the server defaults selected_target to the first. #}
-          {% for t in target_devices %}
-          <option value="{{ t.id }}" {% if selected_target and selected_target.id == t.id %}selected{% endif %}>{{ t.name }} · {{ t.platform | plat }}</option>
-          {% endfor %}
-        </select>
+      {# ── TARGET group: an EE manager target's egress scope ── #}
+      <span class="hdr-grp" title="Target egress scope (migration destination)">
+        <span class="hdr-grp-lbl">Target</span>
         {% if target_pano_dgs is defined and target_pano_dgs %}
         {# Panorama TARGET (dst) - the scope to EGRESS into: template (network) + device-group (policy).
            startPush sends these; deploy_push builds config.panorama from them. #}
         <span class="hdr-pair">
-          <span class="hdr-cap">tmpl</span>
-          <select id="target-template-select" class="picker" title="Egress into network scope - template OR template-stack (a stack writes into its own-config layer)"
+          <span class="hdr-cap">Template</span>
+          <select id="target-template-select" class="picker" title="Egress into network scope: template OR template-stack (a stack writes into its own-config layer)"
                   onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
                   style="appearance:none;-webkit-appearance:none;padding-right:20px;">
             {% if target_pano_stacks %}<optgroup label="Template-Stacks">
@@ -291,7 +295,7 @@
           <button type="button" id="scope-del-net" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('network')">×</button>
         </span>
         <span class="hdr-pair">
-          <span class="hdr-cap">dg</span>
+          <span class="hdr-cap">Device Group</span>
           <select id="target-dg-select" class="picker" title="Egress into device-group"
                   onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
                   style="appearance:none;-webkit-appearance:none;padding-right:20px;">
@@ -306,7 +310,7 @@
            selected package label; deploy_push resolves it to config.cp.domain + policy_package.
            Packages are created via Manager-View pkg-CRUD, not here (no + in V1). #}
         <span class="hdr-pair">
-          <span class="hdr-cap">pkg</span>
+          <span class="hdr-cap">Package</span>
           <select id="target-cp-pkg-select" class="picker" title="Egress into Check Point domain / policy-package"
                   onchange="if(typeof _cpSyncGw==='function')_cpSyncGw(); if(typeof _saveDstScope==='function')_saveDstScope();"
                   style="appearance:none;-webkit-appearance:none;padding-right:20px;">
@@ -318,8 +322,8 @@
            per member Gaia, VIPs/zones via the domain Mgmt session). *-defaults to the selected
            package's install-target (data-gw, synced on pkg change) - overridable. #}
         <span class="hdr-pair">
-          <span class="hdr-cap">gw</span>
-          <select id="target-cp-gw-select" class="picker" title="Network egress gateway/cluster - defaults to the package's install target"
+          <span class="hdr-cap">Gateway</span>
+          <select id="target-cp-gw-select" class="picker" title="Network egress gateway/cluster: defaults to the package's install target"
                   onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
                   style="appearance:none;-webkit-appearance:none;padding-right:20px;">
             {% for g in target_cp_gateways %}<option value="{{ g }}">{{ g }}</option>{% endfor %}
@@ -343,7 +347,9 @@
         {% endif %}
       </span>
       {% endif %}
+      {% endif %}
     </div>
+    {# The project's device cards live on the workspace's Overview tab (U8). #}
     {% endif %}
 
     {# Manager-View: identity crumb in the top bar (parallel to the /rules source crumb) -
@@ -352,9 +358,9 @@
     <div class="crumb">
       <span class="arr">/</span>
       {# SOURCE group - this manager IS the migration source; label it like the /rules source crumb #}
-      <span class="hdr-grp" title="Source device - this manager">
-        <span class="hdr-grp-lbl">source</span>
-        <span style="color:var(--tx);font-size:12px;">{{ manager_label }}</span>
+      <span class="hdr-grp" title="Source device, this manager">
+        <span class="hdr-grp-lbl">Source</span>
+        <span style="color:var(--tx);font-size:var(--fs-body);">{{ manager_label }}</span>
       </span>
       <span class="mgr-toggle">
         <span class="on">Manager</span>
@@ -365,10 +371,10 @@
       {# DEST group - pick the deploy target: this manager (optimize in place) or another
          manager (migrate). The Deploy tab reacts to this (mgrDestChange in manager.html). #}
       {% if dest_managers %}
-      <span class="hdr-grp" title="Deploy target - this manager = optimize in place, another manager = migrate" style="margin-left:4px;">
-        <span class="hdr-grp-lbl">target</span>
+      <span class="hdr-grp" title="Deploy target: this manager = optimize in place, another manager = migrate" style="margin-left:4px;">
+        <span class="hdr-grp-lbl">Target</span>
         <select id="mgr-dest-picker" onchange="if(window.mgrDestChange) mgrDestChange();"
-                style="background:var(--bg2);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:12px;padding:2px 6px;">
+                style="background:var(--bg2);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);padding:2px 6px;">
           {% for d in dest_managers %}
           <option value="{{ d.id }}"{% if d.is_self %} data-self="1"{% endif %} data-plat="{{ d.platform }}">{{ d.name }}</option>
           {% endfor %}
@@ -382,8 +388,8 @@
          + staged-scope deploy) is a Panorama driver feature - hidden for other managers (FMG). #}
       {% if manager and manager.platform == 'panw' %}
       <span class="hdr-pair" style="margin-left:6px;">
-        <span class="hdr-cap">tmpl</span>
-        <select id="target-template-select" class="picker" title="Network scope on this Panorama - template or template-stack. Use + to create one."
+        <span class="hdr-cap">Template</span>
+        <select id="target-template-select" class="picker" title="Network scope on this Panorama, template or template-stack. Use + to create one."
                 onchange="if(typeof _toggleScopeDelBtns==='function')_toggleScopeDelBtns();"
                 style="appearance:none;-webkit-appearance:none;padding-right:20px;">
           {% set _mstacks = (net_scopes or []) | selectattr('scope_type','equalto','template-stack') | list %}
@@ -399,7 +405,7 @@
         <button type="button" id="scope-del-net" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('network')">&times;</button>
       </span>
       <span class="hdr-pair">
-        <span class="hdr-cap">dg</span>
+        <span class="hdr-cap">Device Group</span>
         <select id="target-dg-select" class="picker" title="Device-group on this Panorama. Use + to create one."
                 onchange="if(typeof _toggleScopeDelBtns==='function')_toggleScopeDelBtns();"
                 style="appearance:none;-webkit-appearance:none;padding-right:20px;">
@@ -408,7 +414,7 @@
         <button type="button" class="scope-add" title="New device-group on this Panorama candidate" onclick="scopeCreateOpen('dg')">+</button>
         <button type="button" id="scope-del-dg" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('dg')">&times;</button>
       </span>
-      <button type="button" id="mgr-scope-deploy" class="btn primary sm" style="display:none;margin-left:6px;" onclick="if(window.mgrDeployScopes)mgrDeployScopes();" title="Create the staged scopes on this Panorama's candidate - you commit on the box, then re-import to see them.">Deploy staged scopes</button>
+      <button type="button" id="mgr-scope-deploy" class="btn" style="display:none; margin-left:6px;" onclick="if(window.mgrDeployScopes)mgrDeployScopes();" title="Create the staged scopes on this Panorama's candidate: you commit on the box, then re-import to see them.">Deploy Staged Scopes</button>
       {% endif %}
     </div>
     {% endif %}
@@ -417,15 +423,45 @@
 
     <div style="display:flex;align-items:center;gap:14px;">
       {% block toolbar %}{% endblock %}
-      {# Version chip -> About dialog. Underlined so it reads as a link;
-         last element in the right group = flush with the header's right
-         padding (same 20px edge as the page toolbar's + Add device). #}
+      {# Project picker (U16): every project of every tenant, grouped; picking one
+         switches the tenant cookie and opens the project's Overview. Pages that
+         pass no nav_projects (import results, config) show no picker. #}
+      {% if nav_projects %}
+      <span class="hdr-cap" style="font-size:var(--fs-small);color:var(--tx2);">Project</span>
+      <select id="ws-project-select" class="inp hdr-project-pick" style="margin-left:-6px;" onchange="wsProjectPick(this)" title="Switch to another project, any tenant">
+        {% if not ov_project %}<option value="" selected>- Pick a project -</option>{% endif %}
+        {% for tn, grp in nav_projects | groupby('tenant_name') %}
+        <optgroup label="{{ tn or 'default' }}">
+          {% for p in grp %}<option value="/projects/{{ p.id }}" data-tenant="{{ p.tenant_id }}"{% if ov_project and p.id == ov_project.id %} selected{% endif %}>{{ p.name }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+      {% endif %}
+      {# +Add Snapshot right of the picker, wherever a project is picked: the
+         workspace's project, or the landing's tree project (user decision 2026-10-04).
+         The id travels with the button - the landing has no window._projectId. #}
+      {% if ov_project %}
+      <button type="button" id="ws-snapshot-btn" class="btn" onclick="saveProjectSnapshot({{ ov_project.id }})"
+              title="Save a snapshot of the edits of {{ ov_project.name }} as they are now">+Add Snapshot</button>
+      {% endif %}
+      {# Version chip (About dialog) and Logout: on pages with the navigation
+         tree they sit at the tree's foot (user decision 2026-10-04, _ws_nav.html);
+         the header carries them only where there is no tree (login, import
+         results, optimize, manager). #}
+      {% if not ws_nav %}
       <button type="button" id="about-open" title="About Gateshift"
               onclick="document.getElementById('about-modal').classList.remove('hidden')">v{{ app_version }}</button>
+      {% if request.state.user_id %}
+      <form method="post" action="/logout" style="display:inline;margin:0;">
+        <button type="submit" class="hdr-logout" title="End this session">Logout</button>
+      </form>
+      {% endif %}
+      {% endif %}
     </div>
   </header>
 
-  <main class="px-6 py-6">
+  {# the workspace (rules.html) drops the gutter: its navigation tree sits flush with the edge and the header #}
+  <main class="{% block main_class %}px-6 py-6{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 
@@ -450,7 +486,7 @@
       const toast = document.createElement('div');
       toast.style.cssText =
         'pointer-events:auto;padding:8px 28px 8px 12px;border-radius:0;border:1px solid;' +
-        'font-size:12px;max-width:288px;box-shadow:var(--shadow-pop);position:relative;' +
+        'font-size:var(--fs-body);max-width:288px;box-shadow:var(--shadow-pop);position:relative;' +
         'opacity:0;transform:translateX(8px);transition:opacity .2s,transform .2s;' +
         (styles[type] || styles.info);
       toast.textContent = msg;
@@ -459,7 +495,7 @@
       close.setAttribute('aria-label', 'Close');
       close.style.cssText =
         'position:absolute;top:2px;right:6px;background:none;border:none;color:currentColor;' +
-        'opacity:0.6;cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;';
+        'opacity:0.6;cursor:pointer;font-size:var(--fs-title);line-height:1;padding:2px 4px;';
       close.textContent = '×';
       var dismissed = false;
       function dismiss() {
@@ -496,7 +532,7 @@
         overlay.tabIndex = -1;
         var bodyHtml = '';
         if (Array.isArray(body)) {
-          bodyHtml = '<ul style="color:var(--tx2);font-size:12px;margin:0 0 16px;text-align:left;list-style:disc;padding-left:20px;">'
+          bodyHtml = '<ul style="color:var(--tx2);font-size:var(--fs-body);margin:0 0 16px;text-align:left;list-style:disc;padding-left:20px;">'
             + body.map(function(line) {
                 return '<li>' + String(line).replace(/[&<>]/g, function(c) {
                   return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
@@ -507,19 +543,19 @@
           var safe = String(body).replace(/[&<>]/g, function(c) {
             return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
           }).replace(/\n/g, '<br>');
-          bodyHtml = '<p style="color:var(--tx2);font-size:12px;margin:0 0 16px;white-space:pre-line;">' + safe + '</p>';
+          bodyHtml = '<p style="color:var(--tx2);font-size:var(--fs-body);margin:0 0 16px;white-space:pre-line;">' + safe + '</p>';
         }
-        var confirmBtnCls = danger ? 'btn danger sm' : 'btn primary sm';
+        var confirmBtnCls = danger ? 'btn danger' : 'btn';  // red confirm for destructive dialogs (2026-10-04)
         overlay.innerHTML =
           '<div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:440px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">'
-          + '<p style="color:var(--tx);font-size:13px;font-weight:500;margin:0 0 8px;">' +
+          + '<p style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin:0 0 8px;">' +
               String(title).replace(/[&<>]/g, function(c) {
                 return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
               })
             + '</p>'
           + bodyHtml
           + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
-            + '<button type="button" data-cm-cancel class="btn ghost sm">Cancel</button>'
+            + '<button type="button" data-cm-cancel class="btn">Cancel</button>'
             + '<button type="button" data-cm-confirm class="' + confirmBtnCls + '">' +
                 String(label).replace(/[&<>]/g, function(c) {
                   return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
@@ -597,10 +633,10 @@
     // ── Global HTMX error handlers ──────────────────────────────────
     document.addEventListener('htmx:responseError', function(e) {
       const status = e.detail.xhr && e.detail.xhr.status;
-      showToast(status ? 'Server error (' + status + ') - please try again' : 'Request failed - please try again', 'error');
+      showToast(status ? 'Server error (' + status + '), please try again' : 'Request failed, please try again', 'error');
     });
     document.addEventListener('htmx:sendError', function() {
-      showToast('Network error - check your connection', 'error');
+      showToast('Network error, check your connection', 'error');
     });
 
     // ── Header pickers ──────────────────────────────────────────────
@@ -629,38 +665,147 @@
       if (ov) ov.classList.remove('hidden');
     }
 
-    function changeTargetDevice(targetId) {
-      if (targetId) localStorage.setItem('last-used-target-id', String(targetId));
-      else localStorage.removeItem('last-used-target-id');
-      // Rewrite URL with the new ?target= and reload - server re-renders all
-      // target-aware panels with the picked device's platform in scope.
-      var url = _setTargetParam(window.location.href, targetId);
-      showNavOverlay();
-      window.location.href = url;
+    // Project context (P1.3): every request this page makes carries its
+    // source/target pair, so the server can resolve the project a decision
+    // belongs to. The globals come from the page (rules.html sets them);
+    // pages without a pair send nothing. Covers fetch() and htmx alike.
+    function _gsContextHeaders() {
+      var h = {};
+      if (typeof window._deviceId === 'number') h['X-Gateshift-Source'] = String(window._deviceId);
+      if (typeof window._targetId === 'number') h['X-Gateshift-Target'] = String(window._targetId);
+      if (typeof window._projectId === 'number') h['X-Gateshift-Project'] = String(window._projectId);
+      return h;
     }
 
-    // On first paint, reconcile URL ↔ localStorage. If the URL has no ?target=
-    // but we have a remembered choice, redirect once to bring server-side state
-    // in line with what the user picked last time. On a fresh session (no saved
-    // choice) the SERVER already defaults selected_target to the first, so the
-    // dropdown shows it and there is nothing to redirect for here.
-    (function _autoPickTarget() {
-      try {
-        var sel = document.getElementById('target-device-select');
-        if (!sel) return;
-        var url = new URL(window.location.href);
-        if (url.searchParams.get('target')) return;
-        var saved = localStorage.getItem('last-used-target-id');
-        if (!saved) return;
-        // Verify the saved id still appears in the picker (device may have been removed).
-        if (!sel.querySelector('option[value="' + CSS.escape(saved) + '"]')) {
-          localStorage.removeItem('last-used-target-id');
-          return;
+    // Header project picker (P1.4): a project IS a (source, target) pair
+    // with its decisions, so picking one opens its workspace. A pair may
+    // carry several projects; "new" starts another one for this pair.
+
+    // Snapshot from the workspace (P1.5): freeze the project's decisions
+    // without leaving the page.
+    function saveProjectSnapshot(pid) {
+      if (typeof pid !== 'number') pid = window._projectId;
+      if (typeof pid !== 'number') return;
+      gsNameModal('Save Snapshot', 'Snapshot name', '', function (name) {
+        return fetch('/projects/' + pid + '/snapshots', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                         body: JSON.stringify({name: name})})
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) { showToast('Snapshot "' + j.name + '" saved - ' + j.rows + ' edit(s)', 'success', 5000); return true; }
+            showToast((j && j.error) || 'Snapshot not saved', 'error');
+            return false;
+          });
+      });
+    }
+
+    // Tenant switcher (devices + projects pages): the choice travels as a
+    // cookie so every page that is tenant-scoped shows the same estate.
+    function gsSetTenant(id) {
+      document.cookie = 'gs_tenant=' + encodeURIComponent(id) + ';path=/;max-age=31536000;SameSite=Lax';
+    }
+    // Header project picker (U16): the option carries its tenant - the
+    // tenant-scoped pages follow the project the operator picked.
+    function wsProjectPick(sel) {
+      if (!sel.value) return;
+      var o = sel.options[sel.selectedIndex];
+      if (o && o.dataset.tenant) gsSetTenant(o.dataset.tenant);
+      showNavOverlay(); window.location.href = sel.value;
+    }
+    // "+Add Tenant" (Projects page header): name dialog, create, switch to it.
+    function gsTenantAdd(onCancel) {
+      gsNameModal('Add Tenant', 'Tenant name', '', function (name) {
+        return fetch('/tenants', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify({name: name})})
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) { gsSetTenant(j.id); showNavOverlay(); window.location.href = window.location.pathname + '?tenant=' + j.id; return true; }
+            showToast((j && j.error) || 'The tenant could not be created', 'error');
+            return false;
+          });
+      }, onCancel);
+    }
+    function gsTenantPick(sel, current) {
+      var v = sel.value;
+      if (v === '__new') {  // legacy select option - the button is the way now
+        gsTenantAdd(function () { sel.value = String(current); });
+        return;
+      }
+      gsSetTenant(v); showNavOverlay();
+      window.location.href = window.location.pathname + '?tenant=' + encodeURIComponent(v);
+    }
+    function gsTenantRename(id, name) {
+      gsNameModal('Rename Tenant', 'Tenant name', name, function (newName) {
+        return fetch('/tenants/' + id + '/rename', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                    body: JSON.stringify({name: newName})})
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (j && j.ok) { showNavOverlay(); window.location.reload(); return true; }
+            showToast((j && j.error) || 'Rename failed', 'error');
+            return false;
+          });
+      });
+    }
+    function gsTenantDelete(id, name) {
+      if (!confirm('Delete the empty tenant "' + name + '"?')) return;
+      fetch('/tenants/' + id + '/delete', {method: 'POST'})
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) { gsSetTenant(1); showNavOverlay(); window.location.href = window.location.pathname + '?tenant=1'; }
+          else showToast((j && j.error) || 'delete failed', 'error');
+        });
+    }
+
+    // One small name dialog for the tenant / project actions: title, label,
+    // initial value; onSubmit(name) returns a promise resolving to true when
+    // the dialog may close. onCancel runs when it is dismissed.
+    function gsNameModal(title, label, initial, onSubmit, onCancel) {
+      var m = document.getElementById('name-modal');
+      var inp = document.getElementById('name-modal-input');
+      document.getElementById('name-modal-title').textContent = title;
+      document.getElementById('name-modal-label').textContent = label;
+      inp.value = initial || '';
+      m._onCancel = onCancel || null;
+      m._onSubmit = onSubmit;
+      m.classList.remove('hidden');
+      setTimeout(function () { inp.focus(); inp.select(); }, 0);
+    }
+    function gsNameModalClose(cancelled) {
+      var m = document.getElementById('name-modal');
+      m.classList.add('hidden');
+      if (cancelled && m._onCancel) { var c = m._onCancel; m._onCancel = null; c(); }
+    }
+    function gsNameModalSubmit() {
+      var m = document.getElementById('name-modal');
+      var name = (document.getElementById('name-modal-input').value || '').trim();
+      if (!name) return;
+      var btn = document.getElementById('name-modal-ok');
+      btn.disabled = true;
+      Promise.resolve(m._onSubmit ? m._onSubmit(name) : true).then(function (ok) {
+        btn.disabled = false;
+        if (ok !== false) { m._onCancel = null; gsNameModalClose(false); }
+      }, function () { btn.disabled = false; });
+    }
+    (function _installContextHeaders() {
+      var orig = window.fetch;
+      window.fetch = function (input, init) {
+        init = init || {};
+        var ctx = _gsContextHeaders();
+        if (Object.keys(ctx).length) {
+          var hdrs = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+          Object.keys(ctx).forEach(function (k) { if (!hdrs.has(k)) hdrs.set(k, ctx[k]); });
+          init.headers = hdrs;
         }
-        url.searchParams.set('target', saved);
-        window.location.replace(url.pathname + url.search);
-      } catch (e) { /* non-fatal */ }
+        return orig.call(this, input, init);
+      };
+      document.addEventListener('htmx:configRequest', function (e) {
+        var ctx = _gsContextHeaders();
+        Object.keys(ctx).forEach(function (k) { e.detail.headers[k] = ctx[k]; });
+      });
     })();
+    window._gsContextHeaders = _gsContextHeaders;
+
+    // The target picker is gone (projects-first, D3): the project defines the
+    // pair; the hidden #target-device-select carries its id for HTMX includes.
 
     // ── Run controls ─────────────────────────────────────────────────
     let _pollTimer = null;
@@ -713,7 +858,7 @@
         })
         .catch(function() {
           _runPending = false;
-          showToast('Failed to start - check connection', 'error');
+          showToast('Failed to start, check connection', 'error');
           _restoreRunButtons();
         });
     }
@@ -752,7 +897,7 @@
             if (wasRunning && overlay.dataset.pushUi === '1') {
               _restoreRunButtons();
               window._runReloadDeferred = true;
-              showToast('Import complete - view refreshes when the push log is closed', 'success');
+              showToast('Import complete: view refreshes when the push log is closed', 'success');
               return;
             }
             setRunning(null);
@@ -824,7 +969,7 @@
         })
         .catch(function() {
           if (btn) btn.disabled = false;
-          showToast('Could not check for user renames - try again', 'error');
+          showToast('Could not check for user renames, try again', 'error');
         });
       return false;
     }
@@ -855,7 +1000,7 @@
           if (ov.dataset.pushUi === '1') return;
           _setOverlay(false);
           if (typeof showToast === 'function') {
-            showToast('No progress for 2.5 min - the push may still be running on the server. Reload to re-attach.', 'error', 9000);
+            showToast('No progress for 2.5 min: the push may still be running on the server. Reload to re-attach.', 'error', 9000);
           }
         }
       }, _OVERLAY_WATCHDOG_MS);
@@ -1030,12 +1175,35 @@
        onclick="if (event.target === this) closeHintModal();">
     <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:520px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-        <h2 id="hint-modal-title" style="margin:0;font-size:14px;font-weight:600;color:var(--tx);"></h2>
+        <h2 id="hint-modal-title" style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);"></h2>
         <button type="button" onclick="closeHintModal()" class="x" aria-label="Close">×</button>
       </div>
-      <div id="hint-modal-body" style="font-size:12px;line-height:1.6;color:var(--tx2);"></div>
+      <div id="hint-modal-body" style="font-size:var(--fs-body);line-height:1.6;color:var(--tx2);"></div>
     </div>
   </div>
+  {# ── Name dialog (P1.4) - one input for the tenant / project actions;
+       driven by gsNameModal() above. ── #}
+  <div id="name-modal" class="hidden" style="position:fixed;inset:0;z-index:50;background:rgba(4,7,11,0.6);"
+       onclick="if (event.target === this) gsNameModalClose(true);">
+    <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:400px;width:100%;margin:18vh auto 0;box-shadow:var(--shadow-pop);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+        <h2 id="name-modal-title" style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);"></h2>
+        <button type="button" onclick="gsNameModalClose(true)" class="x" aria-label="Close">&times;</button>
+      </div>
+      <form onsubmit="event.preventDefault(); gsNameModalSubmit();" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="field">
+          <label id="name-modal-label">Name</label>
+          <input type="text" id="name-modal-input" class="inp" maxlength="128" autocomplete="off"
+                 onkeydown="if (event.key === 'Escape') { event.preventDefault(); gsNameModalClose(true); }">
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px;">
+          <button type="button" onclick="gsNameModalClose(true)" class="btn">Cancel</button>
+          <button type="submit" id="name-modal-ok" class="btn">OK</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <style>#name-modal:not(.hidden) { display: block; }</style>
   <script>
     function openHintModal(title, contentId) {
       const m = document.getElementById('hint-modal');
@@ -1070,12 +1238,12 @@
     #about-modal.hidden { display: none; }
     #about-modal .abx { background: var(--bg1); border: 1px solid var(--line2);
       padding: 22px 24px; max-width: 480px; width: 100%; margin: 0 16px;
-      box-shadow: var(--shadow-pop); font-size: 12px; color: var(--tx2); }
+      box-shadow: var(--shadow-pop); font-size:var(--fs-body); color: var(--tx2); }
     #about-modal .abx a { color: var(--accent); text-decoration: none; }
     #about-modal .abx a:hover { text-decoration: underline; }
     #about-modal .ab-row { margin: 0 0 10px; line-height: 1.55; }
     #about-open { background: none; border: none; cursor: pointer;
-      font-family: inherit; color: var(--tx3); font-size: 10px;
+      font-family: inherit; color: var(--tx3); font-size:var(--fs-caption);
       letter-spacing: .05em; padding: 2px 0;
       text-decoration: underline; text-underline-offset: 2px; }
     #about-open:hover { color: var(--accent); }
@@ -1083,7 +1251,7 @@
   <div id="about-modal" class="hidden"
        onclick="if (event.target === this) this.classList.add('hidden')">
     <div class="abx" role="dialog" aria-label="About Gateshift">
-      <p style="color:var(--tx);font-size:14px;font-weight:600;margin:0 0 2px;">
+      <p style="color:var(--tx);font-size:var(--fs-title);font-weight:600;margin:0 0 2px;">
         g<svg viewBox="12.644 1.055 38.712 62.945" aria-hidden="true" style="width:0.5em;height:0.78em;display:inline-block;fill:var(--accent);margin:0 0.02em;vertical-align:-0.04em;"><path d="M28.127 1.055 L34.919 2.748 L19.647 64 L16.040 64 L12.644 63.153 Z"/><path d="M35.873 1.055 L29.081 2.748 L44.353 64 L47.960 64 L51.356 63.153 Z"/></svg>teshift
         <span style="color:var(--tx3);font-weight:400;">- the firewall migration tool</span>
       </p>
@@ -1092,7 +1260,7 @@
       </p>
       <p class="ab-row" style="color:var(--amber);">
         Gateshift can and will get things wrong. What it pushes onto a
-        target is a draft, not a finished configuration - review and test
+        target is a draft, not a finished configuration: review and test
         it there before it goes live. Use is at your own risk.
       </p>
       <p class="ab-row">
@@ -1110,7 +1278,7 @@
         <a href="https://github.com/gateshift/gateshift/blob/main/KNOWN_LIMITATIONS.md" target="_blank" rel="noopener">Known limitations</a>
       </p>
       <div style="display:flex;justify-content:flex-end;">
-        <button type="button" class="btn ghost sm"
+        <button type="button" class="btn"
                 onclick="document.getElementById('about-modal').classList.add('hidden')">Close</button>
       </div>
     </div>

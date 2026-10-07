@@ -15,9 +15,9 @@
 <div id="config-panel" style="padding:20px;">
 
   {% if saved %}
-  <div id="saved-banner" class="tag ok" style="display:inline-flex;align-items:center;gap:6px;margin-bottom:14px;padding:5px 10px;font-size:11px;">
+  <div id="saved-banner" class="tag ok" style="display:inline-flex;align-items:center;gap:6px;margin-bottom:14px;padding:5px 10px;font-size:var(--fs-small);">
     <svg style="width:14px;height:14px;" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414L8.414 15l-4.121-4.121a1 1 0 011.414-1.414L8.414 12.172l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-    Saved - generate running…
+    Saved, generate running…
   </div>
   <script>setTimeout(() => { const b = document.getElementById('saved-banner'); if(b) b.style.opacity='0'; }, 4000);</script>
   {% endif %}
@@ -36,8 +36,8 @@
         <div class="ptoggle-thumb"></div>
       </div>
       <div>
-        <div style="color:var(--tx);font-size:12px;font-weight:500;">Accumulate</div>
-        <div class="mut" style="font-size:12px;">Group traffic by destination - one rule per unique destination IP &amp; port, collecting all sources</div>
+        <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Accumulate</div>
+        <div class="mut" style="font-size:var(--fs-body);">Group traffic by destination: one rule per unique destination IP &amp; port, collecting all sources</div>
       </div>
     </label>
 
@@ -55,14 +55,14 @@
                 <div class="ptoggle-track"></div>
                 <div class="ptoggle-thumb"></div>
               </div>
-              <div style="color:var(--tx);font-size:12px;font-weight:500;">Collapse internet sources</div>
+              <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Collapse internet sources</div>
             </label>
             <div id="ip-src-threshold-row" class="{% if not display.internet_public_src or not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;">
-              <label style="display:block;color:var(--tx2);font-size:12px;margin-bottom:4px;">Min. distinct public source IPs per rule</label>
+              <label style="display:block;color:var(--tx2);font-size:var(--fs-body);margin-bottom:4px;">Min. distinct public source IPs per rule</label>
               <input type="number" name="display_ip_src_threshold" id="ip-src-threshold-input"
                      value="{{ display.internet_public_src_threshold }}" min="1"
                      onclick="event.stopPropagation()"
-                     class="inp" style="width:112px;font-size:12px;padding:5px 8px;">
+                     class="inp" style="width:112px;font-size:var(--fs-body);padding:5px 8px;">
             </div>
           </div>
 
@@ -75,14 +75,14 @@
                 <div class="ptoggle-track"></div>
                 <div class="ptoggle-thumb"></div>
               </div>
-              <div style="color:var(--tx);font-size:12px;font-weight:500;">Collapse internet destinations</div>
+              <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Collapse internet destinations</div>
             </label>
             <div id="ip-dst-threshold-row" class="{% if not display.internet_public_dst or not acc.enabled %}cfg-dimmed{% endif %}" style="transition:opacity .12s;">
-              <label style="display:block;color:var(--tx2);font-size:12px;margin-bottom:4px;">Min. distinct public destination IPs per port</label>
+              <label style="display:block;color:var(--tx2);font-size:var(--fs-body);margin-bottom:4px;">Min. distinct public destination IPs per port</label>
               <input type="number" name="display_ip_dst_threshold" id="ip-dst-threshold-input"
                      value="{{ display.internet_public_dst_threshold }}" min="1"
                      onclick="event.stopPropagation()"
-                     class="inp" style="width:112px;font-size:12px;padding:5px 8px;">
+                     class="inp" style="width:112px;font-size:var(--fs-body);padding:5px 8px;">
             </div>
           </div>
 
@@ -104,8 +104,8 @@
             <div class="ptoggle-thumb"></div>
           </div>
           <div>
-            <div style="color:var(--tx);font-size:12px;font-weight:500;">Subnet aggregation</div>
-            <div class="mut" style="font-size:12px;">Summarize dense groups of private IPs into their containing subnet (/28 → /24 → /16 → /8)</div>
+            <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Subnet aggregation</div>
+            <div class="mut" style="font-size:var(--fs-body);">Summarize dense groups of private IPs into their containing subnet (/28 → /24 → /16 → /8)</div>
           </div>
         </label>
 
@@ -120,16 +120,16 @@
                 <div class="ptoggle-track-sm"></div>
                 <div class="ptoggle-thumb-sm"></div>
               </div>
-              <span style="color:var(--tx);font-size:12px;font-weight:500;">Sources</span>
+              <span style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Sources</span>
             </label>
             <div id="src-thresholds" class="{% if not src_on %}cfg-dimmed{% endif %}" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;transition:opacity .12s;">
               {% for suffix, label in [('28', '/28'), ('24', '/24'), ('16', '/16'), ('8', '/8')] %}
               <div>
-                <label style="display:block;color:var(--tx2);font-size:11px;margin-bottom:4px;" title="Min. distinct source IPs within a {{ label }} to aggregate">{{ label }} min.</label>
+                <label style="display:block;color:var(--tx2);font-size:var(--fs-small);margin-bottom:4px;" title="Min. distinct source IPs within a {{ label }} to aggregate">{{ label }} min.</label>
                 <input type="number" name="param_{{ sub.name }}_src_threshold_{{ suffix }}"
                        value="{{ sub.param_values['src_threshold_' ~ suffix] }}" min="2"
                        onclick="event.stopPropagation()"
-                       class="inp" style="width:100%;font-size:12px;padding:5px 8px;">
+                       class="inp" style="width:100%;font-size:var(--fs-body);padding:5px 8px;">
               </div>
               {% endfor %}
             </div>
@@ -144,16 +144,16 @@
                 <div class="ptoggle-track-sm"></div>
                 <div class="ptoggle-thumb-sm"></div>
               </div>
-              <span style="color:var(--tx);font-size:12px;font-weight:500;">Destinations</span>
+              <span style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Destinations</span>
             </label>
             <div id="dst-thresholds" class="{% if not dst_on %}cfg-dimmed{% endif %}" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;transition:opacity .12s;">
               {% for suffix, label in [('28', '/28'), ('24', '/24'), ('16', '/16'), ('8', '/8')] %}
               <div>
-                <label style="display:block;color:var(--tx2);font-size:11px;margin-bottom:4px;" title="Min. distinct destination IPs within a {{ label }} to aggregate">{{ label }} min.</label>
+                <label style="display:block;color:var(--tx2);font-size:var(--fs-small);margin-bottom:4px;" title="Min. distinct destination IPs within a {{ label }} to aggregate">{{ label }} min.</label>
                 <input type="number" name="param_{{ sub.name }}_dst_threshold_{{ suffix }}"
                        value="{{ sub.param_values['dst_threshold_' ~ suffix] }}" min="2"
                        onclick="event.stopPropagation()"
-                       class="inp" style="width:100%;font-size:12px;padding:5px 8px;">
+                       class="inp" style="width:100%;font-size:var(--fs-body);padding:5px 8px;">
               </div>
               {% endfor %}
             </div>
@@ -175,8 +175,8 @@
             <div class="ptoggle-thumb"></div>
           </div>
           <div>
-            <div style="color:var(--tx);font-size:12px;font-weight:500;">Relevance filter</div>
-            <div class="mut" style="font-size:12px;">Drop rules with insufficient activity - filters by hit count, active duration, and days since last seen
+            <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Relevance filter</div>
+            <div class="mut" style="font-size:var(--fs-body);">Drop rules with insufficient activity: filters by hit count, active duration, and days since last seen
               {% if display.qf_reads_from %}<span class="dash" style="margin-left:4px;">· reads from: {{ display.qf_reads_from }}</span>{% endif %}
             </div>
           </div>
@@ -185,13 +185,13 @@
         <div id="qf-params" class="{% if not qf.enabled %}cfg-dimmed{% endif %}" style="margin-top:10px;margin-left:44px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;transition:opacity .12s;">
           {% for param in qf.params %}
           <div>
-            <label style="display:block;color:var(--tx2);font-size:12px;margin-bottom:4px;" title="{{ param.description }}">{{ param.label }}</label>
+            <label style="display:block;color:var(--tx2);font-size:var(--fs-body);margin-bottom:4px;" title="{{ param.description }}">{{ param.label }}</label>
             <input type="number"
                    name="param_{{ qf.name }}_{{ param.key }}"
                    value="{{ qf.param_values[param.key] }}"
                    min="{{ param.min }}"
                    onclick="event.stopPropagation()"
-                   class="inp" style="width:100%;font-size:12px;padding:5px 8px;">
+                   class="inp" style="width:100%;font-size:var(--fs-body);padding:5px 8px;">
           </div>
           {% endfor %}
         </div>
@@ -211,8 +211,8 @@
             <div class="ptoggle-thumb"></div>
           </div>
           <div>
-            <div style="color:var(--tx);font-size:12px;font-weight:500;">Endpoint pairs view</div>
-            <div class="mut" style="font-size:12px;">Group rules with identical source+destination - accumulates ports and applications per host pair</div>
+            <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;">Endpoint pairs view</div>
+            <div class="mut" style="font-size:var(--fs-body);">Group rules with identical source+destination: accumulates ports and applications per host pair</div>
           </div>
         </label>
       </div>
@@ -221,7 +221,7 @@
   </div>{# end card #}
 
   <div style="margin-top:16px;display:flex;justify-content:flex-end;">
-    <button type="submit" id="apply-btn" class="btn primary sm"
+    <button type="submit" id="apply-btn" class="btn"
             {% if not needs_generate %}disabled{% endif %}>
       Apply &amp; Generate
     </button>

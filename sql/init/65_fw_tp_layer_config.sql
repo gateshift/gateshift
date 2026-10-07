@@ -31,12 +31,13 @@ USE gateshift;
 -- constraint.
 
 CREATE TABLE IF NOT EXISTS fw_tp_layer_config (
+  project_id   INT          NOT NULL DEFAULT 0,
   device_id    INT          NOT NULL,
   layer_name   VARCHAR(255) NOT NULL,
   strategy     VARCHAR(64)  NOT NULL,
   params_json  JSON         NOT NULL,
   updated_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
                                        ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (device_id, layer_name),
+  PRIMARY KEY (project_id, device_id, layer_name),
   KEY idx_device (device_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

@@ -100,18 +100,26 @@ def default_rule_disposition(rule: dict, target_platform: str):
 
     if kind in _DENY_DEFAULTS and deny and pristine:
         if target_platform == "fortigate":
-            return "skip", ("matches the target's built-in Implicit Deny - "
+            return "skip", ("matches the target's built-in Implicit Deny, "
                             "not pushed")
         if target_platform == "checkpoint":
-            return "skip", ("matches the target's Cleanup rule (drop all) - "
+            return "skip", ("matches the target's Cleanup rule (drop all), "
                             "not pushed")
         if target_platform == "panw":
-            return "skip", ("matches the target's interzone-default (deny) - "
+            return "skip", ("matches the target's interzone-default (deny), "
                             "not pushed")
+        if target_platform == "opnsense":
+            return "skip", ("matches the firewall's own default-deny at the "
+                            "end of the pf ruleset, not pushed")
     if kind == "cp-cleanup" and deny and pristine:
         if target_platform == "checkpoint":
-            return "skip", ("target keeps its own Cleanup rule - not pushed "
+            return "skip", ("target keeps its own Cleanup rule, not pushed "
                             "twice")
+        if target_platform == "opnsense":
+            # pf denies everything that no rule passed, with no intrazone
+            # exception - the same semantics the Cleanup rule expresses.
+            return "skip", ("matches the firewall's own default-deny, not "
+                            "pushed twice")
         # CP denied EVERYTHING (zoneless); FGT/PA defaults allow intrazone -
         # express an explicit deny-all so the CP semantics land verbatim.
         return "express", ("expressed explicitly: the source denied all "
@@ -119,19 +127,28 @@ def default_rule_disposition(rule: dict, target_platform: str):
                            "allows intrazone")
     if kind == "pa-intrazone" and action == "allow" and pristine:
         if target_platform == "panw":
-            return "skip", ("matches the target's intrazone-default (allow) - "
+            return "skip", ("matches the target's intrazone-default (allow), "
                             "not pushed")
         if target_platform == "fortigate":
             return "skip", ("matches FortiOS zone behavior (intrazone allow "
-                            "by default) - not pushed")
+                            "by default), not pushed")
         if target_platform == "checkpoint":
             return "drop", ("intrazone-allow is not expressible on a zoneless "
-                            "target - review: traffic between same-zone "
+                            "target. Review: traffic between same-zone "
                             "networks is handled by the rules above / Cleanup")
-    if kind == "pa-intrazone" and target_platform in ("fortigate", "checkpoint"):
+        if target_platform == "opnsense":
+            # An interface group is a zone, but pf has no notion of traffic
+            # staying inside one: a pass rule on the group would also let
+            # traffic leave it, which is wider than the source intended.
+            return "drop", ("pf has no intrazone default: an equivalent "
+                            "rule on the interface group would also permit "
+                            "traffic leaving it, so this needs a deliberate "
+                            "decision")
+    if kind == "pa-intrazone" and target_platform in ("fortigate", "checkpoint",
+                                                      "opnsense"):
         # modified intrazone default - no generic intrazone rule type there
         return "drop", ("modified intrazone-default is not expressible on "
-                        "this target - re-create the intent manually "
+                        "this target: re-create the intent manually "
                         "(FortiGate: per-zone intrazone flag)")
     # Everything else (modified deny-defaults, modified pa defaults on PA,
     # unusual actions): push explicitly so the modification lands.
@@ -168,9 +185,45 @@ class DroppedField:
     field: str         # field that was dropped, e.g. "user_identity", "fqdn"
     reason: str        # why - "not supported by target", "exceeds limit", …
     fallback: str = "" # what was used instead (empty if dropped outright)
+    rhash: str = ""    # the rule's content hash (hex) when the drop belongs to a rule - the Review's change log keys on it (R2)
+    explained: bool = False  # the item is not pushed and that is the COMPLETE
+                             # outcome - the operator skipped it, the target
+                             # derives or already has it, or it is folded into
+                             # something else. The Review counts these as an
+                             # explanation, not as a loss (matrix 0.9.4).
+    synthesized: bool = False  # the OPPOSITE of a drop: the generate CREATED an
+                               # entity the source does not carry as one - a
+                               # literal turned into an object, one tcp+udp
+                               # service split in two, a VIP's external
+                               # address. rule_id names the created entity and
+                               # fallback starts with "created". The Review
+                               # subtracts these from a surplus, so a plus the
+                               # generate cannot account for stays visible.
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
+
+
+class DropTagger:
+    """Wraps a renderer's `dropped` list so every DroppedField appended while
+    `current` names a rule hash carries that hash (docs/REVIEW_TAB_DESIGN.md,
+    R2: the change log keys on it). One assignment per rule iteration instead
+    of one keyword per drop site; everything else delegates to the list, and
+    the driver's final `[d.to_dict() for d in dropped]` iterates through."""
+    def __init__(self, target: list):
+        self.target = target
+        self.current = ""
+    def append(self, d) -> None:
+        if isinstance(d, DroppedField) and not d.rhash and self.current:
+            d.rhash = self.current
+        self.target.append(d)
+    def extend(self, items) -> None:
+        for d in items:
+            self.append(d)
+    def __len__(self): return len(self.target)
+    def __iter__(self): return iter(self.target)
+    def __getitem__(self, i): return self.target[i]
+    def __bool__(self): return True
 
 
 def error_hint(hint_fns, ctx: dict) -> str:
@@ -198,13 +251,6 @@ class DeployDriver(ABC):
     """Base class every vendor driver must implement."""
 
     platform: str  # e.g. "panw", "fortinet", "checkpoint"
-
-    # Optional. If non-empty, surfaced in the pre-push dialog so the user knows
-    # what the driver does and does NOT migrate. Use to flag scope gaps the
-    # driver intentionally leaves to the user (e.g. CP doesn't push network
-    # settings - those go through Gaia per gateway). Leave empty when the
-    # driver covers full migration scope.
-    migration_note: str = ""
 
     @abstractmethod
     def default_settings(self) -> list[dict]:
@@ -630,6 +676,7 @@ def register_driver(cls: type[DeployDriver]) -> type[DeployDriver]:
 
 def expand_multiproto_services(
     service_objects: list[dict], service_groups: list[dict],
+    dropped: list | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Fan out a source service that packs several (proto, port) combos into
     one object - multiple portrange families (Forti TCP+UDP+SCTP) and/or a
@@ -691,6 +738,23 @@ def expand_multiproto_services(
             members.append(sub)
         extra_groups.append({"name": name,
                              "value": {"members": members, "description": desc}})
+        if dropped is not None:
+            # One source service became len(members) services and a group.
+            # The first service stands for the source one; every further
+            # service and the group are entities the generate created - said
+            # so, or the Review's surplus check reads them as unexplained
+            # (a FortiGate source: 30 such services, +64 and +30 on PAN-OS).
+            for sub in members[1:]:
+                dropped.append(DroppedField(
+                    rule_id=sub, field="service", synthesized=True,
+                    reason=f"split of '{name}': several protocols in one "
+                           "source service, one protocol per target service",
+                    fallback=f"created by splitting '{name}'"))
+            dropped.append(DroppedField(
+                rule_id=name, field="service_group", synthesized=True,
+                reason=f"split of '{name}': the group keeps the source name so "
+                       "references stay valid",
+                fallback=f"created by splitting '{name}'"))
     # Prepend synthetic (leaf) groups so they're created before any group that
     # references them.
     return new_objs, extra_groups + list(service_groups)

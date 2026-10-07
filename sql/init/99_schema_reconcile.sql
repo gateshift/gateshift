@@ -17,4 +17,3 @@ ALTER TABLE fw_rules_consolidated_1 ADD COLUMN IF NOT EXISTS rule_name VARCHAR(2
 ALTER TABLE fw_rule_candidates      ADD COLUMN IF NOT EXISTS rule_name VARCHAR(255) NULL;
 ALTER TABLE fw_zones                ADD COLUMN IF NOT EXISTS description VARCHAR(255) NULL;
 ALTER TABLE fw_zones                ADD COLUMN IF NOT EXISTS source ENUM('inferred','api','manual') NOT NULL DEFAULT 'inferred';
-ALTER TABLE fw_interface_overrides  ADD COLUMN IF NOT EXISTS interface_name VARCHAR(64) NOT NULL;

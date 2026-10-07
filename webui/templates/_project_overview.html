@@ -1,0 +1,430 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{# ── Overview tab (projects-first UI, U8/U9): the project at a glance.
+   Head: the project's name (pencil = rename). Two boxes: the SOURCE and the
+   TARGET device with what Gateshift holds of each - the imported kinds on
+   the source and on a target that was imported itself, the live fetch as a
+   line; a device nothing was read from yet offers its import right there;
+   an optimization shows one box, "Optimize", across the full width. Below, side by side: the project's
+   snapshots and its log (one row per job of this project; a click opens
+   the complete record). The names the project decided (model A) follow
+   when there are any. Rendered inside the workspace (rules.html) only when
+   a project is selected; expects ov_project (a _project_rows row),
+   ov_snapshots, ov_names, ov_src_counters, ov_tgt_counters,
+   ov_tgt_fetch_ts and the header's device_cards. Reloads go through the
+   workspace's _reload() so the tab survives them. ── #}
+{% set p = ov_project %}
+{% set _src = device_cards.source if (device_cards is defined and device_cards) else None %}
+{% set _tgt = device_cards.target if (device_cards is defined and device_cards) else None %}
+{% set _same = device_cards.same_device if (device_cards is defined and device_cards) else (p.source_ref_id == p.target_ref_id) %}
+<style>
+  .ov { padding:26px 20px 22px; display:flex; flex-direction:column; gap:22px; }
+  .ov-grid2 { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:20px 28px; align-items:start; }
+  @media (max-width: 1100px) { .ov-grid2 { grid-template-columns:1fr; } }
+  .ov-devices { margin:12px 0 14px; }
+  .ov-box { border:1px solid var(--line); background:var(--bg2); padding:12px 14px; display:flex; flex-direction:column; gap:12px; }
+  .ov-box-hd { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .ov-box-hd .host { font-size:var(--fs-title); font-weight:600; color:var(--tx); }
+  .ov-box-hd .meta { margin-left:auto; font-size:var(--fs-small); color:var(--tx3); }
+  .ov-cnts { display:grid; grid-template-columns:repeat(auto-fill, minmax(118px, 1fr)); gap:10px 14px; }
+  .ov-cnt b { display:block; font-size:var(--fs-title); font-weight:600; color:var(--tx); font-variant-numeric:tabular-nums; line-height:1.2; }
+  .ov-cnt span { font-size:var(--fs-small); color:var(--tx2); }
+  .ov-cnt.zero b { color:var(--tx3); }
+  /* section and device captions = the shared .sec-hd (tokens.css), as the landing's column headers (user decision 2026-10-04) */
+  .ov-pencil { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border:none; background:none; color:var(--tx3); cursor:pointer; padding:0; }
+  .ov-pencil:hover { color:var(--accent); }
+  .ov-log-row { display:flex; gap:8px; align-items:baseline; padding:6px 0; border-bottom:1px solid var(--line); cursor:pointer; font-size:var(--fs-body); }
+  .ov-log-row:last-child { border-bottom:none; }
+  .ov-log-row:hover { background:var(--bg2); }
+  .ov-log-row .when { color:var(--tx3); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .ov-log-row .kind { color:var(--tx2); white-space:nowrap; }
+  .ov-log-row .st { font-weight:600; white-space:nowrap; }
+  .ov-log-row .sum { color:var(--tx3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1 1 auto; }
+  #ov-log-modal { position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; background:rgba(4,7,11,0.6); }
+  #ov-log-modal.hidden { display:none; }
+  #ov-log-modal .box { background:var(--bg1); border:1px solid var(--line2); padding:20px; max-width:760px; width:100%; margin:0 16px; box-shadow:var(--shadow-pop); }
+  #ov-log-body { font-size:var(--fs-body); line-height:1.6; color:var(--tx2); max-height:70vh; overflow:auto; }
+  #ov-log-body pre { margin:0 0 10px; white-space:pre-wrap; word-break:break-word; font-family:var(--mono, monospace); font-size:var(--fs-small); color:var(--tx); }
+  #ov-log-body .ev { padding:2px 0; border-bottom:1px solid var(--line); }
+  #ov-log-body .ev.fail { color:#e05c5c; }
+</style>
+{# A device nothing was read from yet: say so and offer the import right here.
+   The import endpoint returns to this Overview (field `next`). #}
+{% macro not_imported(dev, next_url) -%}
+  <div class="mut" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:var(--fs-body);">
+    <span>Nothing read from this device yet.</span>
+    {% if dev.kind == 'form' %}
+    <form method="post" action="/devices/{{ dev.id }}/import" style="display:inline;"
+          onsubmit='return confirmReimport(this, {{ dev.id }}, {{ dev.busy | tojson }}, false);'>
+      <input type="hidden" name="next" value="{{ next_url }}">
+      <button type="submit" class="btn" title="{{ dev.title }}">Import</button>
+    </form>
+    {% elif dev.kind == 'logs' %}
+    <a href="/projects" class="btn" onclick="showNavOverlay()" title="{{ dev.title }}: log sources are read on the Projects &amp; Devices page">Import Logs</a>
+    {% elif dev.kind == 'nocreds' %}
+    {# the dialog returns here after the save (next, D8) instead of ending on the inventory #}
+    <a href="/projects?edit={{ dev.id }}&amp;next={{ next_url | urlencode }}" class="btn" onclick="showNavOverlay()" title="{{ dev.title }}: add it in the device's details">Add API Key</a>
+    {% endif %}
+  </div>
+{%- endmacro %}
+{# The target's live fetch: what the push will see on the box. Only once
+   there was one - no hint otherwise (user decision 2026-10-03). #}
+{% macro live_fetch() -%}
+  {% if ov_tgt_fetch_ts %}
+  <div class="mut" style="font-size:var(--fs-small);" title="{{ ov_tgt_fetch_ts }}">
+    live fetch {{ ov_tgt_fetch_ts | rel_time }}: {% for c in ov_tgt_counters %}{{ c.n }} {{ c.label }}{% if not loop.last %} &middot; {% endif %}{% endfor %}
+  </div>
+  {% endif %}
+{%- endmacro %}
+<div class="ov">
+
+  {# ── head: the name with its pencil (no status here - user decision 2026-10-03) ── #}
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <h2 style="margin:0;font-size:var(--fs-hero);font-weight:600;color:var(--tx);letter-spacing:-0.01em;"><span style="color:var(--tx2);font-weight:500;margin-right:4px;">Project</span> <span id="ov-project-name">{{ p.name }}</span></h2>
+    <button type="button" class="ov-pencil" onclick="ovRename()" title="Rename the project" aria-label="Rename the project">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+    </button>
+  </div>
+
+  {# ── the two devices: what Gateshift holds of each. An optimization has
+     one device: its column reads "Optimize" and takes the full width. ── #}
+  <div class="ov-grid2 ov-devices">
+    <div{% if _same %} style="grid-column:1 / -1;"{% endif %}>
+      <div class="sec-hd"><h2>{{ 'Optimize Device' if _same else 'Source Device' }}</h2></div>
+      <div class="ov-box" data-ov-box="source">
+        <div class="ov-box-hd">
+          <span class="host">{{ p.source_name }}</span>
+          <span class="mut" style="font-size:var(--fs-small);">{{ p.source_platform | plat }}{% if _src and _src.mgmt_ip %} &middot; {{ _src.mgmt_ip }}{% endif %}</span>
+          <span class="meta" title="{{ ov_src_import.imported_ts or '' }}">{% if ov_src_import.imported_ts %}Imported {{ ov_src_import.imported_ts | rel_time }}{% else %}Not imported yet{% endif %}</span>
+        </div>
+        {% if ov_src_import.imported_ts %}
+        <div class="ov-cnts">
+          {% for c in ov_src_counters %}
+          <div class="ov-cnt{% if not c.n %} zero{% endif %}" data-ov-cnt="{{ c.key }}"><b>{{ c.n }}</b><span>{{ c.label_tc }}</span></div>
+          {% endfor %}
+        </div>
+        {% else %}
+        {{ not_imported(ov_src_import, p.url) }}
+        {% endif %}
+        {% if _same %}{{ live_fetch() }}{% endif %}
+      </div>
+    </div>
+    {% if not _same %}
+    <div>
+      <div class="sec-hd"><h2>Target Device</h2></div>
+      <div class="ov-box" data-ov-box="target">
+        <div class="ov-box-hd">
+          <span class="host">{{ p.target_name }}</span>
+          <span class="mut" style="font-size:var(--fs-small);">{{ p.target_platform | plat }}{% if _tgt and _tgt.mgmt_ip %} &middot; {{ _tgt.mgmt_ip }}{% endif %}</span>
+          <span class="meta" title="{{ ov_tgt_import.imported_ts or '' }}">{% if ov_tgt_import.imported_ts %}Imported {{ ov_tgt_import.imported_ts | rel_time }}{% else %}Not imported yet{% endif %}</span>
+        </div>
+        {% if ov_tgt_import.imported_ts %}
+        <div class="ov-cnts">
+          {% for c in ov_tgt_imported_counters %}
+          <div class="ov-cnt{% if not c.n %} zero{% endif %}" data-ov-cnt="{{ c.key }}"><b>{{ c.n }}</b><span>{{ c.label_tc }}</span></div>
+          {% endfor %}
+        </div>
+        {% else %}
+        {{ not_imported(ov_tgt_import, p.url) }}
+        {% endif %}
+        {{ live_fetch() }}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  {# ── snapshots | log ── #}
+  <div class="ov-grid2">
+    <div>
+      <div class="sec-hd"><h2>Snapshots</h2><div class="count"><span class="n">{{ ov_snapshots | length }}</span><span class="lbl">snapshot{{ '' if ov_snapshots|length == 1 else 's' }}</span></div></div>
+      <div class="twrap" style="margin:0;">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>When</th><th>Edits</th><th style="text-align:right;"></th></tr>
+          </thead>
+          <tbody>
+            {% for s in ov_snapshots %}
+            <tr>
+              <td>
+                {{ s.name }}
+                {% if s.kind == 'original' %}<span class="tag" style="font-size:var(--fs-caption);margin-left:6px;" title="No edits yet: the state the project started from">As imported</span>{% endif %}
+                {% if s.kind == 'auto' %}<span class="tag" style="font-size:var(--fs-caption);margin-left:6px;" title="Taken by itself before a push, a restore or a bulk rule change. The five newest are kept">Automatic</span>{% endif %}
+                {% if s.note %}<span class="mut"> - {{ s.note }}</span>{% endif %}
+              </td>
+              <td class="date">{{ s.created_at | rel_time }}</td>
+              <td>{{ s.row_count }}</td>
+              <td style="text-align:right;white-space:nowrap;">
+                <button type="button" class="btn" onclick='ovSnapshotRestore({{ s.id }}, {{ s.name | tojson }})' title="Replace the project's current edits with this snapshot">Restore</button>
+                <button type="button" class="btn" onclick='ovSnapshotBranch({{ s.id }}, {{ s.name | tojson }})' title="A new project for the same pair, starting from this snapshot">Branch</button>
+                {% if s.kind != 'original' %}
+                <button type="button" class="btn danger" onclick='ovSnapshotDelete({{ s.id }}, {{ s.name | tojson }})'>Delete</button>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div class="sec-hd"><h2>Log</h2><div class="count"><span class="n" id="ov-log-count">0</span><span class="lbl" id="ov-log-lbl">entries</span></div>
+        <div class="actions"><button type="button" class="btn" onclick="ovLoadLog()" title="Read the log again">Refresh</button></div>
+      </div>
+      <div id="ov-log-list" style="border:1px solid var(--line);background:var(--surface);padding:0 10px;max-height:420px;overflow:auto;">
+        <div class="mut" style="font-size:var(--fs-body);padding:8px 0;">loading&hellip;</div>
+      </div>
+    </div>
+  </div>
+
+  {# ── names (model A): what this project calls the source's interfaces,
+     zones, VRFs, objects and services; a row whose source name the device
+     no longer carries is an orphan. Only when there are any. ── #}
+  {% if ov_names %}
+  <div>
+    <div class="sec-hd"><h2>Names</h2><div class="count"><span class="n">{{ ov_names | length }}</span><span class="lbl">name{{ '' if ov_names|length == 1 else 's' }}</span></div></div>
+    <div class="twrap" style="margin:0;">
+      <table>
+        <thead>
+          <tr><th>Kind</th><th>Source</th><th>Shown as</th><th></th><th style="text-align:right;"></th></tr>
+        </thead>
+        <tbody>
+          {% for n in ov_names %}
+          <tr>
+            <td class="mut">{{ n.kind }}</td>
+            <td style="font-family:monospace;">{{ n.source_name }}</td>
+            <td style="font-family:monospace;">{{ n.target_name }}</td>
+            <td>{% if n.orphan %}<span class="tag bad" style="font-size:var(--fs-caption);" title="The source no longer carries this name (it went with a re-import). The row has no effect until the name returns">orphan</span>{% endif %}</td>
+            <td style="text-align:right;white-space:nowrap;">
+              <button type="button" class="btn danger" onclick='ovNameDrop({{ n.kind | tojson }}, {{ n.source_name | tojson }}, {{ n.target_name | tojson }})' title="Show the source name again in this project">Drop</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+  {# ── the project's exclusions (docs/PROJECT_VIEW_DESIGN.md): what this project deleted
+     from its view - the device keeps the facts, Restore brings an item back ── #}
+  {% if ov_exclusions %}
+  <div>
+    <div class="sec-hd"><h2>Deleted in This Project</h2><div class="count"><span class="n">{{ ov_exclusions | length }}</span><span class="lbl">item{{ '' if ov_exclusions|length == 1 else 's' }}</span></div></div>
+    <div class="twrap" style="margin:0;">
+      <table>
+        <thead>
+          <tr><th>Kind</th><th>Name</th><th>Device</th><th>When</th><th style="text-align:right;"></th></tr>
+        </thead>
+        <tbody>
+          {% for x in ov_exclusions %}
+          <tr>
+            <td class="mut">{{ x.kind_label }}</td>
+            <td style="font-family:monospace;">{{ x.label }}</td>
+            <td class="mut">{{ x.device_name }}</td>
+            <td class="mut">{{ x.created_at }}</td>
+            <td style="text-align:right;white-space:nowrap;">
+              <button type="button" class="btn" onclick='ovExclRestore({{ x.device_id }}, {{ x.kind | tojson }}, {{ x.item_key | tojson }}, {{ x.label | tojson }}, {{ x.kind_label | tojson }})' title="Bring it back into this project">Restore</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{# ── log record dialog: the complete message and every step of one job ── #}
+<div id="ov-log-modal" class="hidden" onclick="if (event.target === this) ovLogClose();">
+  <div class="box">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;">
+      <h2 id="ov-log-title" style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);"></h2>
+      <button type="button" onclick="ovLogClose()" class="x" aria-label="Close">&times;</button>
+    </div>
+    <div id="ov-log-body"></div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var pid = {{ p.id }};
+    // Reload through the workspace helper: it records the current tab so the
+    // page comes back on the Overview instead of the leftmost sub-tab.
+    function reload() { if (typeof _reload === 'function') _reload(); else window.location.reload(); }
+    function post(url, body) {
+      var init = (body === undefined) ? {method: 'POST'}
+        : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)};
+      return fetch(url, init).then(function (r) { return r.json(); });
+    }
+    function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+
+    window.ovRename = function () {
+      gsNameModal('Rename Project', 'Project name', {{ p.name | tojson }}, function (name) {
+        return post('/projects/' + pid + '/rename', {name: name}).then(function (j) {
+          if (j && j.ok) {
+            document.getElementById('ov-project-name').textContent = j.name;
+            var o = document.getElementById('project-name-hd');
+            if (o) o.textContent = j.name;
+            document.title = j.name + ' - Gateshift';
+            return true;
+          }
+          showToast((j && j.error) || 'rename failed', 'error');
+          return false;
+        });
+      });
+    };
+    window.ovExclRestore = function (did, kind, key, label, kindLabel) {
+      confirmModal({
+        title: 'Restore "' + label + '"?',
+        body: ['The ' + kindLabel + ' comes back into this project. The target configuration is rebuilt.'],
+        confirmLabel: 'Restore',
+      }).then(function (ok) {
+        if (!ok) return;
+        post('/projects/' + pid + '/exclusions/restore', {device_id: did, kind: kind, item_key: key}).then(function (j) {
+          if (j && j.ok) { showNavOverlay(); reload(); }
+          else showToast((j && j.error) || 'not restored', 'error');
+        });
+      });
+    };
+    window.ovNameDrop = function (kind, source, shown) {
+      confirmModal({
+        title: 'Drop this name?',
+        body: ['The ' + kind + ' "' + shown + '" goes back to its source name "' + source + '" in this project.'],
+        confirmLabel: 'Drop', danger: true,
+      }).then(function (ok) {
+        if (!ok) return;
+        post('/projects/' + pid + '/names/delete', {kind: kind, source_name: source}).then(function (j) {
+          if (j && j.ok) { showNavOverlay(); reload(); }
+          else showToast((j && j.error) || 'not dropped', 'error');
+        });
+      });
+    };
+    window.ovSnapshotSave = function () {
+      gsNameModal('Save Snapshot', 'Snapshot name', '', function (name) {
+        return post('/projects/' + pid + '/snapshots', {name: name}).then(function (j) {
+          if (j && j.ok) { showNavOverlay(); reload(); return true; }
+          showToast((j && j.error) || 'snapshot not saved', 'error');
+          return false;
+        });
+      });
+    };
+    window.ovSnapshotRestore = function (sid, name) {
+      confirmModal({
+        title: 'Restore "' + name + '"?',
+        body: ['The project\'s current edits are replaced: save a snapshot first if you want to keep them.'],
+        confirmLabel: 'Restore', danger: true,
+      }).then(function (ok) {
+        if (!ok) return;
+        post('/projects/' + pid + '/snapshots/' + sid + '/restore').then(function (j) {
+          if (!(j && j.ok)) { showToast((j && j.error) || 'restore failed', 'error'); return; }
+          var msg = 'restored "' + j.snapshot + '": ' + j.restored + ' edit(s)';
+          if (j.orphans) msg += ', ' + j.orphans + ' for rules the source no longer has';
+          if (j.source_changed) msg += ' - the source was re-imported since';
+          try { sessionStorage.setItem('gs-flash', msg); } catch (e) {}
+          showNavOverlay(); reload();
+        });
+      });
+    };
+    window.ovSnapshotBranch = function (sid, name) {
+      gsNameModal('Branch from "' + name + '"', 'New project name', '', function (pname) {
+        return post('/projects/' + pid + '/snapshots/' + sid + '/branch', {name: pname}).then(function (j) {
+          if (j && j.ok && j.url) { showNavOverlay(); window.location.href = j.url; return true; }
+          showToast((j && j.error) || 'branch failed', 'error');
+          return false;
+        });
+      });
+    };
+    window.ovSnapshotDelete = function (sid, name) {
+      confirmModal({
+        title: 'Delete the snapshot "' + name + '"?',
+        body: ['The frozen edits of that moment are gone. The project itself stays as it is.'],
+        confirmLabel: 'Delete', danger: true,
+      }).then(function (ok) {
+        if (!ok) return;
+        post('/projects/' + pid + '/snapshots/' + sid + '/delete').then(function (j) {
+          if (j && j.ok) { showNavOverlay(); reload(); }
+          else showToast((j && j.error) || 'delete failed', 'error');
+        });
+      });
+    };
+
+    // ── the project's log: one row per job, the record in a dialog ──
+    // Status words are signals, not chips - they keep real colors (same
+    // literals as gs-log.js, where the reskin aliased the legacy tokens).
+    var TONE = {done: 'var(--accent)', failed: '#e05c5c', refused: '#e05c5c',
+                running: 'var(--accent)', staged: '#d4a017', interrupted: 'var(--tx3)'};
+    var SRC_ONLY = {generate: 1, 'import': 1, collect: 1, upload: 1, pipeline: 1, backup: 1, restore: 1};
+    var _jobs = {};
+    function cap(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+    function rowHtml(j) {
+      var kind = SRC_ONLY[j.kind] ? j.kind : (j.strand || j.kind || 'push');
+      var tone = TONE[j.status] || 'var(--tx2)';
+      var dur = (j.duration_s != null && j.status !== 'running') ? (j.duration_s + 's') : '';
+      return '<div class="ov-log-row" data-job="' + esc(j.job_id) + '" onclick="ovLogOpen(this.dataset.job)" title="Open the complete record">'
+        + '<span class="when">' + esc(j.created_at) + '</span>'
+        + '<span class="kind">' + esc(cap(kind)) + '</span>'
+        + '<span class="st" style="color:' + tone + ';">' + esc(cap(j.status)) + '</span>'
+        + (dur ? '<span class="when">' + esc(dur) + '</span>' : '')
+        + '<span class="sum">' + esc(cap(j.summary || '')) + '</span>'
+        + '</div>';
+    }
+    window.ovLoadLog = function () {
+      var box = document.getElementById('ov-log-list'); if (!box) return;
+      fetch('/deploy/history?project_id=' + pid + '&limit=100')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var jobs = (d && d.jobs) || [];
+          _jobs = {};
+          jobs.forEach(function (j) { _jobs[j.job_id] = j; });
+          var n = document.getElementById('ov-log-count'); if (n) n.textContent = jobs.length;
+          var nl = document.getElementById('ov-log-lbl'); if (nl) nl.textContent = jobs.length === 1 ? 'entry' : 'entries';
+          if (!jobs.length) { box.innerHTML = '<div class="mut" style="font-size:var(--fs-body);padding:8px 0;">No generate or push yet.</div>'; return; }
+          box.innerHTML = jobs.map(rowHtml).join('');
+        })
+        .catch(function () { box.innerHTML = '<div class="mut" style="font-size:var(--fs-body);padding:8px 0;">Log unavailable</div>'; });
+    };
+    function _ovLogEsc(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); ovLogClose(); } }
+    window.ovLogClose = function () {
+      var m = document.getElementById('ov-log-modal'); if (m) m.classList.add('hidden');
+      document.removeEventListener('keydown', _ovLogEsc, true);
+    };
+    window.ovLogOpen = function (jobId) {
+      var j = _jobs[jobId] || {};
+      var kind = SRC_ONLY[j.kind] ? j.kind : ((j.kind || 'push') + (j.strand ? ' ' + j.strand : ''));
+      document.getElementById('ov-log-title').textContent = [cap(kind), cap(j.status), j.created_at].filter(Boolean).join(' · ');
+      var body = document.getElementById('ov-log-body');
+      body.innerHTML = '<div class="mut">Loading&hellip;</div>';
+      var m = document.getElementById('ov-log-modal'); m.classList.remove('hidden');
+      document.addEventListener('keydown', _ovLogEsc, true);
+      fetch('/deploy/push/' + encodeURIComponent(jobId))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var html = '', meta = [];
+          if (j.source_name) meta.push('source ' + esc(j.source_name));
+          if (j.target_name && !SRC_ONLY[j.kind]) meta.push('target ' + esc(j.target_name));
+          if (j.duration_s != null && j.status !== 'running') meta.push(j.duration_s + ' s');
+          var events = (d && d.events) || [];
+          meta.push(events.length + ' step' + (events.length === 1 ? '' : 's'));
+          if (d && d.needs_commit) meta.push('staged, not yet published');
+          html += '<div class="mut" style="margin-bottom:8px;">' + meta.join(' &middot; ') + '</div>';
+          var msg = (d && d.error_text) || j.summary || '';
+          if (msg) html += '<pre>' + esc(msg) + '</pre>';
+          events.forEach(function (e) {
+            html += '<div class="ev' + (e.success ? '' : ' fail') + '">' + (e.success ? '[OK] ' : '[FAIL] ')
+              + esc(e.step) + (e.detail ? ' - ' + esc(e.detail) : '') + '</div>';
+          });
+          if (!msg && !events.length) html += '<div class="mut">No record beyond the row itself.</div>';
+          body.innerHTML = html;
+        })
+        .catch(function () { body.innerHTML = '<div class="mut">Record unavailable</div>'; });
+    };
+
+    document.addEventListener('DOMContentLoaded', function () {
+      ovLoadLog();
+      // The restore's result travels across the reload as a flash.
+      try {
+        var f = sessionStorage.getItem('gs-flash');
+        if (f) { sessionStorage.removeItem('gs-flash'); showToast(f, 'success', 6000); }
+      } catch (e) {}
+    });
+  })();
+</script>

@@ -30,6 +30,7 @@ import requests
 from . import _forti_common as _f
 from . import integrity as _integ
 from .base import (
+    DropTagger,
     DeployDriver,
     DroppedField,
     StepResult,
@@ -77,10 +78,10 @@ def _hint_iface_overlap54(ctx: dict) -> str:
         m = re.search(r"primary IP of '([^']+)'", ctx.get("cli_error") or "")
         blocker = m.group(1) if m else None
         who = f"target interface '{blocker}'" if blocker else "an interface still on the target"
-        return (f" - {who} holds an overlapping subnet. If you renamed a "
+        return (f": {who} holds an overlapping subnet. If you renamed a "
                 f"policy-referenced interface, the old one likely survived the "
                 f"wipe (a network push won't delete policy-referenced interfaces, "
-                f"nor VPN tunnels that policies still reference) - push the "
+                f"nor VPN tunnels that policies still reference): push the "
                 f"Policy strand first to clear those rules, or remove them, "
                 f"then re-push Network.")
     return ""
@@ -93,7 +94,7 @@ def _hint_iface_404(ctx: dict) -> str:
     # target port has nowhere to land. Spell that out instead of the bare 404.
     if (ctx.get("phase") == "primary" and ctx.get("step") == "Interfaces"
             and ctx.get("use_put") and ctx.get("status_code") == 404):
-        return (f" - interface '{ctx.get('entry_id')}' does not exist on the "
+        return (f": interface '{ctx.get('entry_id')}' does not exist on the "
                 f"FortiGate (physical ports are fixed hardware: port1..portN). "
                 f"Map it to a target port in Network > Interfaces before pushing.")
     return ""
@@ -113,7 +114,7 @@ def _hint_iface_651_captive(ctx: dict) -> str:
         if captive:
             captors = sorted({c for _, c in captive})
             phys = sorted({p for p, _ in captive})
-            return (f" - likely cause: {', '.join(phys)} still member(s) of target "
+            return (f": likely cause: {', '.join(phys)} still member(s) of target "
                     f"aggregate {', '.join(captors)} (delete soft-failed, check "
                     f"policy references and remove the target aggregate manually)")
     return ""
@@ -140,9 +141,9 @@ def _hint_utm_not_attachable(ctx: dict) -> str:
             val = m.group(1)
             e = ctx.get("entry") or {}
             if val in {e.get(f) for f in _FORTI_UTM_POLICY_FIELDS}:
-                return (f" - UTM profile '{val}' can't be attached to a firewall "
+                return (f": UTM profile '{val}' can't be attached to a firewall "
                         f"policy on this FortiGate (it exists but isn't a valid "
-                        f"policy profile - e.g. a sniffer/monitor-only profile). "
+                        f"policy profile, e.g. a sniffer/monitor-only profile). "
                         f"Change or clear it in the UTM Profiles enrichment tab.")
     return ""
 
@@ -236,14 +237,69 @@ def _toposort_groups(entries: list[dict]) -> list[dict]:
     )
 
 
-# Pass-through rule fields the V1 driver does not render. Each non-empty
-# occurrence is reported via DroppedField so the UI surfaces it before push.
-_UNSUPPORTED_RULE_FIELDS = (
-    "application",
-    "url_category",
-    "user_identity",
-    "profile_group",
-)
+def _prune_group_members(entries: list[dict], created: set[str],
+                         dropped: list, field: str) -> list[dict]:
+    """Drop group members this push does not actually create.
+
+    (!) The group renders resolve members against the RENAME MAPS - every name
+    the source offered - not against what was emitted. So a member whose object
+    the render had to drop (an unparseable subnet, an unsupported type, a name
+    colliding with a factory object) stayed in its group, and FortiOS then
+    rejected the group with "entry not found in datasource".
+
+    Runs to a fixed point because a group may contain a group: removing an
+    empty one can empty the next. Emptying a group means NOT creating it -
+    pruning a membership to nothing would otherwise be silently wider than the
+    source, which is what integrity.prune_refs warns about.
+    """
+    while True:
+        available = created | {e["name"] for e in entries}
+        survivors, changed = [], False
+        for entry in entries:
+            names = [m.get("name") for m in (entry.get("member") or [])
+                     if isinstance(m, dict)]
+            kept, gone = _integ.prune_refs(names, available)
+            if gone:
+                changed = True
+                dropped.append(DroppedField(
+                    rule_id=entry["name"], field=f"{field}_member",
+                    reason=("member(s) are not created by this push: "
+                            + ", ".join(sorted(gone))),
+                ))
+            if not kept:
+                changed = True
+                dropped.append(DroppedField(
+                    rule_id=entry["name"], field=field,
+                    reason="every member was dropped, so the group is not "
+                           "created either",
+                ))
+                continue
+            entry["member"] = [{"name": n} for n in kept]
+            survivors.append(entry)
+        entries = survivors
+        if not changed:
+            return entries
+
+
+# Per-rule fields FortiOS has no counterpart for in profile-based mode (the
+# default; per-policy applications exist only in NGFW policy-based mode).
+# Each non-empty occurrence is a declared drop, and the fallback names
+# where the function lives on the target, because the review shows it
+# before the push.
+_UNSUPPORTED_RULE_FIELDS = {
+    "application": (
+        "FortiOS matches applications through an application control profile, not per policy",
+        "not pushed: attach an application control profile under Target Settings > UTM Profiles"),
+    "url_category": (
+        "FortiOS filters URL categories through a web filter profile, not per policy",
+        "not pushed: attach a web filter profile under Target Settings > UTM Profiles"),
+    "user_identity": (
+        "user identity is not rendered for FortiOS targets",
+        "not pushed: set users or groups on the policy on the target"),
+    "profile_group": (
+        "FortiOS has no profile group. Profiles attach one by one",
+        "not pushed: attach the profiles under Target Settings > UTM Profiles"),
+}
 
 
 def _safe_name(name: str, max_len: int) -> str:
@@ -334,7 +390,7 @@ def _read_ha_context(device: dict, base: str, token: str, vdom: str,
                 if not ctx["is_primary"]:
                     ctx["detail"] = (
                         f"reached node {ctx['hostname'] or local_serial} is a cluster "
-                        "SUBORDINATE - FGCP config belongs to the primary (older "
+                        "SUBORDINATE: FGCP config belongs to the primary (older "
                         "FortiOS rejects subordinate writes, recent releases silently "
                         "forward them). Point the device's mgmt IP at the current "
                         "primary and re-push.")
@@ -570,7 +626,7 @@ def resolve_snat_pool(nat_row: dict, addr_value_lookup: dict,
             return {"pool": None, "synth": None,
                     "error": f"static-SNAT trans_src {tsrc!r} doesn't resolve "
                              "to a host IP or range (subnet/fqdn/unknown "
-                             "object) - rule skipped"}
+                             "object), rule skipped"}
         name = _safe_name(f"snatpool-{tsrc}", _LIM_OBJ)
         synth = None if name in known_ippools else {
             "name": name, "type": "one-to-one",
@@ -589,7 +645,7 @@ def resolve_snat_pool(nat_row: dict, addr_value_lookup: dict,
             "startip": startip, "endip": endip}, "error": None}
     return {"pool": None, "synth": None,
             "error": f"dynamic-SNAT trans_src {tsrc!r} is neither an ippool "
-                     "nor a resolvable host/range address - rule skipped"}
+                     "nor a resolvable host/range address, rule skipped"}
 
 
 def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
@@ -720,7 +776,7 @@ def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
         if not matched:
             _fate(n, ntype, "declared",
                   reason="policy-NAT: source-NAT has no matching outbound "
-                         "policy - set nat=enable on the relevant policy "
+                         "policy. Set nat=enable on the relevant policy "
                          "manually")
             continue
         for rn in matched:
@@ -753,7 +809,7 @@ def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
         else:
             _fate(n, "snat", "declared",
                   reason="policy-NAT: matching policies have conflicting "
-                         "SNAT pools - nat not auto-set (set manually)")
+                         "SNAT pools. Nat not auto-set (set manually)")
 
     return {"flags": flags, "conflicts": conflicts,
             "pool_synths": pool_synths, "fates": fates}
@@ -765,13 +821,6 @@ class FortinetDriver(DeployDriver):
     # Must match the fw_devices.platform enum value - the runtime looks up
     # drivers by that key (DEPLOY_DRIVERS[device.platform]).
     platform = "fortigate"
-
-    migration_note = (
-        "V1 covers rules, addresses, services, groups, zones, interfaces, "
-        "static routes. NAT, IPv6, UTM/security profiles and multi-VDOM are "
-        "out of scope. Mgmt interface is excluded from push to preserve "
-        "reachability."
-    )
 
     # ── Settings ─────────────────────────────────────────────────
 
@@ -1047,6 +1096,10 @@ class FortinetDriver(DeployDriver):
             if desc:
                 entry["comment"] = desc[:255]
             addrgrp_entries.append(entry)
+        addrgrp_entries = _prune_group_members(
+            addrgrp_entries,
+            {e["name"] for e in addr_entries} | _FORTI_BUILTIN_ADDRS,
+            dropped, "address_group")
         # Nested groups (group-of-groups) must be pushed member-first (BUG-022).
         sections["Address Groups"] = json.dumps(_toposort_groups(addrgrp_entries))
 
@@ -1073,7 +1126,17 @@ class FortinetDriver(DeployDriver):
             safe = svc_rename[name]
             v = o.get("value") or {}
             if v.get("predefined") and name not in _referenced_svcs:
-                continue  # vendor-shipped + unreferenced, skip
+                # Vendor-shipped and nothing points at it: not pushing it is
+                # the complete outcome, not a loss - but it has to be said, or
+                # the services row is short without a reason (matrix 0.9.4,
+                # cp2fgt: 368 of 395).
+                dropped.append(DroppedField(
+                    rule_id=name, field="service",
+                    reason="vendor-shipped service that no rule, group or NAT "
+                           "rule references: the target ships its own catalog",
+                    fallback="not pushed: already on the target",
+                    explained=True))
+                continue
             entry: dict = {"name": safe}
 
             tcp_pr  = v.get("tcp_portrange")
@@ -1193,6 +1256,12 @@ class FortinetDriver(DeployDriver):
             if desc:
                 entry["comment"] = desc[:255]
             svcgrp_entries.append(entry)
+        # (!) Service groups are deliberately NOT pruned the way address
+        # groups are. The loop above passes an unresolved name through on
+        # purpose, because it may be a FortiOS builtin service (HTTP, DNS,
+        # SSH) that resolves at the target without us creating it - there is
+        # no closed list to check against. Pruning here would delete working
+        # members; the push reports an invalid one as an errcode instead.
         # Nested groups (group-of-groups) must be pushed member-first (BUG-022).
         sections["Service Groups"] = json.dumps(_toposort_groups(svcgrp_entries))
 
@@ -1236,7 +1305,14 @@ class FortinetDriver(DeployDriver):
             if sname.lower() in FORTI_BUILTIN_SCHEDULES:
                 # Built-ins are factory-shipped; pushing them as user objects
                 # collides with the predefined entries. Rule-time refs still
-                # resolve against the native target object.
+                # resolve against the native target object - so this is a
+                # complete outcome, not a loss (explained).
+                dropped.append(DroppedField(
+                    rule_id=sname, field="schedule",
+                    reason="FortiOS ships this schedule: rule references "
+                           "resolve against the target's own object",
+                    fallback="not pushed: already on the target",
+                    explained=True))
                 continue
             sval = s.get("value") or {}
             desc = (sval.get("description") or
@@ -1277,9 +1353,9 @@ class FortinetDriver(DeployDriver):
             if not intervals:
                 dropped.append(DroppedField(
                     rule_id=sname, field="schedule",
-                    reason="no forti_* slot AND no intervals - cross-vendor "
+                    reason="no forti_* slot AND no intervals: cross-vendor "
                            "import without any schedule mapping",
-                    fallback="object skipped at push",
+                    fallback="not pushed",
                 ))
                 continue
             # Merge weekly intervals that share a time window into one: Forti
@@ -1306,9 +1382,9 @@ class FortinetDriver(DeployDriver):
             if len(intervals) > 1:
                 dropped.append(DroppedField(
                     rule_id=sname, field="schedule",
-                    reason=(f"{len(intervals)} distinct time windows in source - "
+                    reason=(f"{len(intervals)} distinct time windows in source: "
                             "Forti recurring holds one start/end per object"),
-                    fallback="first window pushed, rest skipped",
+                    fallback="only the first window pushed",
                 ))
             itv = intervals[0]
             kind = (itv.get("kind") or "").lower()
@@ -1345,7 +1421,7 @@ class FortinetDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=sname, field="schedule",
                         reason="group-kind interval with no members",
-                        fallback="object skipped at push",
+                        fallback="not pushed",
                     ))
                     continue
                 e = {"name": sname,
@@ -1356,15 +1432,15 @@ class FortinetDriver(DeployDriver):
             elif kind == "monthly":
                 dropped.append(DroppedField(
                     rule_id=sname, field="schedule",
-                    reason="monthly recurrence (CP-only) - Forti has no "
+                    reason="monthly recurrence (CP-only): Forti has no "
                            "monthly pattern",
-                    fallback="object skipped at push",
+                    fallback="not pushed",
                 ))
             else:
                 dropped.append(DroppedField(
                     rule_id=sname, field="schedule",
                     reason=f"unknown interval kind '{kind}'",
-                    fallback="object skipped at push",
+                    fallback="not pushed",
                 ))
         sections["Schedules Recurring"] = json.dumps(sched_recurring)
         sections["Schedules Onetime"]   = json.dumps(sched_onetime)
@@ -1388,9 +1464,8 @@ class FortinetDriver(DeployDriver):
                 rule_id=rule_id, field="schedule",
                 reason=f"schedule {v!r} was skipped by the schedule renderer "
                        "(not representable on this target)",
-                fallback="rule pushed WITHOUT schedule - always-active "
-                         "(more permissive for allow rules; re-create the "
-                         "schedule on the target if needed)",
+                fallback="pushed without schedule (always active, more permissive "
+                         "for allow rules. Re-create the schedule on the target)",
             ))
             return "always"
 
@@ -1425,9 +1500,9 @@ class FortinetDriver(DeployDriver):
             if not entries:
                 dropped.append(DroppedField(
                     rule_id=name, field="url_category",
-                    reason="no forti_entries slot - cross-vendor import "
+                    reason="no forti_entries slot: cross-vendor import "
                            "without Forti mapping",
-                    fallback="object skipped at push",
+                    fallback="not pushed",
                 ))
                 continue
             entry = {"name": name, "entries": entries}
@@ -1466,7 +1541,7 @@ class FortinetDriver(DeployDriver):
                         rule_id=zname, field="zone_member",
                         reason=f"tunnel iface '{m}' never materializes on "
                                "FortiOS (no VPN tunnel creates it)",
-                        fallback="member omitted; bind the VPN tunnel "
+                        fallback="pushed without the member: bind the VPN tunnel "
                                  "interface to the zone once the VPN is "
                                  "set up",
                     ))
@@ -1496,8 +1571,8 @@ class FortinetDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=zname, field="zone_member",
                     reason="zone has no pushable interface members",
-                    fallback="zone pushed empty - referencing rules stay "
-                             "inactive until it gets members",
+                    fallback="pushed empty: referencing rules stay inactive "
+                             "until it gets members",
                 ))
             # Vendor-prefixed zone-properties from fw_zones.properties
             # (schema in webui/zone_schemas.py). pa_* slots - if present
@@ -1511,6 +1586,27 @@ class FortinetDriver(DeployDriver):
                 entry["description"] = desc[:255]
             zone_entries.append(entry)
         sections["Zones"] = json.dumps(zone_entries)
+
+        # (!) Re-derive what a rule may reference, now that every object
+        # section has been rendered. The sets above were built from the RENAME
+        # MAPS - every name the source offered - but each render drops what
+        # FortiOS cannot express: an unparseable subnet, an unsupported type, a
+        # name colliding with a factory object. A dropped object stayed
+        # "valid", so a rule could reference something that would never exist.
+        # That is not hypothetical: an OPNsense source's '::/32' object was
+        # correctly dropped AND declared, the rules referencing it were written
+        # anyway, and the push died on rule 75 of 182 with 'entry not found in
+        # datasource' - after 74 rules had already landed on the firewall.
+        #
+        # Services are deliberately left alone. An unresolved service name may
+        # be a FortiOS builtin (HTTP, DNS, SSH) that resolves without us
+        # creating it, and there is no closed list to check against, so
+        # narrowing valid_svcs here would drop working references.
+        valid_addrs = ({e["name"] for e in addr_entries}
+                       | {e["name"] for e in addrgrp_entries}
+                       | _FORTI_BUILTIN_ADDRS)
+        valid_ifaces = ({e["name"] for e in zone_entries} | iface_names
+                        | _FORTI_BUILTIN_IFACES)
 
         # ── Interfaces ──
         # Render everything; the push step filters mgmt + physical-DELETE.
@@ -1557,6 +1653,7 @@ class FortinetDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=iname, field="interface",
                     reason="IPSec tunnel iface is implicit (created by the phase1-interface)",
+                    fallback="not pushed: the target derives it", explained=True,
                 ))
                 continue
             entry: dict = {"name": _imap(iname)}
@@ -1580,8 +1677,8 @@ class FortinetDriver(DeployDriver):
                 else:
                     dropped.append(DroppedField(
                         rule_id=iname, field="member_iface_names",
-                        reason="bond has no members - empty aggregate would refuse traffic",
-                        fallback="skipped - add members in Network > Interfaces",
+                        reason="bond has no members: empty aggregate would refuse traffic",
+                        fallback="not pushed: add members in Network > Interfaces",
                     ))
                     continue
             elif itype == "loopback":
@@ -1702,9 +1799,9 @@ class FortinetDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=cidr_str, field="route_device",
                         reason=f"no egress interface (gateway '{gw or '-'}' not on "
-                               "any interface subnet) - FortiOS router/static "
+                               "any interface subnet): FortiOS router/static "
                                "requires 'device'",
-                        fallback="route skipped",
+                        fallback="not pushed",
                     ))
                     continue
                 seq += 1
@@ -1735,7 +1832,7 @@ class FortinetDriver(DeployDriver):
             if not ext_ip:
                 dropped.append(DroppedField(
                     rule_id=v.get("name") or "?", field="vip",
-                    reason="VIP missing extip - not pushable",
+                    reason="VIP missing extip, not pushable",
                 ))
                 continue
             mapped_ips = val.get("mapped_ips") or []
@@ -1771,7 +1868,7 @@ class FortinetDriver(DeployDriver):
             if not start_ip or not end_ip:
                 dropped.append(DroppedField(
                     rule_id=p.get("name") or "?", field="ippool",
-                    reason="IP-pool missing startip/endip - not pushable",
+                    reason="IP-pool missing startip/endip, not pushable",
                 ))
                 continue
             entry = {
@@ -1816,11 +1913,41 @@ class FortinetDriver(DeployDriver):
                 if _psyn["name"] not in ippool_names:
                     ippool_entries.append(dict(_psyn))
                     ippool_names.add(_psyn["name"])
+                    # a pool the fold made for a static-ip SNAT - the
+                    # Review counts it under nat, so it must hear that
+                    # no source entry stands behind it (cp2fgt nat +1)
+                    dropped.append(DroppedField(
+                        rule_id=_psyn["name"], field="ippool", synthesized=True,
+                        reason="a static-ip source NAT needs a one-to-one "
+                               "pool on FortiOS. The source has none",
+                        fallback="created for the static-ip source NAT"))
             for _fate in nat_fold["fates"]:
-                if _fate["ntype"] == "snat" and _fate["kind"] == "declared":
+                if _fate["ntype"] != "snat":
+                    continue
+                if _fate["kind"] == "declared":
                     dropped.append(DroppedField(
                         rule_id=_fate["name"], field="nat_rule",
                         reason=_fate["reason"]))
+                elif _fate["kind"] == "folds":
+                    # Not a loss: in policy-NAT mode the intent IS the policy's
+                    # 'nat enable'. Said out loud so the NAT row of the build
+                    # statistics adds up - 122 of 131 intents on a FortiGate
+                    # self-deploy (matrix 0.9.4).
+                    _on = ", ".join(str(x) for x in (_fate.get("rules") or []))[:100]
+                    dropped.append(DroppedField(
+                        rule_id=_fate["name"], field="nat_rule",
+                        reason="policy-NAT mode: the intent rides on the firewall "
+                               "rule" + (f" ({_on})" if _on else "") + " as "
+                               "'nat enable', not as a central entry",
+                        fallback="not pushed: folded into the firewall rule",
+                        explained=True))
+                elif _fate["kind"] == "disabled":
+                    dropped.append(DroppedField(
+                        rule_id=_fate["name"], field="nat_rule",
+                        reason="disabled on the source: policy-NAT has no "
+                               "separate entry that could carry the disable",
+                        fallback="not pushed: disabled on the source",
+                        explained=True))
 
         def _host_ip(ref: str) -> str | None:
             """orig_dst → a single host IP for the VIP extip. Resolves an
@@ -1846,7 +1973,7 @@ class FortinetDriver(DeployDriver):
             od = [d for d in (n.get("orig_dst") or []) if d and d != "any"]
             if len(od) != 1:                                            # Fund S
                 dropped.append(DroppedField(rule_id=nm, field="nat_rule",
-                    reason="dest-NAT orig_dst is any/multi - not auto-VIP'd (split manually)"))
+                    reason="dest-NAT orig_dst is any/multi, not auto-VIP'd (split manually)"))
                 return
             extip = _host_ip(od[0])
             if not extip:                                               # Fund A
@@ -1865,7 +1992,7 @@ class FortinetDriver(DeployDriver):
             # exemptions) → a VIP would be a no-op; skip it. (Phase 0 guard.)
             if extip == mappedip:
                 dropped.append(DroppedField(rule_id=nm, field="nat_rule",
-                    reason="identity NAT (orig==translated) - no real translation, "
+                    reason="identity NAT (orig==translated), no real translation, "
                            "no VIP rendered"))
                 return
             vip = {"type": "static-nat", "extip": extip,
@@ -1877,8 +2004,8 @@ class FortinetDriver(DeployDriver):
                 pp = _svc_pp(svc[0]) if len(svc) == 1 else None
                 if not pp:                                              # Fund Q
                     dropped.append(DroppedField(rule_id=nm, field="nat_rule",
-                        reason="dest-NAT with port-translation but service is any/multi/"
-                               "unresolved - can't map to a Forti VIP portforward"))
+                        reason="dest-NAT with port-translation but service is "
+                               "any/multi/unresolved: can't map to a Forti VIP portforward"))
                     return
                 proto, extport = pp
                 vip.update({"portforward": "enable", "protocol": proto,
@@ -1908,7 +2035,7 @@ class FortinetDriver(DeployDriver):
             osrc = [s for s in (n.get("orig_src") or []) if s and s != "any"]
             if len(osrc) != 1:
                 dropped.append(DroppedField(rule_id=nm, field="nat_rule",
-                    reason="bidir-static orig_src is any/multi - not auto-VIP'd"))
+                    reason="bidir-static orig_src is any/multi, not auto-VIP'd"))
                 return
             mapped_pub = (n.get("trans_src") or "").strip()
             extip = _host_ip(mapped_pub)        # MAPPED/public
@@ -2008,6 +2135,11 @@ class FortinetDriver(DeployDriver):
             if _pres["synth"]:
                 ippool_entries.append(dict(_pres["synth"]))
                 ippool_names.add(_pres["synth"]["name"])
+                dropped.append(DroppedField(
+                    rule_id=_pres["synth"]["name"], field="ippool", synthesized=True,
+                    reason="a static-ip source NAT needs a one-to-one pool on "
+                           "FortiOS. The source has none",
+                    fallback="created for the static-ip source NAT"))
 
             # central-snat-map mode. Zoned member-ifaces must surface as their
             # zone (same FortiOS constraint as policy srcintf), deduped.
@@ -2051,7 +2183,7 @@ class FortinetDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=n.get("name") or "?", field=aspect,
                         reason="FortiOS central-snat-map does not support negation",
-                        fallback="ignored",
+                        fallback="pushed without the negate",
                     ))
             comments = (n.get("description") or "").strip()
             if comments:
@@ -2079,8 +2211,8 @@ class FortinetDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=a.get("name"), field="address",
                     reason="name collides with a same-named VIP (FortiOS forbids "
-                           "it); the VIP is the dest object policies resolve to",
-                    fallback="redundant address dropped"))
+                           "it). The VIP is the dest object policies resolve to",
+                    fallback="not pushed (the VIP covers it)"))
             addr_entries = [a for a in addr_entries if a.get("name") not in vip_names]
             sections["Address Objects"] = json.dumps(addr_entries)
 
@@ -2113,16 +2245,16 @@ class FortinetDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=rule_id, field="interface_ref",
                         reason=f"tunnel iface '{ref}' never materializes on "
-                               "FortiOS (no VPN tunnel creates it) - "
+                               "FortiOS (no VPN tunnel creates it): "
                                "falling back to 'any'",
-                        fallback="any",
+                        fallback="replaced by any",
                     ))
                     return "any"
                 return _imap(renamed)
             dropped.append(DroppedField(
                 rule_id=rule_id, field="interface_ref",
-                reason=f"'{ref}' not in zones/interfaces - falling back to 'any'",
-                fallback="any",
+                reason=f"'{ref}' not in zones/interfaces: falling back to 'any'",
+                fallback="replaced by any",
             ))
             return "any"
 
@@ -2148,8 +2280,8 @@ class FortinetDriver(DeployDriver):
                 return renamed
             dropped.append(DroppedField(
                 rule_id=rule_id, field="address_ref",
-                reason=f"'{ref}' not in addresses/groups - falling back to 'all'",
-                fallback="all",
+                reason=f"'{ref}' not in addresses/groups: falling back to 'all'",
+                fallback="replaced by all",
             ))
             return "all"
 
@@ -2246,14 +2378,16 @@ class FortinetDriver(DeployDriver):
             if len(match) > 1:                                  # Fund U: ambiguous
                 dropped.append(DroppedField(
                     rule_id=rule_id, field="dstaddr",
-                    reason=f"dest '{ref}' matches {len(match)} dest-NAT VIPs - "
+                    reason=f"dest '{ref}' matches {len(match)} dest-NAT VIPs: "
                            "ambiguous, not auto-wired (set dstaddr→VIP manually)"))
             return _resolve_addr_ref(ref, rule_id)              # 0 match → leave as-is
 
         rule_entries: list[dict] = []
         seen_rule_names: dict[str, int] = {}
+        dropped = DropTagger(dropped)  # rule drops carry the rule's hash (Review change log, R2)
         for i, rule in enumerate(rules):
             rule_id = str(rule.get("rule_name") or rule.get("id") or f"#{i+1}")
+            dropped.current = (rule.get("rhash") or "")
 
             # Default-policy fidelity (see deploy.base.default_rule_disposition).
             _disp, _dnote = default_rule_disposition(rule, "fortigate")
@@ -2265,11 +2399,10 @@ class FortinetDriver(DeployDriver):
                 ))
                 continue
 
-            for fld in _UNSUPPORTED_RULE_FIELDS:
+            for fld, (why, fallback) in _UNSUPPORTED_RULE_FIELDS.items():
                 if rule.get(fld):
                     dropped.append(DroppedField(
-                        rule_id=rule_id, field=fld,
-                        reason="not rendered by fortinet driver V1",
+                        rule_id=rule_id, field=fld, reason=why, fallback=fallback,
                     ))
 
             # Tags (effective from override or source) - Forti policies
@@ -2282,7 +2415,7 @@ class FortinetDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=rule_id, field=tag_field,
                         reason="FortiGate policies have no tag concept",
-                        fallback="ignored",
+                        fallback="pushed without tags",
                     ))
 
             # application-default App-IDs the resolver couldn't map to ports
@@ -2293,7 +2426,7 @@ class FortinetDriver(DeployDriver):
                     rule_id=rule_id, field="service",
                     reason="application-default not resolvable for: "
                            + ", ".join(unresolved_app),
-                    fallback="service left as ALL - set manually",
+                    fallback="replaced by ALL: set the service on the target",
                 ))
 
             base_name = rule.get("rule_name") or f"{prefix}{i+1:03d}"
@@ -2385,7 +2518,7 @@ class FortinetDriver(DeployDriver):
                     dropped.append(DroppedField(
                         rule_id=rule_name, field="nat",
                         reason=f"policy-NAT: {_np} different SNAT pools match this "
-                               "policy's source - ambiguous, nat not auto-set (set manually)"))
+                               "policy's source. Ambiguous, nat not auto-set (set manually)"))
             # Per-rule negate flags - FortiOS expects "enable"/"disable" strings
             # (V0 lab-probe). Default disable; only flip when override-resolved
             # rule.negate_* is truthy.
@@ -2450,6 +2583,7 @@ class FortinetDriver(DeployDriver):
             if utm_emitted:
                 entry["utm-status"] = "enable"
             rule_entries.append(entry)
+        dropped.current = ""   # drops after the rules loop belong to no rule
         sections["Rules"] = json.dumps(rule_entries)
 
         # B-3 (Fund K): a synthesised VIP with no matching allow-policy is inert
@@ -2457,10 +2591,16 @@ class FortinetDriver(DeployDriver):
         for _cands in dnat_index.values():
             for _c in _cands:
                 if _c["vip"] not in wired_vips:
+                    # The VIP IS pushed - what is missing is the policy that
+                    # uses it. Without a fallback the Review read this as a lost
+                    # NAT item and the kind table was over by one per VIP
+                    # (matrix 0.9.4, +9 on every FortiOS leg).
                     dropped.append(DroppedField(
                         rule_id=_c["vip"], field="vip",
-                        reason="dest-NAT VIP created but no matching allow-policy - "
-                               "set a policy dstaddr to this VIP manually",
+                        reason="no allow-policy matches this dest-NAT, so no "
+                               "translation happens: set a policy dstaddr to "
+                               "the VIP manually",
+                        fallback="pushed without a matching allow-policy",
                     ))
 
         # (policy-NAT leftovers - intents with no matching policy or with
@@ -2704,13 +2844,13 @@ class FortinetDriver(DeployDriver):
                         "for cloud clusters). This push does not touch them, but "
                         "the FGCP sync it triggers may copy the primary's "
                         "addressing onto the secondary and split the cluster. "
-                        "Verify HA health after the push; pin per-member static "
+                        "Verify HA health after the push. Pin per-member static "
                         "addresses on those ports if you can."))
         if ha_ctx["enabled"]:
             yield StepResult(
                 step="HA primary-check", success=True,
                 detail=(f"primary {ha_ctx['hostname']}".rstrip()
-                        + (f"; HA-reserved preserved: {', '.join(sorted(ha_reserved))}"
+                        + (f", HA-reserved preserved: {', '.join(sorted(ha_reserved))}"
                            if ha_reserved else "")))
         # Interfaces that must survive the network wipe: the mgmt iface (control
         # channel) + the FGCP HA-reserved set. Excluded from both delete and PUT.
@@ -2953,7 +3093,7 @@ class FortinetDriver(DeployDriver):
             if derivative_cleared:
                 detail += f" (cleared {derivative_cleared} coupled addr)"
             if recovered_sweep:
-                detail += f"; recovered {recovered_sweep} on retry"
+                detail += f". Recovered {recovered_sweep} on retry"
                 if zone_derefs or tunnel_unwinds:
                     _parts = []
                     if zone_derefs:
@@ -2962,7 +3102,7 @@ class FortinetDriver(DeployDriver):
                         _parts.append(f"{tunnel_unwinds} stale-tunnel unwound")
                     detail += f" ({', '.join(_parts)})"
             elif tunnel_unwinds:
-                detail += f"; {tunnel_unwinds} stale-tunnel unwound"
+                detail += f". {tunnel_unwinds} stale-tunnel unwound"
             if soft_failed:
                 detail += f" ({soft_failed} read-only/in-use, skipped"
                 if detached:
@@ -3238,18 +3378,18 @@ class FortinetDriver(DeployDriver):
                 detail += f" ({skipped} skipped - " + "; ".join(parts) + ")"
             if s.label == "Rules" and _prof_pruned:
                 _up = sorted(set(_prof_pruned))
-                detail += ("; security-profile ref(s) not present on target, "
+                detail += (". Security-profile ref(s) not present on target, "
                            f"pruned: {', '.join(_up[:4])}"
                            + (f" (+{len(_up)-4} more)" if len(_up) > 4 else "")
-                           + " - profiles are attach-only (never migrated); "
-                             "create them on the target and re-push to restore "
+                           + ". Profiles are attach-only (never migrated). "
+                             "Create them on the target and re-push to restore "
                              "the inspection")
             if s.label == "Rules" and _iden_pruned:
                 _uniq = sorted(set(_iden_pruned))
                 _head = ", ".join(_uniq[:4])
                 _more = f" (+{len(_uniq)-4} more)" if len(_uniq) > 4 else ""
-                detail += (f"; identity ref(s) not present on target, pruned: "
-                           f"{_head}{_more} - create them (LDAP/FSSO/local) and "
+                detail += (f". Identity ref(s) not present on target, pruned: "
+                           f"{_head}{_more}. Create them (LDAP/FSSO/local) and "
                            "re-push to restore the user constraint")
             yield StepResult(step=step_name, success=True, detail=detail)
 
@@ -3281,8 +3421,8 @@ class FortinetDriver(DeployDriver):
                     _put(base, token, path, vdom, mgmt_entry, verify)
                     yield StepResult(
                         step=mstep, success=True,
-                        detail=(f"{mgmt_iface} reconfigured (force). Session held - "
-                                "verify reachability; if its IP changed, update the "
+                        detail=(f"{mgmt_iface} reconfigured (force). Session held: "
+                                "verify reachability. If its IP changed, update the "
                                 "device's mgmt IP in Gateshift to re-attach."))
                 except _FortiError as exc:
                     yield StepResult(step=mstep, success=False,
@@ -3292,9 +3432,9 @@ class FortinetDriver(DeployDriver):
                     # new IP cut our session. This is the success path here.
                     yield StepResult(
                         step=mstep, success=True,
-                        detail=(f"{mgmt_iface} reconfigured (force) - API session "
+                        detail=(f"{mgmt_iface} reconfigured (force): API session "
                                 "dropped as expected (its IP changed). Gateshift can no "
-                                "longer reach the box at the old address; update the "
+                                "longer reach the box at the old address. Update the "
                                 "device's mgmt IP to the new one to re-attach."))
 
     # ── Target discovery (Discover-as-Verarbeitung) ──────────────

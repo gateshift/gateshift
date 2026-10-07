@@ -1,0 +1,24 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# Tenant switcher (P1.4) - one estate at a time on the Projects page. The
+   controls only (select + rename + add + delete-when-empty, all standard
+   .btn); the "Tenant" header is the page's own row above (user request 2026-10-04).
+   Expects `tenants` (id, name, devices, projects) and `tenant_id`. The pick
+   travels as a cookie (gsSetTenant) so forms on this page and the next page
+   agree on the estate. #}
+{% set _cur = (tenants | selectattr('id', 'equalto', tenant_id) | list | first) %}
+<select id="tenant-select" class="inp" title="The estate shown here"
+        style="font-size:var(--fs-body);padding:5px 26px 5px 8px;width:auto;appearance:none;-webkit-appearance:none;background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>');background-repeat:no-repeat;background-position:right 8px center;"
+        onchange="gsTenantPick(this, {{ tenant_id }})">
+  {% for t in tenants %}
+  <option value="{{ t.id }}" {% if t.id == tenant_id %}selected{% endif %}>{{ t.name }}{% if tenants|length > 1 %} ({{ t.devices }}){% endif %}</option>
+  {% endfor %}
+</select>
+<button type="button" class="btn" title="Rename this tenant"
+        onclick='gsTenantRename({{ tenant_id }}, {{ (_cur.name if _cur else '') | tojson }})'>Rename</button>
+<button type="button" class="btn" title="Create a new, empty tenant" onclick="gsTenantAdd()">+Add Tenant</button>
+{% if _cur and tenant_id != 1 and _cur.devices == 0 and _cur.projects == 0 %}
+<button type="button" class="btn danger" title="Delete this empty tenant"
+        onclick='gsTenantDelete({{ tenant_id }}, {{ _cur.name | tojson }})'>Delete</button>
+{% endif %}
+{# base.html defines gsSetTenant further down the document - wait for it. #}
+<script>document.addEventListener('DOMContentLoaded', function () { gsSetTenant({{ tenant_id }}); });</script>

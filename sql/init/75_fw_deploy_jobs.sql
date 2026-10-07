@@ -29,17 +29,21 @@ CREATE TABLE IF NOT EXISTS fw_deploy_jobs (
   target_id      INT                                               NOT NULL,
   platform       VARCHAR(32)                                       NULL,
   strand         ENUM('policy','network')                          NOT NULL DEFAULT 'policy',
-  status         ENUM('running','done','failed','interrupted')     NOT NULL DEFAULT 'running',
+  status         ENUM('running','done','failed','interrupted','refused') NOT NULL DEFAULT 'running',
   success        TINYINT(1)                                        NULL,
   push_id        CHAR(32)                                          NULL,
   session_handle JSON                                              NULL,
   needs_commit   TINYINT(1)                                        NOT NULL DEFAULT 0,
   error_text     TEXT                                              NULL,
+  skip_sections  JSON                                              NULL,
+  kind           VARCHAR(12)                                       NOT NULL DEFAULT 'push',
+  project_id     INT                                               NULL COMMENT 'fw_projects.id; NULL for pipeline/device rows',
   created_at     TIMESTAMP                                         NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     TIMESTAMP                                         NOT NULL DEFAULT CURRENT_TIMESTAMP
                                                                      ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_target_status (target_id, status),
-  INDEX idx_created (created_at)
+  INDEX idx_created (created_at),
+  INDEX ix_jobs_project (project_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- One row per push step, appended as the worker emits PushResults. The stream

@@ -84,7 +84,7 @@ _FORTI_PREDEFINED = frozenset({
 _PREDEFINED = {"checkpoint": _CP_PREDEFINED, "fortigate": _FORTI_PREDEFINED}
 
 
-def find_unused_objects(conn, device_id):
+def find_unused_objects(conn, device_id, project_id=None):
     """{"unused": [{name, obj_type}], "warnings": [str]}. Objects (address / service /
     address-group / service-group) that NOTHING references - safe to delete - via the
     shared refmodel engine (complete incl. NAT/PBF + SSL-inspection rules on a fresh
@@ -97,8 +97,15 @@ def find_unused_objects(conn, device_id):
         so refmodel can't see an object used only in a VPN domain. Services unaffected."""
     platform = conn.execute(text(
         "SELECT platform FROM fw_devices WHERE id = :d"), {"d": device_id}).scalar()
-    unused_names = (refmodel.find_unused(conn, device_id, "object")
-                    | refmodel.find_unused(conn, device_id, "service"))
+    # the project view (docs/PROJECT_VIEW_DESIGN.md): what the project deleted
+    # is handled already - neither a candidate nor a referrer
+    _excl = None
+    if project_id:
+        import projview
+        _excl = projview.load(conn, project_id).excluded_dict(device_id)
+    _projects = [project_id] if project_id else None
+    unused_names = (refmodel.find_unused(conn, device_id, "object", projects=_projects, excluded=_excl)
+                    | refmodel.find_unused(conn, device_id, "service", projects=_projects, excluded=_excl))
     by_clean = {}
     for name, obj_type in conn.execute(text(
             "SELECT name, obj_type FROM fw_imported_objects WHERE device_id = :d "
@@ -264,7 +271,7 @@ def _forti_delete(device, deletions):
         backup = _forti_backup(device)
     except Exception as e:
         return {"mode": "live", "deleted": [], "backup": None,
-                "errors": [{"error": f"pre-delete backup failed - nothing deleted: {e}"}]}
+                "errors": [{"error": f"pre-delete backup failed, nothing deleted: {e}"}]}
     deleted, errors = [], []
     for d in deletions:
         name = d.get("name")

@@ -3,24 +3,27 @@
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Gateshift installer: checks the prerequisites, generates a .env with
-# strong random credentials (never overwriting an existing one) and starts
+# strong random credentials (never overwriting an existing one), writes a
+# self-signed TLS certificate (never overwriting an existing one) and starts
 # the stack. Safe to run again - an existing installation is simply
 # restarted with its current settings.
 #
-#   ./install.sh                  UI on http://127.0.0.1:8080 (loopback only)
-#   ./install.sh --bind 0.0.0.0   reachable from the network - the UI has no
-#                                 authentication of its own, so do this only
-#                                 behind a reverse proxy or on a trusted
-#                                 management network
+#   ./install.sh                UI on https://<this server's address>/ - every
+#                               address, HTTPS on 443, HTTP on 80 redirects
+#   ./install.sh --renew-cert   new self-signed certificate (new names or
+#                               addresses, or the old one ran out)
+#
+# The first visit sets the admin password. To restrict the UI to one
+# address put WEBUI_BIND=<address> into .env.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BIND=""
+RENEW_CERT=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --bind) BIND="${2:?--bind needs an address}"; shift 2 ;;
-        *) echo "unknown option: $1 (supported: --bind <address>)" >&2; exit 2 ;;
+        --renew-cert) RENEW_CERT=1; shift ;;
+        *) echo "unknown option: $1 (supported: --renew-cert)" >&2; exit 2 ;;
     esac
 done
 
@@ -43,7 +46,18 @@ fi
 docker compose version >/dev/null 2>&1 \
     || fail "the Docker Compose plugin (v2) is missing - see https://docs.docker.com/compose/install/"
 command -v openssl >/dev/null 2>&1 \
-    || fail "openssl is required to generate credentials"
+    || fail "openssl is required to generate credentials and the certificate"
+
+# The UI publishes 443 and 80; another web server on this host would make
+# the stack fail late. Warning only, like the syslog port below.
+if command -v ss >/dev/null 2>&1; then
+    for p in 443 80; do
+        if ss -tln 2>/dev/null | grep -qE ":$p "; then
+            echo "WARNING: something on this host already listens on TCP $p;"
+            echo "         the web container will fail to start until it is freed."
+        fi
+    done
+fi
 
 # The syslog receiver publishes UDP 514; a host syslog daemon already bound
 # there makes the stack fail late, so say it early. Warning only - the port
@@ -55,14 +69,6 @@ fi
 
 if [ -f .env ]; then
     echo "keeping existing .env"
-    if [ -n "$BIND" ]; then
-        if grep -q '^WEBUI_BIND=' .env; then
-            sed -i "s/^WEBUI_BIND=.*/WEBUI_BIND=$BIND/" .env
-        else
-            printf 'WEBUI_BIND=%s\n' "$BIND" >> .env
-        fi
-        echo "set WEBUI_BIND=$BIND"
-    fi
 else
     # A database volume from a previous installation holds the credentials
     # of the .env it was first started with - generating a fresh .env next
@@ -77,19 +83,28 @@ else
     printf 'DB_ROOT_PASSWORD=%s\nDB_PASSWORD=%s\nGATESHIFT_SECRET_KEY=%s\n' \
         "$(openssl rand -hex 24)" "$(openssl rand -hex 24)" \
         "$(openssl rand -base64 32 | tr '+/' '-_')" > .env
-    if [ -n "$BIND" ]; then
-        printf 'WEBUI_BIND=%s\n' "$BIND" >> .env
-    fi
     echo "generated .env with random credentials"
 fi
 
-docker compose up -d
-
-echo
-echo "Gateshift is starting - the first boot builds images and initializes"
-echo "the database, which takes a few minutes."
-if [ -z "$BIND" ] || [ "$BIND" = "127.0.0.1" ]; then
-    echo "UI: http://127.0.0.1:8080"
+# The TLS certificate: self-signed, with this host's names and addresses;
+# kept once it exists, replaced on --renew-cert. Your own CA's files go
+# into certs/ at any time (docs: OPERATING.md).
+if [ "$RENEW_CERT" -eq 1 ]; then
+    ./make-cert.sh --force
 else
-    echo "UI: http://<this server's address>:8080 (bound to $BIND)"
+    ./make-cert.sh
 fi
+
+# --build: an image from an earlier installation of this directory would
+# otherwise be reused and the freshly cloned code never run (found on the
+# 0.9.3 re-install test, 2026-10-07). With nothing changed the build is a
+# cache hit and costs seconds.
+docker compose up -d --build
+
+ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[ -n "$ADDR" ] || ADDR="<this server's address>"
+echo
+echo "Gateshift is starting: the first boot builds images and initializes"
+echo "the database, which takes a few minutes."
+echo "UI: https://$ADDR/   (the browser warns once about the self-signed"
+echo "    certificate. The first visit sets the admin password)"

@@ -14,6 +14,7 @@ USE gateshift;
 -- (all ALTERs folded in) - keep the two in sync.
 CREATE TABLE IF NOT EXISTS fw_devices (
     id               INT AUTO_INCREMENT PRIMARY KEY,
+    tenant_id        INT NOT NULL DEFAULT 1 COMMENT 'fw_tenants.id; constraint added in 72_fw_tenants_projects.sql',
     host_name        VARCHAR(255) NOT NULL UNIQUE COMMENT 'Matches device_host in logs',
     display_name     VARCHAR(255),
     platform         ENUM('panw','opnsense','fortigate','checkpoint','firepower','asa') NULL,

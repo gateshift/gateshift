@@ -23,7 +23,8 @@ USE gateshift;
 --   manual  - user-edited via Enrichment > NAT (Phase D)
 
 CREATE TABLE IF NOT EXISTS fw_nat_rule_overrides (
-  nat_hash    BINARY(20)            NOT NULL PRIMARY KEY,
+  project_id  INT                   NOT NULL DEFAULT 0,
+  nat_hash    BINARY(20)            NOT NULL,
   name        VARCHAR(255)          NULL,
   description TEXT                  NULL,
   disabled    TINYINT(1)            NULL,
@@ -36,5 +37,7 @@ CREATE TABLE IF NOT EXISTS fw_nat_rule_overrides (
   dst_zones   JSON                  NULL,
   source      ENUM('manual','auto') NOT NULL DEFAULT 'manual',
   updated_at  TIMESTAMP             NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                      ON UPDATE CURRENT_TIMESTAMP
+                                      ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (project_id, nat_hash),
+  KEY ix_fw_nat_rule_overrides_key (nat_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

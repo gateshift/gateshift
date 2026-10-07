@@ -33,18 +33,18 @@ compromise, for that line, both the right to ship it commercially and the
 right to relicense it at the change date.
 
 For the common case this costs you nothing: **describe the vendor quirk in
-an issue and it gets fixed.** The information - which endpoint, which
-version, which error - is the valuable part; the patch is usually the easy
+an issue and it gets fixed.** The information, which endpoint, which
+version, which error, is the valuable part. The patch is usually the easy
 part on this side.
 
 **Substantial contributions are possible case by case.** If you want to
-build something bigger - a parser, a vendor driver - open an issue first.
+build something bigger (a parser, a vendor driver), open an issue first.
 Accepting it requires a contributor agreement that assigns the necessary
-rights; that is an open door, not a formality we enjoy.
+rights. That is an open door, not a formality we enjoy.
 
 ## Security
 
-Never report vulnerabilities in a public issue - see [SECURITY.md](SECURITY.md).
+Never report vulnerabilities in a public issue, see [SECURITY.md](SECURITY.md).
 
 ## Support expectations
 

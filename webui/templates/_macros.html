@@ -53,30 +53,30 @@
 {% if state == 'no_source_picked' %}
 <div class="empty" style="padding:64px 20px;">
   <div style="max-width:380px;margin:0 auto;">
-    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">No source device selected.</div>
-    <div style="color:var(--tx2);font-size:12px;">Pick a source device in the header to see {{ label }}.</div>
+    <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin-bottom:4px;">No source device selected.</div>
+    <div style="color:var(--tx2);font-size:var(--fs-body);">Pick a source device in the header to see {{ label }}.</div>
   </div>
 </div>
 {% elif state == 'no_data' %}
 <div class="empty" style="padding:64px 20px;">
   <div style="max-width:380px;margin:0 auto;">
-    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">No data for this device yet.</div>
-    <div style="color:var(--tx2);font-size:12px;margin-bottom:16px;">Import the source configuration on the Devices page to build {{ label }}.</div>
-    <a href="/devices" class="btn primary sm" style="text-decoration:none;">Go to Devices &rarr;</a>
+    <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin-bottom:4px;">No data for this device yet.</div>
+    <div style="color:var(--tx2);font-size:var(--fs-body);margin-bottom:16px;">Import the source configuration on the Devices page to build {{ label }}.</div>
+    <a href="/devices" class="btn" style="text-decoration:none;">Go to Devices &rarr;</a>
   </div>
 </div>
 {% elif state == 'no_rules' %}
 <div class="empty" style="padding:64px 20px;">
   <div style="max-width:380px;margin:0 auto;">
-    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">No security rules on this device.</div>
-    <div style="color:var(--tx2);font-size:12px;">Gateshift imported this device&rsquo;s interfaces and objects, but the source carries no policies &mdash; there is nothing to generate into {{ label }}.</div>
+    <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin-bottom:4px;">No firewall rules on this device.</div>
+    <div style="color:var(--tx2);font-size:var(--fs-body);">Gateshift imported this device&rsquo;s interfaces and objects, but the source carries no policies &mdash; there is nothing to generate into {{ label }}.</div>
   </div>
 </div>
 {% elif state == 'no_generate' %}
 <div class="empty" style="padding:64px 20px;">
   <div style="max-width:380px;margin:0 auto;">
-    <div style="color:var(--tx);font-size:13px;font-weight:500;margin-bottom:4px;">Pipeline regenerates automatically on tab switch.</div>
-    <div style="color:var(--tx2);font-size:12px;">Once Generate finishes, {{ label }} will appear here.</div>
+    <div style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin-bottom:4px;">Pipeline regenerates automatically on tab switch.</div>
+    <div style="color:var(--tx2);font-size:var(--fs-body);">Once Generate finishes, {{ label }} will appear here.</div>
   </div>
 </div>
 {% endif %}
@@ -87,7 +87,7 @@
    rules can't be enabled/disabled at the source. #}
 {% macro disable_toggle(rule) %}
 {% if rule.disabled %}
-<span class="tag" style="font-size:10px;padding:1px 6px;color:var(--tx3);">disabled</span>
+<span class="tag" style="font-size:var(--fs-caption);padding:1px 6px;color:var(--tx3);">Disabled</span>
 {% endif %}
 {% if rule.source_type in ('api_import', 'both') %}
 <button title="{{ 'Enable rule' if rule.disabled else 'Disable rule' }}"

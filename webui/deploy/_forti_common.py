@@ -1017,7 +1017,7 @@ def render_policy_routes(pbf_rules: list, dropped, resolve_subnets=None,
             dropped.append(DroppedField(
                 rule_id=name, field="pbf_ingress_zone",
                 reason=f"zone-ingress {zones} can't map to a Forti interface",
-                fallback="ingress narrowed to interfaces only",
+                fallback="replaced by interfaces (ingress)",
             ))
         if ifaces:
             entry["input-device"] = [{"name": n} for n in ifaces]
@@ -1058,7 +1058,7 @@ def render_policy_routes(pbf_rules: list, dropped, resolve_subnets=None,
             if len(svcs) > 1:
                 dropped.append(DroppedField(
                     rule_id=name, field="pbf_service",
-                    reason="Forti policy-route carries one protocol; extra "
+                    reason="Forti policy-route carries one protocol. Extra "
                            f"services dropped ({svcs[1:]})",
                     fallback=f"using {first}",
                 ))
@@ -1460,10 +1460,10 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
             # with a clear, actionable warning instead of pushing an invalid
             # phase1 - the operator sets it per tunnel in the VPN tab.
             dropped.append(DroppedField(
-                rule_id=name, field="interface",
-                reason="FortiGate phase1 needs a local egress interface; the "
+                rule_id=name, field="local_interface",
+                reason="FortiGate phase1 needs a local egress interface. The "
                        "source carries none (e.g. Check Point communities)",
-                fallback="set the Local IF for this tunnel in the VPN tab"))
+                fallback="not pushed: set the Local IF in the VPN tab"))
             continue
         ptype = v.get("peer_type") or "ip"
         peer = (v.get("peer_address") or "").strip()
@@ -1497,8 +1497,9 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
             dropped.append(DroppedField(
                 rule_id=name, field="psksecret",
                 reason="PSK: a placeholder is pushed unless one is set in Gateshift "
-                       "(then injected, encrypted, at push-time) - source secrets "
-                       "are never migrated"))
+                       "(then injected, encrypted, at push-time). Source secrets "
+                       "are never migrated",
+                fallback="placeholder pushed"))
         prop = _canon_to_forti_proposal(ike.get("encryption"), ike.get("hash"))
         if prop:
             p1["proposal"] = prop
@@ -1530,7 +1531,7 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
         if any(s.get("protocol") for s in sels):
             dropped.append(DroppedField(
                 rule_id=name, field="proxy-id-protocol",
-                reason="phase2 selectors carry subnets only - "
+                reason="phase2 selectors carry subnets only, "
                        "protocol/port narrowing dropped"))
         for idx, (src, dst) in enumerate(pairs):
             p2name = (f"{p1name}-p2-{idx + 1}" if len(pairs) > 1

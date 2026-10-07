@@ -29,6 +29,7 @@ versions, FortiOS enum spellings) deliberately stay in their driver.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable, Iterable, Sequence
 
@@ -123,3 +124,68 @@ def toposort_by_members(
     for it in items:
         visit(it)
     return out
+
+
+# ── I4 the project view (docs/PROJECT_VIEW_DESIGN.md, D9) ─────────────────────
+# What a project excluded ("deleted in this project") must never come out of
+# a render. The loaders apply the view; this is the net under them: the
+# generated sections are searched for the excluded names, and a hit is a
+# blocker finding, never a silent push.
+
+_ENTRY_NAME_RE = re.compile(r'<entry\s+name="([^"]*)"')
+
+
+def _entry_names(body: str) -> set[str]:
+    """Entry names of one rendered section: XML entry@name, or the name on a
+    JSON command / one level down (payload, params) / a nested rules list."""
+    names: set[str] = set()
+    body = (body or "").strip()
+    if not body:
+        return names
+    if body[0] == "<":
+        names.update(_ENTRY_NAME_RE.findall(body))
+        return names
+    if body[0] not in "[{":
+        return names
+    try:
+        data = json.loads(body)
+    except Exception:
+        return names
+    for o in (data if isinstance(data, list) else [data]):
+        if not isinstance(o, dict):
+            continue
+        if isinstance(o.get("name"), str):
+            names.add(o["name"])
+        for v in o.values():
+            if isinstance(v, dict) and isinstance(v.get("name"), str):
+                names.add(v["name"])
+            elif isinstance(v, list):
+                for r in v:
+                    if isinstance(r, dict) and isinstance(r.get("name"), str):
+                        names.add(r["name"])
+    return names
+
+
+def excluded_entries(sections: Sequence[dict], excluded: dict,
+                     sections_for_kind: dict | None = None) -> list[dict]:
+    """Hits of excluded names in rendered sections (I4).
+
+    ``excluded`` maps a kind to the set of excluded names; ``sections_for_kind``
+    (optional) maps a kind to the section names its items render into - a
+    kind without a mapping is searched in every section. Returns
+    [{kind, name, section}], empty when the render is clean."""
+    wanted = {k: {str(n) for n in (names or ()) if n} for k, names in (excluded or {}).items()}
+    wanted = {k: v for k, v in wanted.items() if v}
+    if not wanted:
+        return []
+    by_section = {str(s.get("name") or "?"): _entry_names(str(s.get("xml") or "")) for s in sections or []}
+    hits: list[dict] = []
+    for kind, names in wanted.items():
+        allowed = (sections_for_kind or {}).get(kind)
+        for sec, present in by_section.items():
+            if allowed is not None and sec not in allowed:
+                continue
+            for n in sorted(names & present):
+                hits.append({"kind": kind, "name": n, "section": sec})
+    return hits
+

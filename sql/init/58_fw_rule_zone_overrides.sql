@@ -21,10 +21,13 @@ USE gateshift;
 -- are migrated cartesian-explode style by main.py on first start.
 
 CREATE TABLE IF NOT EXISTS fw_rule_zone_overrides (
-  rule_hash  BINARY(20)            NOT NULL PRIMARY KEY,
+  project_id  INT                   NOT NULL DEFAULT 0,
+  rule_hash  BINARY(20)            NOT NULL,
   src_zone   VARCHAR(128)          NULL,
   dst_zone   VARCHAR(128)          NULL,
   source     ENUM('manual','auto') NOT NULL DEFAULT 'manual',
   updated_at TIMESTAMP             NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                     ON UPDATE CURRENT_TIMESTAMP
+                                     ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (project_id, rule_hash),
+  KEY ix_fw_rule_zone_overrides_key (rule_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

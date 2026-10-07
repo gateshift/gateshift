@@ -1,7 +1,11 @@
 #custom
+# TLS certificate and key written by make-cert.sh / install.sh
+certs/
 *.bak
 *.xml
 *.config
+# ...but parser test fixtures are source, not working files.
+!webui/parsers/tests/fixtures/*.xml
 data/logs/*
 *.log
 # Byte-compiled / optimized / DLL files

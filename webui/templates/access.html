@@ -1,0 +1,39 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# The door (docs/ACCESS_DESIGN.md): one template for the first-start setup
+   (mode 'setup' - no user exists yet, the operator sets the admin password)
+   and the login (mode 'login'). Rendered through base.html so the wordmark
+   and the version chip stay; no navigation tree, no project picker. #}
+{% extends "base.html" %}
+{% block title %}{{ 'Setup' if mode == 'setup' else 'Login' }} - Gateshift{% endblock %}
+{% block main_class %}{% endblock %}
+{% block content %}
+<style>
+  .acc-wrap { display:flex; justify-content:center; padding:72px 20px 40px; }
+  .acc-card { width:100%; max-width:420px; border:1px solid var(--line); background:var(--bg2); padding:22px 24px 24px; display:flex; flex-direction:column; gap:14px; }
+  .acc-card p { margin:0; font-size:var(--fs-body); color:var(--tx2); line-height:1.5; }
+  .acc-card label { display:flex; flex-direction:column; gap:5px; font-size:var(--fs-small); color:var(--tx3); }
+  .acc-card input { font-size:var(--fs-body); padding:7px 10px; }
+  .acc-card .btn { align-self:flex-start; margin-top:4px; }
+  .acc-err { border:1px solid var(--danger); color:var(--danger); padding:8px 10px; font-size:var(--fs-small); }
+</style>
+<div class="acc-wrap">
+  <form class="acc-card" method="post" action="/{{ mode }}" autocomplete="off">
+    <div class="sec-hd" style="padding:0;"><h1>{{ 'Set the Admin Password' if mode == 'setup' else 'Login' }}</h1></div>
+    {% if mode == 'setup' %}
+    <p>Needs at least {{ min_len }} characters. It can be reset from the server's command line.</p>
+    {% endif %}
+    {% if error %}<div class="acc-err">{{ error }}</div>{% endif %}
+    {% if mode == 'setup' %}
+    <label>Password<input type="password" name="password" class="inp" minlength="{{ min_len }}" required autofocus></label>
+    <label>Password again<input type="password" name="password2" class="inp" minlength="{{ min_len }}" required></label>
+    <button type="submit" class="btn">Set Password and Log In</button>
+    {% else %}
+    {# the one account - shown, not editable (readonly still submits the value) #}
+    <label>User name<input type="text" name="username" class="inp" value="admin" readonly tabindex="-1" autocomplete="username" style="color:var(--tx2) !important;cursor:default;"></label>
+    <label>Password<input type="password" name="password" class="inp" autocomplete="current-password" required autofocus></label>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn">Log In</button>
+    {% endif %}
+  </form>
+</div>
+{% endblock %}

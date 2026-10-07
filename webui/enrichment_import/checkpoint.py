@@ -85,7 +85,7 @@ def _merge_with_conflict(target: dict, incoming: dict, conflicts: set) -> None:
             target.pop(k, None)
 
 
-def promote_imported_to_overrides(conn, device_id: int) -> dict:
+def promote_imported_to_overrides(conn, device_id: int, project_id: int) -> dict:
     """Lift CP raw_extras.track into fw_rule_track_overrides for one
     source device.
 
@@ -192,13 +192,14 @@ def promote_imported_to_overrides(conn, device_id: int) -> dict:
     if all_hashes:
         ph = ", ".join(f":h{i}" for i in range(len(all_hashes)))
         params = {f"h{i}": h for i, h in enumerate(all_hashes)}
+        params["pid"] = project_id
         conn.execute(text(
             f"DELETE FROM fw_rule_track_overrides "
-            f"WHERE source = 'auto' AND rule_hash IN ({ph})"
+            f"WHERE project_id = :pid AND source = 'auto' AND rule_hash IN ({ph})"
         ), params)
         conn.execute(text(
             f"DELETE FROM fw_rule_tag_overrides "
-            f"WHERE source = 'auto' AND rule_hash IN ({ph})"
+            f"WHERE project_id = :pid AND source = 'auto' AND rule_hash IN ({ph})"
         ), params)
 
     for h, slots in hash_to_track.items():
@@ -206,8 +207,8 @@ def promote_imported_to_overrides(conn, device_id: int) -> dict:
             continue
         has_manual = conn.execute(text(
             "SELECT 1 FROM fw_rule_track_overrides "
-            "WHERE rule_hash = :h AND source = 'manual'"
-        ), {"h": h}).first()
+            "WHERE project_id = :pid AND rule_hash = :h AND source = \'manual\'"
+        ), {"h": h, "pid": project_id}).first()
         if has_manual:
             counts["skipped_manual"] += 1
             continue
@@ -217,10 +218,11 @@ def promote_imported_to_overrides(conn, device_id: int) -> dict:
         upd = ", ".join(f"{c} = VALUES({c})" for c in cols)
         params = {c: slots[c] for c in cols}
         params["h"] = h
+        params["pid"] = project_id
         conn.execute(text(f"""
             INSERT INTO fw_rule_track_overrides
-              (rule_hash, {col_list}, source)
-            VALUES (:h, {val_ph}, 'auto')
+              (project_id, rule_hash, {col_list}, source)
+            VALUES (:pid, :h, {val_ph}, \'auto\')
             ON DUPLICATE KEY UPDATE
               {upd}, source = 'auto'
         """), params)
@@ -231,8 +233,8 @@ def promote_imported_to_overrides(conn, device_id: int) -> dict:
             continue
         has_manual = conn.execute(text(
             "SELECT 1 FROM fw_rule_tag_overrides "
-            "WHERE rule_hash = :h AND source = 'manual'"
-        ), {"h": h}).first()
+            "WHERE project_id = :pid AND rule_hash = :h AND source = \'manual\'"
+        ), {"h": h, "pid": project_id}).first()
         if has_manual:
             counts["skipped_manual"] += 1
             continue
@@ -242,10 +244,11 @@ def promote_imported_to_overrides(conn, device_id: int) -> dict:
         upd = ", ".join(f"{c} = VALUES({c})" for c in cols)
         params = {c: slots[c] for c in cols}
         params["h"] = h
+        params["pid"] = project_id
         conn.execute(text(f"""
             INSERT INTO fw_rule_tag_overrides
-              (rule_hash, {col_list}, source)
-            VALUES (:h, {val_ph}, 'auto')
+              (project_id, rule_hash, {col_list}, source)
+            VALUES (:pid, :h, {val_ph}, \'auto\')
             ON DUPLICATE KEY UPDATE
               {upd}, source = 'auto'
         """), params)
