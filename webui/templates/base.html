@@ -152,7 +152,7 @@
        Hidden input keeps the legacy id so HTMX hx-include="#device-select"
        calls (rules_fragment pagination) keep sending the device param. #}
     {% if request.url.path.startswith('/rules') and device %}
-    <input type="hidden" id="device-select" name="device" value="{{ device }}">
+    <input type="hidden" id="device-select" name="device" value="{{ device_id }}">
     <div class="crumb">
       {# The project is named on the Overview tab (U8); the header carries only
          the EE scope pickers below (user decision 2026-10-03). The snapshot
@@ -192,7 +192,7 @@
           <span class="hdr-cap">{{ 'Template' if _mgr_is_pano else ('Gateway' if pano_manager_platform == 'checkpoint' else 'Device') }}</span>
           <select id="pano-net-select" class="picker" title="{% if _mgr_is_pano %}Network scope - template or template-stack (interfaces/routes/zones){% elif pano_manager_platform == 'checkpoint' %}Network layer - a gateway/cluster's interfaces/routes (topology + Gaia){% else %}Network layer - a managed device's interfaces/routes/zones (device-db){% endif %}"
                   style="appearance:none;-webkit-appearance:none;padding-right:22px;"
-                  onchange="if(this.value)location.href='/rules?device={{ device | urlencode }}&template='+encodeURIComponent(this.value)">
+                  onchange="if(this.value)location.href='/rules?device={{ device_id }}&template='+encodeURIComponent(this.value)">
             {% set _stacks = pano_templates|selectattr('type','equalto','template-stack')|list %}
             {% set _plain  = pano_templates|rejectattr('type','equalto','template-stack')|list %}
             {% if _stacks %}<optgroup label="Template-Stacks">
@@ -211,22 +211,22 @@
                   style="appearance:none;-webkit-appearance:none;padding-right:22px;"
                   onchange="_panoGoDG(this.value)">
             {% if _mgr_is_pano %}
-            {% for dg in pano_dgs %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            {% for dg in pano_dgs %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
             {% else %}
             {# FMG mixes three scope kinds - group them so ADOM vs package is scannable #}
             {% set _sg = pano_dgs|selectattr('type','equalto','global')|list %}
             {% set _sa = pano_dgs|selectattr('type','in',('adom','domain'))|list %}
             {% set _sp = pano_dgs|selectattr('type','equalto','package')|list %}
             {% if _sg %}<optgroup label="Global">
-              {% for dg in _sg %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+              {% for dg in _sg %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
             </optgroup>{% endif %}
             {# CP: a Global scope ⇒ MDS (label "Domains"); no Global ⇒ SmartCenter (one mgmt
                context, label "Management"). FMG ⇒ "ADOMs". #}
             {% if _sa %}<optgroup label="{{ ('Domains' if _sg else 'Management') if pano_manager_platform == 'checkpoint' else 'ADOMs' }}">
-              {% for dg in _sa %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+              {% for dg in _sa %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
             </optgroup>{% endif %}
             {% if _sp %}<optgroup label="Policy Packages">
-              {% for dg in _sp %}<option value="{{ dg.name }}" {% if dg.name == device %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+              {% for dg in _sp %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
             </optgroup>{% endif %}
             {% endif %}
           </select>
@@ -250,7 +250,7 @@
         }
         function _panoSetLink(on){
           localStorage.setItem('pano_net_linked', on ? '1' : '0');
-          if(on){ location.href = '/rules?device={{ device | urlencode }}'; return; }  /* snap network → bound stack */
+          if(on){ location.href = '/rules?device={{ device_id }}'; return; }  /* snap network → bound stack */
           _panoApplyLinkFilter();                              /* unlinked → re-enable all options in place */
         }
         function _panoGoDG(v){
@@ -366,7 +366,7 @@
         <span class="on">Manager</span>
         {# land on the ROOT scope (PA 'shared', FMG 'global') - by role, never a hardcoded name #}
         {% set _mroot = (policy_scopes or []) | selectattr('scope_role', 'equalto', 'root') | first %}
-        <a href="/rules?device={{ (_mroot.name if _mroot else 'shared') | urlencode }}&from=manager" title="Edit a single scope">Scope</a>
+        {% if _mroot %}<a href="/rules?device={{ _mroot.id }}&from=manager" title="Edit a single scope">Scope</a>{% endif %}
       </span>
       {# DEST group - pick the deploy target: this manager (optimize in place) or another
          manager (migrate). The Deploy tab reacts to this (mgrDestChange in manager.html). #}

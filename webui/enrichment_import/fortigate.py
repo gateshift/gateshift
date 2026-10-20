@@ -106,15 +106,11 @@ def promote_imported_to_overrides(conn, device_id: int, project_id: int) -> dict
               "conflicts": 0, "skipped_manual": 0}
 
     dev = conn.execute(text(
-        "SELECT host_name, display_name, platform "
-        "FROM fw_devices WHERE id = :id"
+        "SELECT platform FROM fw_devices WHERE id = :id"
     ), {"id": device_id}).mappings().fetchone()
     if not dev or (dev["platform"] or "").lower() != "fortigate":
         return counts
 
-    device_host = dev["display_name"] or dev["host_name"]
-    if not device_host:
-        return counts
 
     # 1. Pull every (rule_name, raw_extras) for this device, latest import.
     rows = conn.execute(text("""
@@ -142,7 +138,7 @@ def promote_imported_to_overrides(conn, device_id: int, project_id: int) -> dict
         by_name[r["rule_name"]] = extras
 
     # 2. Resolve rule_name → content_hash list. Look across every
-    #    pipeline stage that carries (device_host, rule_name,
+    #    pipeline stage that carries (device_id, rule_name,
     #    content_hash) - the hash formula is stable across stages, but
     #    not every device runs every module (quality_filter / subnet /
     #    accumulate can be disabled per-device). UNION DISTINCT gives
@@ -151,17 +147,17 @@ def promote_imported_to_overrides(conn, device_id: int, project_id: int) -> dict
     for name in by_name:
         hashes = conn.execute(text("""
             SELECT DISTINCT content_hash FROM fw_rules_filtered
-              WHERE device_host = :h AND rule_name = :n AND content_hash IS NOT NULL
+              WHERE device_id = :id AND rule_name = :n AND content_hash IS NOT NULL
             UNION
             SELECT DISTINCT content_hash FROM fw_rules_subnet
-              WHERE device_host = :h AND rule_name = :n AND content_hash IS NOT NULL
+              WHERE device_id = :id AND rule_name = :n AND content_hash IS NOT NULL
             UNION
             SELECT DISTINCT content_hash FROM fw_rules_accumulated
-              WHERE device_host = :h AND rule_name = :n AND content_hash IS NOT NULL
+              WHERE device_id = :id AND rule_name = :n AND content_hash IS NOT NULL
             UNION
             SELECT DISTINCT content_hash FROM fw_rules_consolidated_1
-              WHERE device_host = :h AND rule_name = :n AND content_hash IS NOT NULL
-        """), {"h": device_host, "n": name}).scalars().all()
+              WHERE device_id = :id AND rule_name = :n AND content_hash IS NOT NULL
+        """), {"id": device_id, "n": name}).scalars().all()
         if hashes:
             name_to_hashes[name] = hashes
 

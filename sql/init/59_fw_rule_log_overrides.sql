@@ -7,8 +7,8 @@ USE gateshift;
 -- keyed by content_hash.
 --
 -- Generate truncates and rebuilds fw_rules_filtered every run, but
--- content_hash is deterministic (SHA1 over device_host + action + direction
--- + proto + dst_port + sorted src/dst tuples - see 55_fw_rules_filtered.sql),
+-- content_hash is deterministic (gs_rule_hash over the Device's id + action +
+-- direction + proto + dst_port + sorted src/dst tuples - see 55_fw_rules_filtered.sql),
 -- so overrides survive across runs by joining on r.content_hash.
 --
 -- Replaces the device-default log_forwarding emitted uniformly by the PA

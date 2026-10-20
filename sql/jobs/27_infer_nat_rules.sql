@@ -15,6 +15,8 @@ USE gateshift;
 --                   * private dst + inbound  from external interface → DNAT
 --                 The translated address is the external interface's IP.
 --
+-- Rows are attributed by the Device's id the evidence carries (phase 5 of
+-- docs/DEVICE_IDENTITY_PLAN.md), never by its name.
 -- Source of truth is `fw_nat_evidence` - the ingest-maintained, NAT-faithful
 -- aggregate (one row per distinct flow shape; original + translated dst_port
 -- kept separate, zones in the key, private/public IP class precomputed).  This
@@ -108,7 +110,7 @@ SELECT
   ) AS properties
 FROM (
   SELECT
-    ev.device_host,
+    ev.device_id,
     ev.src_zone,
     ev.dst_zone,
     INET6_NTOA(ev.nat_src_ip) AS trans_src,
@@ -117,11 +119,11 @@ FROM (
   FROM fw_nat_evidence ev
   WHERE ev.nat_src_ip != _binary X'00000000000000000000000000000000'
     AND ev.src_ip     != _binary X'00000000000000000000000000000000'
-  GROUP BY ev.device_host, ev.src_zone, ev.dst_zone, ev.nat_src_ip
+  GROUP BY ev.device_id, ev.src_zone, ev.dst_zone, ev.nat_src_ip
   HAVING hits >= @nat_hit_threshold
 ) agg
 JOIN fw_devices d
-  ON d.host_name = agg.device_host OR d.display_name = agg.device_host
+  ON d.id = agg.device_id
 JOIN tmp_ext_dev e ON e.device_id = d.id;
 
 -- ── Step A2: Direct DNAT - translated destination in evidence ─────────────
@@ -162,7 +164,7 @@ SELECT
   ) AS properties
 FROM (
   SELECT
-    ev.device_host,
+    ev.device_id,
     ev.src_zone,
     ev.dst_zone,
     ev.proto,
@@ -174,12 +176,12 @@ FROM (
   FROM fw_nat_evidence ev
   WHERE ev.nat_dst_ip != _binary X'00000000000000000000000000000000'
     AND ev.dst_ip     != _binary X'00000000000000000000000000000000'
-  GROUP BY ev.device_host, ev.src_zone, ev.dst_zone, ev.proto,
+  GROUP BY ev.device_id, ev.src_zone, ev.dst_zone, ev.proto,
            ev.dst_ip, ev.dst_port, ev.nat_dst_ip, ev.nat_dst_port
   HAVING hits >= @nat_hit_threshold
 ) agg
 JOIN fw_devices d
-  ON d.host_name = agg.device_host OR d.display_name = agg.device_host
+  ON d.id = agg.device_id
 JOIN tmp_ext_dev e ON e.device_id = d.id;
 
 -- ── Step B1: Indirect SNAT - private src + outbound, no translation ──────
@@ -222,7 +224,7 @@ SELECT
   ) AS properties
 FROM (
   SELECT
-    ev.device_host,
+    ev.device_id,
     JSON_ARRAYAGG(DISTINCT INET6_NTOA(ev.src_ip)) AS orig_src_list,
     SUM(ev.hit_count) AS hits
   FROM fw_nat_evidence ev
@@ -233,11 +235,11 @@ FROM (
     AND ev.src_is_private = 1          -- private src (IPv4 by construction)
     AND ev.dst_is_private = 0          -- dst NOT private …
     AND LENGTH(ev.dst_ip) = 4          -- … and IPv4 public (exclude IPv6)
-  GROUP BY ev.device_host
+  GROUP BY ev.device_id
   HAVING hits >= @nat_hit_threshold
 ) agg
 JOIN fw_devices d
-  ON d.host_name = agg.device_host OR d.display_name = agg.device_host
+  ON d.id = agg.device_id
 JOIN tmp_ext_dev e ON e.device_id = d.id;
 
 -- ── Step B2: Indirect DNAT - private dst + inbound from public src ───────
@@ -279,7 +281,7 @@ SELECT
   ) AS properties
 FROM (
   SELECT
-    ev.device_host,
+    ev.device_id,
     ev.proto,
     INET6_NTOA(ev.dst_ip) AS trans_dst,
     ev.dst_port,
@@ -292,11 +294,11 @@ FROM (
     AND ev.dst_is_private = 1          -- private dst (IPv4 by construction)
     AND ev.src_is_private = 0          -- src NOT private …
     AND LENGTH(ev.src_ip) = 4          -- … and IPv4 public (exclude IPv6)
-  GROUP BY ev.device_host, ev.proto, ev.dst_ip, ev.dst_port
+  GROUP BY ev.device_id, ev.proto, ev.dst_ip, ev.dst_port
   HAVING hits >= @nat_hit_threshold
 ) agg
 JOIN fw_devices d
-  ON d.host_name = agg.device_host OR d.display_name = agg.device_host
+  ON d.id = agg.device_id
 JOIN tmp_ext_dev e ON e.device_id = d.id;
 
 DROP TEMPORARY TABLE IF EXISTS tmp_ext_dev;
@@ -304,21 +306,11 @@ DROP TEMPORARY TABLE IF EXISTS tmp_ext_dev;
 -- ── Hash-stage tail (Phase A3) ────────────────────────────────────────────
 -- All four inferred-NAT INSERTs above leave nat_hash NULL. Compute it now
 -- so override-bindings (Phase A4) can match these inferred rules too.
--- Mirrors the canonical _NAT_HASH_EXPR from webui/main.py - keep in sync.
+-- The identity hash is one function in the database, gs_nat_hash
+-- (sql/init/47_fn_nat_hash.sql); this job and the webapp both call it.
 UPDATE fw_nat_rules n
-JOIN fw_devices d ON d.id = n.device_id
-SET n.nat_hash = UNHEX(SHA1(CONCAT_WS(0x1f,
-    COALESCE(d.host_name, d.display_name, ''),
-    n.nat_type,
-    COALESCE(n.interface_name, ''),
-    COALESCE(JSON_EXTRACT(n.src_zones,    '$'), ''),
-    COALESCE(JSON_EXTRACT(n.dst_zones,    '$'), ''),
-    COALESCE(JSON_EXTRACT(n.orig_src,     '$'), ''),
-    COALESCE(JSON_EXTRACT(n.orig_dst,     '$'), ''),
-    COALESCE(JSON_EXTRACT(n.orig_service, '$'), ''),
-    COALESCE(n.trans_src, ''),
-    n.trans_src_type,
-    COALESCE(n.trans_dst, ''),
-    COALESCE(n.trans_dst_port, '')
-)))
+SET n.nat_hash = gs_nat_hash(
+    n.device_id, n.nat_type, n.interface_name,
+    n.src_zones, n.dst_zones, n.orig_src, n.orig_dst, n.orig_service,
+    n.trans_src, n.trans_src_type, n.trans_dst, n.trans_dst_port)
 WHERE n.nat_hash IS NULL;

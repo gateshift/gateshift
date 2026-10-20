@@ -37,9 +37,11 @@ def _sha256(b: bytes):
 
 def _detect_vendor(d: dict) -> str | None:
     """Detect vendor from characteristic KV field names."""
-    # Fortinet: devid starts with FG/FGT, or has logid+vd fields
-    devid = d.get("devid", "")
-    if devid.startswith(("fg", "fgt")):
+    # Fortinet: devid starts with FG (a unit serial, upper case on the wire:
+    # only the KEY was lower-cased above, so compare case-insensitively), or
+    # has logid+vd fields
+    devid = (d.get("devid") or "").lower()
+    if devid.startswith("fg"):
         return "fortinet"
     if "logid" in d and "vd" in d:
         return "fortinet"
@@ -168,6 +170,8 @@ def parse(payload: str):
         "security_profile": d.get("profile"),
         "security_profile_group": d.get("profile-group") or d.get("profilegroup"),
         "url_category": d.get("catdesc") or d.get("cat"),
+        # the whole key-value dict: the sender's serial (devid, origin) is
+        # read from here (modules/parsers/sender.py)
         "extra": d,
     }
 

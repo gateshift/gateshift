@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS fw_flows (
   received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   event_ts DATETIME NULL,
   vendor VARCHAR(64) NULL,
-  device_host VARCHAR(255) NULL,
   program VARCHAR(128) NULL,
   facility TINYINT UNSIGNED NULL,
   severity TINYINT UNSIGNED NULL,
@@ -39,12 +38,18 @@ CREATE TABLE IF NOT EXISTS fw_flows (
   raw_hash BINARY(32) NOT NULL,
   extra JSON NULL,
   source_type  VARCHAR(16) NOT NULL DEFAULT 'syslog',
+  -- the row's origin: a syslog sender, or a Device's own configuration
+  -- import (fw_log_senders, docs/DEVICE_IDENTITY_PLAN.md phase 4). The
+  -- evidence hangs on the sender, never on a Device: deleting a Device
+  -- releases the mapping and keeps what the wire said.
+  sender_id INT NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uq_raw_hash (raw_hash),
   KEY idx_time (event_ts, received_at),
-  KEY idx_device_time (device_host, event_ts),
   KEY idx_5tuple (proto, src_ip, src_port, dst_ip, dst_port),
   KEY idx_action_time (action, event_ts),
   KEY idx_rule (rule_hash, event_ts),
-  KEY idx_source_type (source_type, device_host)
+  KEY idx_source_type (source_type, sender_id),
+  KEY idx_flows_sender (sender_id, event_ts),
+  FOREIGN KEY (sender_id) REFERENCES fw_log_senders(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

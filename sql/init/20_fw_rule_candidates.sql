@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS fw_rule_candidates (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   vendor VARCHAR(64) NULL,
-  device_host VARCHAR(255) NULL,
+  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  device_id INT NULL,
 
   action ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
@@ -41,9 +42,10 @@ CREATE TABLE IF NOT EXISTS fw_rule_candidates (
   sample_raw_id BIGINT UNSIGNED NULL,
 
   source_type  VARCHAR(16) NOT NULL DEFAULT 'syslog',
+  KEY idx_device_id (device_id),
   PRIMARY KEY (id),
   KEY idx_generated (generated_at),
-  KEY idx_host (device_host, generated_at),
   KEY idx_rulehash (rule_hash, generated_at),
-  KEY idx_tuple (action, direction, iface_in, proto, dst_port_from, generated_at)
+  KEY idx_tuple (action, direction, iface_in, proto, dst_port_from, generated_at),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

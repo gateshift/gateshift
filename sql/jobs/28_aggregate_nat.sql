@@ -65,16 +65,11 @@ JOIN JSON_TABLE(
   '$[*]' COLUMNS (ip_str VARCHAR(64) PATH '$')
 ) jt
 JOIN (
-  -- Re-evaluate is_private once, alongside ip_str - cheaper than nesting
-  -- a CASE that re-runs all four BETWEEN comparisons four times above.
+  -- Re-evaluate is_private once, alongside ip_str (gs_ip_is_private, the
+  -- one private-range test, sql/init/49_fn_ip_private.sql).
   SELECT
     rid, ip_str_inner,
-    INET_ATON(ip_str_inner) IS NOT NULL AND (
-         INET_ATON(ip_str_inner) BETWEEN INET_ATON('10.0.0.0')      AND INET_ATON('10.255.255.255')
-      OR INET_ATON(ip_str_inner) BETWEEN INET_ATON('172.16.0.0')    AND INET_ATON('172.31.255.255')
-      OR INET_ATON(ip_str_inner) BETWEEN INET_ATON('192.168.0.0')   AND INET_ATON('192.168.255.255')
-      OR INET_ATON(ip_str_inner) BETWEEN INET_ATON('100.64.0.0')    AND INET_ATON('100.127.255.255')
-    ) AS is_private
+    INET_ATON(ip_str_inner) IS NOT NULL AND gs_ip_is_private(INET6_ATON(ip_str_inner)) AS is_private
   FROM (
     SELECT r2.id AS rid, jt2.ip_str_inner
     FROM fw_nat_rules r2
@@ -112,12 +107,7 @@ JOIN JSON_TABLE(
 JOIN (
   SELECT
     rid, ip_str_inner,
-    INET_ATON(ip_str_inner) IS NOT NULL AND (
-         INET_ATON(ip_str_inner) BETWEEN INET_ATON('10.0.0.0')      AND INET_ATON('10.255.255.255')
-      OR INET_ATON(ip_str_inner) BETWEEN INET_ATON('172.16.0.0')    AND INET_ATON('172.31.255.255')
-      OR INET_ATON(ip_str_inner) BETWEEN INET_ATON('192.168.0.0')   AND INET_ATON('192.168.255.255')
-      OR INET_ATON(ip_str_inner) BETWEEN INET_ATON('100.64.0.0')    AND INET_ATON('100.127.255.255')
-    ) AS is_private
+    INET_ATON(ip_str_inner) IS NOT NULL AND gs_ip_is_private(INET6_ATON(ip_str_inner)) AS is_private
   FROM (
     SELECT r2.id AS rid, jt2.ip_str_inner
     FROM fw_nat_rules r2
@@ -260,20 +250,10 @@ DROP TEMPORARY TABLE IF EXISTS tmp_nat_dst_out;
 -- ── Hash-stage tail (Phase A3) ────────────────────────────────────────────
 -- This job rewrites orig_src / orig_dst (subnet aggregation) - that changes
 -- nat_hash inputs. Recompute the hash for every row so overrides bind to
--- the post-aggregation rule shape. Mirrors _NAT_HASH_EXPR (webui/main.py).
+-- the post-aggregation rule shape, through the one function in the database
+-- (gs_nat_hash, sql/init/47_fn_nat_hash.sql).
 UPDATE fw_nat_rules n
-JOIN fw_devices d ON d.id = n.device_id
-SET n.nat_hash = UNHEX(SHA1(CONCAT_WS(0x1f,
-    COALESCE(d.host_name, d.display_name, ''),
-    n.nat_type,
-    COALESCE(n.interface_name, ''),
-    COALESCE(JSON_EXTRACT(n.src_zones,    '$'), ''),
-    COALESCE(JSON_EXTRACT(n.dst_zones,    '$'), ''),
-    COALESCE(JSON_EXTRACT(n.orig_src,     '$'), ''),
-    COALESCE(JSON_EXTRACT(n.orig_dst,     '$'), ''),
-    COALESCE(JSON_EXTRACT(n.orig_service, '$'), ''),
-    COALESCE(n.trans_src, ''),
-    n.trans_src_type,
-    COALESCE(n.trans_dst, ''),
-    COALESCE(n.trans_dst_port, '')
-)));
+SET n.nat_hash = gs_nat_hash(
+    n.device_id, n.nat_type, n.interface_name,
+    n.src_zones, n.dst_zones, n.orig_src, n.orig_dst, n.orig_service,
+    n.trans_src, n.trans_src_type, n.trans_dst, n.trans_dst_port);

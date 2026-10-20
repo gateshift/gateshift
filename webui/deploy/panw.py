@@ -29,8 +29,17 @@ from .base import (
     StepResult,
     transport_fail_fast,
     default_rule_disposition,
+    egress_for_next_hop,
     expand_multiproto_services,
+    iface_subnets,
     register_driver,
+    rollback_phrase,
+    step_modifies,
+    unresolved_reference,
+    management_host, split_dual_stack_objects, is_host_cidr, bare_host, object_values, ipv6_value,
+    nat_rule_ipv6, used_catch_all_tokens, catch_all_objects,
+    selector_family, split_selectors_by_family, mixed_selector_drop, peer_address6_drop,
+    widen_post_nat_destinations,
 )
 
 # Pass-through V1 schema fields the panw driver does not yet render.
@@ -56,7 +65,21 @@ _PA_NAME_MAX_LEN = 63
 
 
 def _safe_pa_name(name: str) -> str:
-    s = _PA_NAME_SAFE_RE.sub("-", name or "")
+    raw = name or ""
+    if ":" in raw:
+        # An IPv6-derived name (an address or prefix, with or without a
+        # 'h-'/'n-' prefix or a zone suffix) keeps the address readable and
+        # distinct: ':' becomes '-' and '/' becomes '_', and a stem that would
+        # start with a dash gets the 'ip6' prefix. The generic path stripped
+        # the leading characters to nothing: '::/0' became the object '0',
+        # '::/32' became '32', '::' the fallback 'obj', all accepted by PAN-OS
+        # and declared by nothing (docs/IPV6_PLAN.md, defect 7).
+        s = raw.replace(":", "-").replace("/", "_")
+        s = _PA_NAME_SAFE_RE.sub("-", s)
+        if not s or not s[0].isalnum():
+            s = "ip6" + s
+        return s[:_PA_NAME_MAX_LEN]
+    s = _PA_NAME_SAFE_RE.sub("-", raw)
     s = _PA_NAME_LEAD_RE.sub("", s)
     return s[:_PA_NAME_MAX_LEN] or "obj"
 
@@ -79,6 +102,10 @@ requests.packages.urllib3.disable_warnings(
 # forced into the application list. Service-object generation + svc_lookup
 # silently skip these protos so no dangling references survive.
 _PA_SERVICE_PROTOS = ("tcp", "udp")
+# Service members a rule may carry without this push creating them: the two
+# PAN-OS predefined services and the keywords (invariant I1 for services).
+_PA_SERVICE_SENTINELS = ("any", "application-default", "service-http", "service-https")
+
 _L3_PROTO_TO_PA_APP: dict[str, str] = {
     "icmp":   "icmp",
     "icmp6":  "ipv6-icmp",
@@ -272,13 +299,20 @@ def _pa_spec_render(root_tag, objs, name_of, builders, ctx=None, entry_skip=None
         if entry_skip is not None and entry_skip(obj, ctx):
             continue
         nm = name_of(obj)
-        # Two distinct source objects can sanitize to the SAME PA name (e.g. the
-        # degenerate IPv6 pair "::"→h-:: and "::/32"→h--- both collapse to "h---"
-        # once ':' is stripped) - PAN-OS rejects a duplicate <entry name> with
-        # "'…' is already in use", failing the whole push. Emit the first, skip
-        # the rest so the set stays valid. Rules that referenced the dropped
-        # object already resolve to the same name, so the reference still binds.
+        # Two distinct source objects can sanitize to the SAME PA name - PAN-OS
+        # rejects a duplicate <entry name> with "'…' is already in use", failing
+        # the whole push. Emit the first, skip the rest so the set stays valid,
+        # and SAY so: the skipped object's rules bind to the first one's value
+        # (docs/IPV6_PLAN.md, defect 7: the skip used to be silent).
         if nm in seen:
+            dropped = (ctx or {}).get("dropped")
+            if dropped is not None:
+                dropped.append(DroppedField(
+                    rule_id=str((obj.get("name") if isinstance(obj, dict) else None) or nm),
+                    field=root_tag,
+                    reason=f"its name sanitizes to '{nm}', the name of an object already "
+                           "pushed: PAN-OS takes one entry per name",
+                    fallback="not pushed, references bind to the first object"))
             continue
         seen.add(nm)
         entry = ET.SubElement(root, "entry", name=nm)
@@ -478,6 +512,16 @@ def _prepare_rule_render(rule, ctx):
         svc_members = [svc_override]
     elif named_svcs:
         kept_svcs = [s for s in named_svcs if s not in dropped_l3_svcs]
+        # invariant I1 for services: a rule may only name services this push
+        # creates or PAN-OS predefines; a pruned side is a blocker, since the
+        # fallbacks below are wider than the source (None disables the check)
+        _pushable_svcs = ctx.get("pushable_svcs")
+        if kept_svcs and _pushable_svcs is not None:
+            kept_svcs, _lost_svcs = _integ.prune_refs(kept_svcs, _pushable_svcs, keep=_PA_SERVICE_SENTINELS)
+            if _lost_svcs and ctx.get("dropped") is not None:
+                ctx["dropped"].append(unresolved_reference(
+                    ctx.get("rule_id") or rule.get("rule_name") or "?", "service", _lost_svcs, kept_svcs,
+                    what="service", known=ctx.get("known_svcs")))
         if kept_svcs:
             svc_members = kept_svcs
         elif l3_app or apps not in (["any"], [default_app]):
@@ -522,17 +566,19 @@ def _paf_r_addr_side(rule, ctx, field: str, key: str):
     as an invalid candidate. `pushable_addrs` is None when the caller can't
     determine the emitted set - then nothing is filtered (never guess)."""
     lk = ctx["addr_lookup"]
-    names = [lk.get(x, x) for x in (rule.get(key) or ["any"])]
+    rule_id = rule.get("rule_name") or rule.get("name") or "?"
+    # Check Point's 'Internet' (anything external, the direction carried by
+    # zones) becomes 'any' with its own warning before the prune, the
+    # documented translation rather than an unresolved reference
+    names = _pa_addr_members([lk.get(x, x) for x in (rule.get(key) or ["any"])], ctx.get("dropped"), rule_id, field)
     kept, lost = _integ.prune_refs(names, ctx.get("pushable_addrs"),
                                    keep=("any",))
     if lost and ctx.get("dropped") is not None:
-        ctx["dropped"].append(DroppedField(
-            rule_id=rule.get("rule_name") or rule.get("name") or "?",
-            field=field,
-            reason=f"reference(s) {lost} point at object(s) this push does not "
-                   "create: pruned (PAN-OS would reject the candidate at commit)",
-            fallback=("replaced by any (the side became empty)" if not kept
-                      else "remaining refs kept")))
+        # a blocker when the side would widen or names nothing the source
+        # defines; a declared drop with members left stays a warning
+        ctx["dropped"].append(unresolved_reference(
+            rule.get("rule_name") or rule.get("name") or "?", field, lost, kept, what="address",
+            known=ctx.get("known_addrs")))
     el = _el(field); _member_list(el, kept or ["any"]); return [el]
 
 
@@ -864,7 +910,7 @@ def _post_api_retry(url: str, *, data: dict, headers: dict, timeout,
 
 
 def _api_url(device: dict) -> str:
-    ip = device.get("mgmt_ip") or "127.0.0.1"
+    ip = management_host(device.get("mgmt_ip") or "127.0.0.1", "PAN-OS")
     port = device.get("mgmt_port") or 443
     return f"https://{ip}:{port}"
 
@@ -1303,15 +1349,17 @@ class PanwDriver(DeployDriver):
 
     @staticmethod
     def _iface_ips(entry: ET.Element) -> list[str]:
-        """Collect <ip><entry name="X"/></ip> values from an interface entry."""
-        ip_el = entry.find("ip")
-        if ip_el is None:
-            return []
+        """Collect the <ip> entries and the <ipv6><address> entries of an
+        interface entry, both families."""
         out: list[str] = []
-        for e in ip_el.findall("entry"):
-            name = e.attrib.get("name")
-            if name:
-                out.append(name)
+        for path in ("ip", "ipv6/address"):
+            el = entry.find(path)
+            if el is None:
+                continue
+            for e in el.findall("entry"):
+                name = e.attrib.get("name")
+                if name:
+                    out.append(name)
         return out
 
     def list_target_interfaces(self, *, device: dict) -> list[dict]:
@@ -1546,40 +1594,42 @@ class PanwDriver(DeployDriver):
         vr_root = result.find("virtual-router") or result
         for vr in vr_root.findall("entry"):
             vr_name = vr.attrib.get("name") or "default"
-            static = vr.find("routing-table/ip/static-route")
-            if static is None:
-                continue
-            for rt in static.findall("entry"):
-                prefix = rt.findtext("destination") or ""
-                if not prefix:
+            for node, nh_tag in (("ip", "ip-address"), ("ipv6", "ipv6-address")):
+                static = vr.find(f"routing-table/{node}/static-route")
+                if static is None:
                     continue
-                iface = rt.findtext("interface") or None
-                next_hop = rt.findtext("nexthop/ip-address") or None
-                out.append({
-                    "prefix": prefix,
-                    "interface_name": iface,
-                    "next_hop": next_hop,
-                    "vr_name": vr_name,
-                    "is_connected": False,
-                })
+                for rt in static.findall("entry"):
+                    prefix = rt.findtext("destination") or ""
+                    if not prefix:
+                        continue
+                    iface = rt.findtext("interface") or None
+                    next_hop = rt.findtext(f"nexthop/{nh_tag}") or None
+                    out.append({
+                        "prefix": prefix,
+                        "interface_name": iface,
+                        "next_hop": next_hop,
+                        "vr_name": vr_name,
+                        "is_connected": False,
+                    })
         # Advanced Routing Engine: the same static routes live one level deeper,
         # under logical-router/entry/vrf/entry/routing-table (empty on a legacy box).
         lr_root = self._api_get(device, f"{_NET}/logical-router")
         lr_root = lr_root.find("logical-router") or lr_root
         for lr in lr_root.findall("entry"):
             lr_name = lr.attrib.get("name") or "default"
-            for static in lr.findall("vrf/entry/routing-table/ip/static-route"):
-                for rt in static.findall("entry"):
-                    prefix = rt.findtext("destination") or ""
-                    if not prefix:
-                        continue
-                    out.append({
-                        "prefix": prefix,
-                        "interface_name": rt.findtext("interface") or None,
-                        "next_hop": rt.findtext("nexthop/ip-address") or None,
-                        "vr_name": lr_name,
-                        "is_connected": False,
-                    })
+            for node, nh_tag in (("ip", "ip-address"), ("ipv6", "ipv6-address")):
+                for static in lr.findall(f"vrf/entry/routing-table/{node}/static-route"):
+                    for rt in static.findall("entry"):
+                        prefix = rt.findtext("destination") or ""
+                        if not prefix:
+                            continue
+                        out.append({
+                            "prefix": prefix,
+                            "interface_name": rt.findtext("interface") or None,
+                            "next_hop": rt.findtext(f"nexthop/{nh_tag}") or None,
+                            "vr_name": lr_name,
+                            "is_connected": False,
+                        })
         return out
 
     def list_target_vrfs(self, *, device: dict) -> list[dict]:
@@ -1707,6 +1757,24 @@ class PanwDriver(DeployDriver):
             out.append({"name": name, "description": desc})
         return out
 
+    @staticmethod
+    def _direct_entries(root: "ET.Element") -> list:
+        """The entries a catalog read lists: the DIRECT <entry> children of
+        the node the xpath named (``<response><result><spyware><entry>``),
+        never the nested ones. A profile carries entries of its own (the
+        rules of a spyware or vulnerability profile, threat exceptions, DNS
+        lists), a custom application its signatures, and a recursive
+        .//entry listed those as catalog items (0.9.4 matrix, 2026-10-18:
+        13 anti-spyware entries offered for 7 profiles on the box)."""
+        result = root if root.tag == "result" else root.find("result")
+        if result is None:
+            return []
+        direct = result.findall("entry")
+        if direct:
+            return direct
+        node = next(iter(result), None)
+        return node.findall("entry") if node is not None else []
+
     def list_security_profiles(self, *, device: dict,
                                scopes: list[str] | None = None) -> dict[str, list[dict]]:
         """Read PA's per-rule attachable profile catalog.
@@ -1741,7 +1809,7 @@ class PanwDriver(DeployDriver):
             resp.raise_for_status()
             root = ET.fromstring(resp.text)
             if root.attrib.get("status") == "success":
-                return [e.attrib.get("name") for e in root.findall(".//entry")
+                return [e.attrib.get("name") for e in self._direct_entries(root)
                         if e.attrib.get("name")]
             # Missing element on the device is normal (e.g. dns-security absent
             # on older PAN-OS, or no shared profiles) - not an error.
@@ -1843,7 +1911,7 @@ class PanwDriver(DeployDriver):
                 label=cat,
             )
             items: list[dict] = []
-            for e in root.findall(".//entry"):
+            for e in self._direct_entries(root):     # a custom app's signatures are entries too
                 name = e.attrib.get("name")
                 if not name:
                     continue
@@ -1863,7 +1931,7 @@ class PanwDriver(DeployDriver):
             label="predefined application",
         )
         predef: list[dict] = []
-        for e in root.findall(".//entry"):
+        for e in self._direct_entries(root):
             name = e.attrib.get("name")
             if not name:
                 continue
@@ -2036,8 +2104,10 @@ class PanwDriver(DeployDriver):
         active_routes: list[dict] = (),   # CP-only (route-based VPN domains); ignored here
         nat_mode: str = "central",   # Forti-only NAT mode; ignored here
         routing_mode: str = "legacy",  # 'legacy' = <virtual-router>; 'advanced' = <logical-router> (Advanced Routing Engine, PAN-OS 10.2+)
+        ngfw_mode: str = "profile-based",   # Forti-only NGFW mode; ignored here
+        app_catalog: dict | None = None,    # Forti-only application catalog; ignored here
     ) -> tuple[dict[str, str], list[dict]]:
-        del active_routes
+        del active_routes, ngfw_mode, app_catalog
         # Forti-specific NAT-object scopes - PA has a native NAT-rulebase,
         # so VIPs/IP-Pools aren't a separate concern here. Dropped silently.
         del tp_configs, imported_tp
@@ -2112,6 +2182,11 @@ class PanwDriver(DeployDriver):
                 reason="a FortiGate SNAT pool is referenced by name. PAN-OS "
                        "resolves that against an address object",
                 fallback="created from the SNAT pool"))
+        # A central-NAT source matched the translated destination, PAN-OS
+        # matches the original one: the VIP (its external address above)
+        # joins the mapped address on such rules (deploy.base).
+        rules = widen_post_nat_destinations(rules, nat_rules, address_objects, dropped,
+                                            target="PAN-OS")
 
         # Normalize all object/group names to PA's allowed subset BEFORE building
         # lookups + rendering. ASA-side autogenerated names like
@@ -2136,8 +2211,29 @@ class PanwDriver(DeployDriver):
         dropped_l3_svcs = self._drop_l3_service_objects(
             service_objects, service_groups, dropped)
 
+        # A dual-stack object becomes two objects under a group that keeps
+        # its name (docs/IPV6_PLAN.md, phase 2, D1): PAN-OS holds one value
+        # per address object and both families in a group and in a rule.
+        address_objects, _ds_groups = split_dual_stack_objects(address_objects, _safe_pa_name, dropped)
+        if _ds_groups:
+            address_groups = list(address_groups or []) + _ds_groups
+        # A rule side of one family ('any4', 'any6', D5 of docs/IPV6_PLAN.md,
+        # phase 4): PAN-OS has no catch-all of one family, the object is
+        # created here and declared as synthesized
+        _tok_objs, _tok_names = catch_all_objects(
+            used_catch_all_tokens(rules, nat_rules, ssl_rules), address_objects, address_groups)
+        if _tok_objs:
+            address_objects = list(address_objects or []) + _tok_objs
+            for _o in _tok_objs:
+                dropped.append(DroppedField(
+                    rule_id=_o["name"], field="address", synthesized=True,
+                    reason="a rule side of one address family: PAN-OS has no catch-all "
+                           "of one family, the source's rule matched that family alone",
+                    fallback=f"created as {_o['value']['value']}"))
+
         # Lookups so rules can reference objects/groups by name instead of literals.
         addr_lookup = self._build_addr_lookup(address_objects, address_groups)
+        addr_lookup.update(_tok_names)       # 'any4' and 'any6' resolve to their objects
         svc_lookup = self._build_svc_lookup(service_objects, service_groups)
 
         # Names this push actually creates - group members AND rule refs may only
@@ -2171,7 +2267,22 @@ class PanwDriver(DeployDriver):
                 if isinstance(_mem, list):
                     _z["members"] = [_tun_map.get(m, m) for m in _mem]
 
-        sections["Interfaces"] = self._gen_interfaces(interfaces, dropped)
+        # An interface without an IPv6 address that an IPv6 static route
+        # leaves through, or that an IPv6 tunnel binds, needs IPv6 enabled
+        # or PAN-OS refuses the route ("interface 'tunnel.N' is not a valid
+        # reference", fgt2pa of the phase-6 matrix)
+        _ipv6_on: set[str] = set()
+        for _r in routes or []:
+            _n = (_r.get("interface_name") or "").strip()
+            if _n and ":" in str(_r.get("prefix") or ""):
+                _ipv6_on.add(self._pa_iface_name(_n))
+        for _t in vpn_tunnels or []:
+            _ti = (_t.get("tunnel_interface") or "").strip()
+            if _ti and (ipv6_value(_t.get("peer_address"))
+                        or any(selector_family(_s) == 6
+                               for _s in (_t.get("traffic_selectors") or []))):
+                _ipv6_on.add(_tun_map.get(_ti) or self._pa_iface_name(_ti))
+        sections["Interfaces"] = self._gen_interfaces(interfaces, dropped, ipv6_on=_ipv6_on)
         # Routing container: legacy <virtual-router> vs Advanced Routing Engine
         # <logical-router> (PAN-OS 10.2+, mode-detected per target). Exactly one is
         # emitted; the push (_has_data + its own _PUSH_STEPS row) rides whichever
@@ -2247,16 +2358,36 @@ class PanwDriver(DeployDriver):
             _n["src_zones"] = _sane_zone_slot(_n.get("src_zones"), _rid, "src_zones", _nh)
             _n["dst_zones"] = _sane_zone_slot(_n.get("dst_zones"), _rid, "dst_zones", _nh)
 
+        # Service names a rule may reference (invariant I1): the service objects
+        # the push creates (L3 protocols are skipped, see _paf_service_skip)
+        # and every service group; the predefined services and the keywords
+        # are sentinels of the check (_PA_SERVICE_SENTINELS).
+        _pushable_svcs = (
+            {o.get("name") or "" for o in (service_objects or [])
+             if o.get("name") and str((o.get("value") or {}).get("protocol") or "").lower() in _PA_SERVICE_PROTOS}
+            | {g.get("name") or "" for g in (service_groups or []) if g.get("name")})
+        # every name the source defines, so a pruned reference can be told
+        # apart: undefined (a blocker) or dropped for this target (declared)
+        _known_addrs = ({o.get("name") or "" for o in (address_objects or []) if o.get("name")}
+                        | {g.get("name") or "" for g in (address_groups or []) if g.get("name")})
+        _known_svcs = ({o.get("name") or "" for o in (service_objects or []) if o.get("name")}
+                       | {g.get("name") or "" for g in (service_groups or []) if g.get("name")})
         sections["Security Rules"] = self._gen_rules(
             rules, settings, dropped, addr_lookup, svc_lookup, dropped_l3_svcs,
             _pushable_addrs, pushable_schedules=_pushable_schedules,
+            pushable_svcs=_pushable_svcs, known_addrs=_known_addrs, known_svcs=_known_svcs,
         )
         _ext_zone = next((str(z.get("name") or z.get("zone_name") or "")
                           for z in (zones or [])
                           if (z.get("is_external")
                               or (z.get("properties") or {}).get("is_external"))), None)
+        # the objects that hold the family, the dual-stack groups included:
+        # a NAT rule that names one is declared (section 8)
+        _ipv6_objs = {str(o.get("name") or "") for o in (address_objects or [])
+                      if any(":" in v for v in object_values(o.get("value")))}
+        _ipv6_objs |= {str(g.get("name") or "") for g in (_ds_groups or [])}
         sections["NAT Rules"] = self._gen_nat_rules(
-            nat_rules, dropped, _ext_zone, addr_lookup, svc_lookup)
+            nat_rules, dropped, _ext_zone, addr_lookup, svc_lookup, ipv6_names=_ipv6_objs)
         # PBF may need service objects that no rule referenced - materialize
         # them into the service list and RE-RENDER the services section.
         _pbf_svc_extra: list[dict] = []
@@ -2266,7 +2397,7 @@ class PanwDriver(DeployDriver):
             service_objects = list(service_objects) + _pbf_svc_extra
             sections["Service Objects"] = self._gen_service_objects(service_objects, dropped)
         sections["Decryption Rules"] = self._gen_decryption(
-            list(ssl_rules or []), dropped)
+            list(ssl_rules or []), dropped, _tok_names)
         # IPSec VPN (CE plan P3a): crypto profiles + IKE gateways + IPSec tunnels.
         _vpn = list(vpn_tunnels or [])
         sections["IKE Crypto Profiles"] = self._gen_ike_crypto(
@@ -2414,9 +2545,9 @@ class PanwDriver(DeployDriver):
             if not name or not v:
                 continue
             lookup[v] = name
-            # Single-IP host stored as "1.2.3.4/32" should also match rule literal "1.2.3.4"
-            if val.get("type") == "ip-netmask" and v.endswith("/32"):
-                lookup[v[:-3]] = name
+            # A host stored as "1.2.3.4/32" or "2001:db8::5/128" also matches the bare literal
+            if val.get("type") == "ip-netmask" and is_host_cidr(v):
+                lookup[bare_host(v)] = name
         for grp in address_groups:
             name = grp.get("name")
             if name:
@@ -2514,8 +2645,10 @@ class PanwDriver(DeployDriver):
         return out
 
     def _gen_interfaces(self, interfaces: list[dict],
-                        dropped: list[DroppedField] | None = None) -> str:
-        """Generate PAN-OS interface XML.
+                        dropped: list[DroppedField] | None = None,
+                        ipv6_on: set[str] | None = None) -> str:
+        """Generate PAN-OS interface XML. `ipv6_on` names the interfaces
+        (PAN-OS names) that get IPv6 enabled even without an IPv6 address.
 
         Handles ethernet, aggregate-ethernet (both with layer3 + subinterfaces),
         tunnel, loopback, vlan. Aggregate-ethernet members (the physical
@@ -2526,6 +2659,7 @@ class PanwDriver(DeployDriver):
         import json as _j
         if dropped is None:
             dropped = []
+        ipv6_on = ipv6_on or set()
 
         # AE iface names that surfaced in the input but carry no members.
         # PAN-OS accepts an aggregate-ethernet entry without members but
@@ -2647,10 +2781,8 @@ class PanwDriver(DeployDriver):
                 if pdata.get("dhcp_enabled"):
                     dhcp_el = ET.SubElement(l3, "dhcp-client")
                     ET.SubElement(dhcp_el, "enable").text = "yes"
-                elif pdata["ips"]:
-                    ip_el = ET.SubElement(l3, "ip")
-                    for ip in pdata["ips"]:
-                        ET.SubElement(ip_el, "entry", name=ip)
+                elif pdata["ips"] or pname in ipv6_on:
+                    self._pa_iface_addresses(l3, pdata["ips"], ipv6_on=pname in ipv6_on)
                 children = subs.get(pname, [])
                 if children:
                     units = ET.SubElement(l3, "units")
@@ -2659,10 +2791,9 @@ class PanwDriver(DeployDriver):
                         if sub.get("dhcp_enabled"):
                             sub_dhcp = ET.SubElement(sub_entry, "dhcp-client")
                             ET.SubElement(sub_dhcp, "enable").text = "yes"
-                        elif sub["ips"]:
-                            sub_ip = ET.SubElement(sub_entry, "ip")
-                            for ip in sub["ips"]:
-                                ET.SubElement(sub_ip, "entry", name=ip)
+                        elif sub["ips"] or sub["name"] in ipv6_on:
+                            self._pa_iface_addresses(sub_entry, sub["ips"],
+                                                     ipv6_on=sub["name"] in ipv6_on)
                         tag_str = sub["name"].split(".")[-1]
                         try:
                             ET.SubElement(sub_entry, "tag").text = str(int(tag_str))
@@ -2679,7 +2810,7 @@ class PanwDriver(DeployDriver):
             # are actual subinterfaces (contain a dot).
             sub_names = {i["name"] for i in ifaces if "." in i["name"]}
             filtered = [i for i in ifaces
-                        if "." in i["name"] or (i["ips"] and i["name"] not in
+                        if "." in i["name"] or ((i["ips"] or i["name"] in ipv6_on) and i["name"] not in
                            {s.rsplit(".", 1)[0] for s in sub_names})]
             if not filtered:
                 continue
@@ -2687,15 +2818,34 @@ class PanwDriver(DeployDriver):
             units = ET.SubElement(container, "units")
             for iface in sorted(filtered, key=lambda i: i["name"]):
                 entry = ET.SubElement(units, "entry", name=iface["name"])
-                if iface["ips"]:
-                    ip_el = ET.SubElement(entry, "ip")
-                    for ip in iface["ips"]:
-                        ET.SubElement(ip_el, "entry", name=ip)
+                if iface["ips"] or iface["name"] in ipv6_on:
+                    self._pa_iface_addresses(entry, iface["ips"], ipv6_on=iface["name"] in ipv6_on)
 
         _indent(root)
         return _to_xml_str(root)
 
     # ── Virtual Router XML ───────────────────────────────────────
+
+    @staticmethod
+    def _pa_iface_addresses(parent: "ET.Element", ips: list, ipv6_on: bool = False) -> None:
+        """An interface's addresses by family: IPv4 under <ip>, IPv6 under
+        <ipv6><enabled>yes</enabled><address> (the node section 2a of
+        docs/IPV6_PLAN.md named; phase 3). Used at every layer3 site.
+        `ipv6_on` enables IPv6 without an address: an IPv6 route leaves
+        through the interface, or an IPv6 tunnel binds it."""
+        v4 = [str(ip) for ip in (ips or []) if ip and ":" not in str(ip)]
+        v6 = [str(ip) for ip in (ips or []) if ip and ":" in str(ip)]
+        if v4:
+            ip_el = ET.SubElement(parent, "ip")
+            for ip in v4:
+                ET.SubElement(ip_el, "entry", name=ip)
+        if v6 or ipv6_on:
+            v6_el = ET.SubElement(parent, "ipv6")
+            ET.SubElement(v6_el, "enabled").text = "yes"
+            if v6:
+                addr_el = ET.SubElement(v6_el, "address")
+                for ip in v6:
+                    ET.SubElement(addr_el, "entry", name=ip)
 
     def _router_iface_sets(self, interfaces: list[dict]) -> tuple[set[str], set[str]]:
         """Shared setup for both router renders: the set of pushed interface
@@ -2756,28 +2906,35 @@ class PanwDriver(DeployDriver):
         # cp2pa: six Gaia statics via VPN peer addresses, no interface).
         # Such a route is dropped and declared; the operator binds its
         # interface in Network > Routing, which makes it render.
-        _vr_nets: list = []
-        for iface in interfaces:
-            if (iface.get("vr_name") or "default") != raw_name:
-                continue
-            _ips = iface.get("ip_addresses") or []
-            if isinstance(_ips, str):
-                try:
-                    _ips = json.loads(_ips)
-                except Exception:
-                    _ips = []
-            for _ip in _ips:
-                try:
-                    _vr_nets.append(ipaddress.ip_network(str(_ip), strict=False))
-                except (ValueError, TypeError):
-                    continue
+        # The on-link rule itself is vendor-independent and lives in
+        # deploy/base.py, so the routing view, the Check Point declaration and
+        # this filter all answer the question the same way (CE backlog 1).
+        _vr_nets = iface_subnets(interfaces, raw_name)
 
         def _on_link(nh: str) -> bool:
             try:
-                addr = ipaddress.ip_address(str(nh).strip())
+                ipaddress.ip_address(str(nh).strip())
             except ValueError:
                 return True   # not a plain address - leave it to PAN-OS
-            return any(addr in n for n in _vr_nets)
+            return egress_for_next_hop(nh, _vr_nets) is not None
+
+        # A static route's <interface> must be a member of ITS virtual router:
+        # PAN-OS rejects a pushed interface that belongs to another VR with
+        # "interface 'ethernetX' is not a valid reference" and the whole
+        # router step fails (measured 2026-10-18 on the 0.9.4 matrix, a
+        # route added in VR default to an interface of the source's VR). Such
+        # a route is pushed by its next hop alone when that is on-link here,
+        # otherwise it is dropped and declared, never sent.
+        iface_vr = {
+            self._pa_iface_name(iface["interface_name"]): (iface.get("vr_name") or "default")
+            for iface in interfaces if iface.get("interface_name")
+        }
+
+        def _prefix_of(r: dict) -> str:
+            _p = r.get("prefix") or ""
+            if "/" not in _p and r.get("prefix_len") is not None:
+                _p = f"{_p}/{int(r['prefix_len'])}"
+            return _p
 
         usable_routes = []
         for r in static_routes:
@@ -2785,51 +2942,71 @@ class PanwDriver(DeployDriver):
                 usable_routes.append(r)
                 continue
             pa_name = self._pa_iface_name(r.get("interface_name") or "")
-            if pa_name in pushed_iface_names:
+            other_vr = (pa_name in pushed_iface_names and pa_name not in members)
+            if pa_name in members:
                 usable_routes.append(r)
             elif r.get("next_hop") and _on_link(r["next_hop"]):
+                if other_vr and dropped is not None:
+                    dropped.append(DroppedField(
+                        rule_id=_prefix_of(r), field="interface",
+                        reason=f"interface {pa_name} is a member of VR "
+                               f"'{iface_vr.get(pa_name, 'default')}', not of VR '{raw_name}': "
+                               "PAN-OS binds a static route's interface within its own "
+                               "virtual router",
+                        fallback=f"pushed by its next hop {r['next_hop']} alone"))
                 usable_routes.append(r)
-            elif r.get("next_hop") and dropped is not None:
-                _p = r.get("prefix") or ""
-                if "/" not in _p and r.get("prefix_len") is not None:
-                    _p = f"{_p}/{int(r['prefix_len'])}"
-                dropped.append(DroppedField(
-                    rule_id=_p, field="next_hop",
-                    reason=f"next hop {r['next_hop']} is not on-link in VR "
-                           f"'{raw_name}' and the route names no interface: "
-                           "PAN-OS cannot resolve the egress (candidate "
-                           "validation fails)",
-                    fallback="not pushed: bind its interface in "
-                             "Network > Routing"))
+            elif dropped is not None and (r.get("next_hop") or other_vr):
+                if other_vr:
+                    reason = (f"interface {pa_name} is a member of VR "
+                              f"'{iface_vr.get(pa_name, 'default')}', not of VR '{raw_name}', "
+                              "and the next hop is not on-link here: PAN-OS binds a static "
+                              "route's interface within its own virtual router")
+                    fallback = ("not pushed: add the route in the interface's VR, or move "
+                                "the interface in Network > Routing")
+                else:
+                    reason = (f"next hop {r['next_hop']} is not on-link in VR "
+                              f"'{raw_name}' and the route names no interface: "
+                              "PAN-OS cannot resolve the egress (candidate "
+                              "validation fails)")
+                    fallback = "not pushed: bind its interface in Network > Routing"
+                dropped.append(DroppedField(rule_id=_prefix_of(r), field="next_hop" if not other_vr else "interface",
+                                            reason=reason, fallback=fallback))
         if not usable_routes:
             return
         rt_table = ET.SubElement(parent, "routing-table")
-        ip_el = ET.SubElement(rt_table, "ip")
-        static_el = ET.SubElement(ip_el, "static-route")
-        for i, rt in enumerate(usable_routes):
-            rt_entry = ET.SubElement(static_el, "entry", name=f"route-{i+1}")
-            # fw_routes.prefix is stored bare (len in prefix_len) by most collectors but
-            # CIDR-embedded by some legacy rows - PAN-OS requires a subnet address, so
-            # normalize: append /prefix_len when the prefix carries no mask.
-            _p = rt["prefix"] or ""
-            if "/" not in _p:
-                _plen = rt.get("prefix_len")
-                _p = f"{_p}/{32 if _plen is None else int(_plen)}"
-            ET.SubElement(rt_entry, "destination").text = _p
-            is_bh = (rt.get("route_type") or "static") == "blackhole"
-            rt_iface = self._pa_iface_name(rt.get("interface_name") or "")
-            if not is_bh and rt_iface in pushed_iface_names:
-                ET.SubElement(rt_entry, "interface").text = rt_iface
-            if is_bh:
-                # Blackhole route - <nexthop><discard/></nexthop>; no <interface>
-                # binding; PA discards in the routing engine before egress lookup.
-                nh = ET.SubElement(rt_entry, "nexthop")
-                ET.SubElement(nh, "discard")
-            elif rt.get("next_hop"):
-                nh = ET.SubElement(rt_entry, "nexthop")
-                ET.SubElement(nh, "ip-address").text = rt["next_hop"]
-            if rt.get("metric") is not None:
-                ET.SubElement(rt_entry, "metric").text = str(int(rt["metric"]))
+        # IPv4 under <ip>, IPv6 under <ipv6> with an ipv6-address next hop
+        # (section 2a of docs/IPV6_PLAN.md: the ip node refuses a v6 route)
+        for fam, node, nh_tag in ((4, "ip", "ip-address"), (6, "ipv6", "ipv6-address")):
+            fam_routes = [rt for rt in usable_routes
+                          if (":" in str(rt.get("prefix") or "")) == (fam == 6)]
+            if not fam_routes:
+                continue
+            fam_el = ET.SubElement(rt_table, node)
+            static_el = ET.SubElement(fam_el, "static-route")
+            for i, rt in enumerate(fam_routes):
+                rt_entry = ET.SubElement(static_el, "entry", name=f"route{'6' if fam == 6 else ''}-{i+1}")
+                # fw_routes.prefix is stored bare (len in prefix_len) by most collectors but
+                # CIDR-embedded by some legacy rows - PAN-OS requires a subnet address, so
+                # normalize: append /prefix_len when the prefix carries no mask.
+                _p = rt["prefix"] or ""
+                if "/" not in _p:
+                    _plen = rt.get("prefix_len")
+                    _p = f"{_p}/{(128 if fam == 6 else 32) if _plen is None else int(_plen)}"
+                ET.SubElement(rt_entry, "destination").text = _p
+                is_bh = (rt.get("route_type") or "static") == "blackhole"
+                rt_iface = self._pa_iface_name(rt.get("interface_name") or "")
+                if not is_bh and rt_iface in members:
+                    ET.SubElement(rt_entry, "interface").text = rt_iface
+                if is_bh:
+                    # Blackhole route - <nexthop><discard/></nexthop>; no <interface>
+                    # binding; PA discards in the routing engine before egress lookup.
+                    nh = ET.SubElement(rt_entry, "nexthop")
+                    ET.SubElement(nh, "discard")
+                elif rt.get("next_hop"):
+                    nh = ET.SubElement(rt_entry, "nexthop")
+                    ET.SubElement(nh, nh_tag).text = rt["next_hop"]
+                if rt.get("metric") is not None:
+                    ET.SubElement(rt_entry, "metric").text = str(int(rt["metric"]))
 
     def _gen_virtual_router(self, vrfs: list[dict], routes: list[dict],
                             interfaces: list[dict],
@@ -3255,7 +3432,10 @@ class PanwDriver(DeployDriver):
                    svc_lookup: dict[tuple[str, str], str],
                    dropped_l3_svcs: set[str],
                    pushable_addrs: set[str] | None = None,
-                   pushable_schedules: set[str] | None = None) -> str:
+                   pushable_schedules: set[str] | None = None,
+                   pushable_svcs: set[str] | None = None,
+                   known_addrs: set[str] | None = None,
+                   known_svcs: set[str] | None = None) -> str:
         prefix = settings.get("rule_prefix", "Gateshift-")
         legacy_profile_group = settings.get("security_profile_group", "").strip()
         log_fwd = settings.get("log_forwarding", "").strip()
@@ -3339,6 +3519,8 @@ class PanwDriver(DeployDriver):
                 "dropped_l3_svcs": dropped_l3_svcs, "dropped": dropped,
                 "pushable_addrs": pushable_addrs,
                 "pushable_schedules": pushable_schedules,
+                "pushable_svcs": pushable_svcs,
+                "known_addrs": known_addrs, "known_svcs": known_svcs,
             }
             _prepare_rule_render(rule, ctx)
             for _build in _PA_RULE_FIELDS:
@@ -3357,10 +3539,19 @@ class PanwDriver(DeployDriver):
 
     # ── NAT Rules XML ────────────────────────────────────────────
 
+    @staticmethod
+    def _nat_rule_ipv6(n: dict, ipv6_names: set[str] | None) -> str | None:
+        """The first IPv6 value or IPv6-carrying object a NAT rule names on
+        any of its address fields, or None (docs/IPV6_PLAN.md, section 8 and
+        phase 3: PAN-OS has no stateful NAT66, NPTv6 and NAT64 are out of
+        scope, so such a rule is declared and not pushed)."""
+        return nat_rule_ipv6(n, ipv6_names)
+
     def _gen_nat_rules(self, nat_rules: list[dict], dropped: list[DroppedField],
                        external_zone: str | None = None,
                        addr_lookup: dict[str, str] | None = None,
-                       svc_lookup: dict[tuple[str, str], str] | None = None) -> str:
+                       svc_lookup: dict[tuple[str, str], str] | None = None,
+                       ipv6_names: set[str] | None = None) -> str:
         """Generate PAN-OS <rulebase><nat><rules> XML.
 
         Renders the agnostic fw_nat_rules schema into PAN-OS NAT entries.
@@ -3389,6 +3580,14 @@ class PanwDriver(DeployDriver):
         seen_nat_names: dict[str, int] = {}
 
         def _emit(base_name: str, svc_text: str, n: dict, rid: str) -> None:
+            _v6 = self._nat_rule_ipv6(n, ipv6_names)
+            if _v6:
+                dropped.append(DroppedField(
+                    rule_id=rid, field="nat_rule",
+                    reason=f"carries IPv6 ('{_v6}'): PAN-OS has no stateful NAT66, and NPTv6 "
+                           "and NAT64 are not built on spec (docs/IPV6_PLAN.md, section 8)",
+                    fallback="not pushed"))
+                return
             name = base_name
             if name in seen_nat_names:
                 seen_nat_names[name] += 1
@@ -3653,11 +3852,9 @@ class PanwDriver(DeployDriver):
                     if _hit:
                         _svcs.append(_hit)
                         continue
-                    dropped.append(DroppedField(
-                        rule_id=name, field="pbf_service",
-                        reason=f"service {_txt!r} has no PA service object and "
-                               "can't be materialized",
-                        fallback="replaced by any (service)"))
+                    # a blocker: 'any' would forward wider than the source
+                    dropped.append(unresolved_reference(name, "pbf_service", [_txt], [],
+                                                        what="service"))
                     _svcs.append("any")
                     continue
                 _svcs.append(_txt)
@@ -3687,7 +3884,7 @@ class PanwDriver(DeployDriver):
                 nh = (p.get("next_hop") or "").strip()
                 if nh:
                     nh_el = ET.SubElement(fwd, "nexthop")
-                    ET.SubElement(nh_el, "ip-address").text = nh
+                    ET.SubElement(nh_el, "ipv6-address" if ":" in str(nh) else "ip-address").text = nh
 
             # ── Specials from raw_extras ──
             if raw.get("pa_symmetric_return"):
@@ -3703,7 +3900,8 @@ class PanwDriver(DeployDriver):
         return _to_xml_str(root)
 
     def _gen_decryption(self, ssl_rules: list[dict],
-                         dropped: list[DroppedField]) -> str:
+                         dropped: list[DroppedField],
+                         tok_names: dict[str, str] | None = None) -> str:
         """Generate PAN-OS decryption rulebase XML (`<decryption><rules>`) from
         agnostic SSL-decryption rules (Phase 5). from/to→zones, source/dest,
         source-user, category(URL), service, action decrypt|no-decrypt, type
@@ -3712,6 +3910,13 @@ class PanwDriver(DeployDriver):
         dropped+warned. The forward-trust CA is a firewall-global cert (the
         operator provisions it - ref-only), not a per-rule field."""
         root = _el("rules")
+
+        def _tok(vals):
+            # a side of one family ('any4', 'any6') names the catch-all
+            # object of that family, as on the security rules (fgt2pa of the
+            # phase-6 matrix: "destination 'any4' is not an allowed keyword")
+            return [(tok_names or {}).get(x, x) for x in (vals or [])]
+
         for i, s in enumerate(ssl_rules):
             if s.get("deleted"):
                 continue
@@ -3729,9 +3934,9 @@ class PanwDriver(DeployDriver):
             _member_list(ET.SubElement(entry, "to"),
                          s.get("dst_zones") or ["any"])
             _member_list(ET.SubElement(entry, "source"),
-                         _pa_addr_members(s.get("sources"), dropped, name, "ssl_source") or ["any"])
+                         _pa_addr_members(_tok(s.get("sources")), dropped, name, "ssl_source") or ["any"])
             _member_list(ET.SubElement(entry, "destination"),
-                         _pa_addr_members(s.get("destinations"), dropped, name, "ssl_destination") or ["any"])
+                         _pa_addr_members(_tok(s.get("destinations")), dropped, name, "ssl_destination") or ["any"])
             su = [idn.get("name") for idn in (s.get("source_identities") or [])
                   if idn.get("name")]
             _member_list(ET.SubElement(entry, "source-user"), su or ["any"])
@@ -3924,6 +4129,15 @@ class PanwDriver(DeployDriver):
                 ET.SubElement(entry, "local-id").text = v["local_id"]
             if v.get("peer_id"):
                 ET.SubElement(entry, "peer-id").text = v["peer_id"]
+            # an IPv6 peer or local address needs the gateway's ipv6 flag
+            # (measured 11.2: without it the local address "is not a valid
+            # reference", docs/IPV6_PLAN.md phase 5)
+            if ":" in peer or ":" in str(v.get("local_address") or ""):
+                ET.SubElement(entry, "ipv6").text = "yes"
+            _peer6 = ((v.get("raw_extras") or {}).get("peer_address6")
+                      if isinstance(v.get("raw_extras"), dict) else None)
+            if _peer6 and ":" not in peer:
+                dropped.append(peer_address6_drop(gw_name, _peer6, "PAN-OS"))
         _indent(root)
         return _to_xml_str(root)
 
@@ -3956,9 +4170,21 @@ class PanwDriver(DeployDriver):
             # Policy-based peer: one proxy-id per traffic-selector. Route-based
             # tunnels carry no selectors → no proxy-id (PA's auto default).
             sels = v.get("traffic_selectors") or []
-            if sels:
-                pid = ET.SubElement(ak, "proxy-id")
-                for i, s in enumerate(sels):
+            # v4 pairs under proxy-id, v6 pairs under proxy-id-v6 (the same
+            # shape, docs/IPV6_PLAN.md phase 5); a mixed pair is declared
+            _s4, _s6, _mixed = split_selectors_by_family(sels)
+            for _m in _mixed:
+                dropped.append(mixed_selector_drop(v.get("name") or "?", _m))
+            # proxy-id and proxy-id-v6 share one name space on the box
+            # ("already in use", measured 11.2): the index runs across both
+            _pid_index = 0
+            for _fam_sels, _node in ((_s4, "proxy-id"), (_s6, "proxy-id-v6")):
+                if not _fam_sels:
+                    continue
+                pid = ET.SubElement(ak, _node)
+                for s in _fam_sels:
+                    i = _pid_index
+                    _pid_index += 1
                     # proxy-id names cap at 31 chars (not the generic 63) -
                     # keep the unique -psN suffix and truncate the base, so
                     # long tunnel names (e.g. CP community-peer composites)
@@ -3996,6 +4222,11 @@ class PanwDriver(DeployDriver):
                     ))
                 else:
                     ET.SubElement(entry, "tunnel-interface").text = _ti
+            # the tunnel of an IPv6 gateway carries the ipv6 flag too: the
+            # gateway reference is checked by family (measured 11.2: without
+            # it the gateway "is not a valid reference", docs/IPV6_PLAN.md phase 5)
+            if ":" in str(v.get("peer_address") or "") or ":" in str(v.get("local_address") or ""):
+                ET.SubElement(entry, "ipv6").text = "yes"
             if v.get("disabled"):
                 ET.SubElement(entry, "disabled").text = "yes"
         _indent(root)
@@ -4107,14 +4338,25 @@ class PanwDriver(DeployDriver):
         device-group / template."""
         return xpath
 
-    # Steps whose names start with these prefixes MODIFY the target's
-    # candidate config (the delete-/set-phase naming convention of
-    # _push_impl). The revert-on-failure wrapper arms itself on the first
-    # such step: a failure BEFORE any modifying step must NOT revert -
-    # PAN-OS only offers a whole-candidate revert, and discarding an
-    # operator's unrelated pending edits over an auth/validate failure
-    # would be worse than doing nothing.
-    _MODIFYING_STEP_PREFIXES = ("Delete ", "Push ")
+    # The push stages into the firewall's candidate configuration, which it
+    # shares with every other administrator, so taking a broken-off push back
+    # means restoring a snapshot of that candidate (docs/PUSH_ROLLBACK_PLAN.md).
+    rollback_kind = "snapshot"
+
+    # Named snapshot of the candidate, taken before the push and loaded back
+    # if the push breaks off. The name carries the strand so two strands of
+    # one migration never share a rescue point.
+    # (!) PAN-OS caps a saved-configuration name at 32 characters ("Node can
+    # be at most 32 characters" - measured on 10.1.3).
+    # (!) The name is FIXED per strand, not unique per push, because deleting a
+    # saved configuration needs superuser privileges ("You need superuser
+    # privileges to do that" - measured), which Gateshift does not ask for
+    # (docs/vendor-prerequisites.md). A fixed name means the next push of that
+    # strand overwrites the old rescue point instead of adding another full
+    # configuration copy to the firewall, so the clutter is bounded at one file
+    # per strand whether the cleanup may run or not. The push admission lock
+    # serialises pushes per target, so two pushes never share the file.
+    _SNAPSHOT_PREFIX = "gs-prepush"
 
     def push(
         self,
@@ -4126,30 +4368,67 @@ class PanwDriver(DeployDriver):
         mgmt_override: bool = False,
         vpn_certs: dict | None = None,
         merge: bool = False,
+        push_options: dict | None = None,   # push_without_rescue_point (docs/PUSH_OPTIONS_PLAN.md)
     ) -> Iterator[StepResult]:
-        """Revert-on-failure wrapper around _push_impl (the CP analog is the
+        """Rollback-on-failure wrapper around _push_impl (the CP analog is the
         driver's discard-session in its finally): a push that dies mid-way
         leaves the candidate PARTIALLY wiped - the wholesale node-deletes
         bypass PAN-OS' reference checks, so every follow-up push fails on
         cryptic dangling-reference errors ("'X' is not a valid reference")
-        until someone reverts by hand. After the modify phase has begun, any
-        failed step (or exception out of the impl) triggers an op
-        'revert config' and reports it as an extra push-log step. Success
-        never reverts - a completed push intentionally leaves the candidate
-        uncommitted for the operator's commit.
+        until someone restores it by hand.
 
-        V1 scope: direct-firewall targets only. A Panorama candidate is
-        shared across device-groups/admins, so a whole-candidate revert is
-        too broad there (partial-by-admin revert = follow-up)."""
+        A named snapshot of the candidate is taken before the push and loaded
+        back when the push breaks off after it started writing. That keeps what
+        was in the candidate BEFORE this push, which is the point: a previously
+        pushed, uncommitted Network strand survives a failed Policy push
+        (docs/PUSH_ROLLBACK_PLAN.md, CE backlog 11). The fallback is the
+        admin-scoped 'revert config' this driver used until 2026-10-12, which
+        drops the whole candidate to the running config - and which the box
+        refuses outright once any configuration load has happened on it.
+
+        Success never rolls back: a completed push intentionally leaves the
+        candidate uncommitted for the operator's commit. The snapshot is
+        deleted then, and kept whenever a restore failed.
+
+        V1 scope: direct-firewall targets only. A Panorama candidate is shared
+        across device-groups, and its configuration has no running-config.xml
+        of the same cut, so neither half applies there."""
         armed = False
         failed = False
+        snapshot: str | None = None
+        snap_error: str | None = None
+        if not self._deploy_ctx(device)["panorama"]:
+            snapshot, snap_error = self._take_snapshot(device, strand)
+            if snap_error:
+                # The rescue point is a configuration saved ON THE FIREWALL
+                # (nothing to do with a project snapshot in Gateshift). The
+                # box refuses to save one while it demands a full commit,
+                # which a configuration load on it leaves behind. Without it
+                # a broken-off push would leave a half-wiped candidate, so
+                # the push stops before writing, unless the operator chose
+                # to go on in the push dialog (docs/PUSH_OPTIONS_PLAN.md).
+                # 0.9.4 matrix, 2026-10-18: a baseline loaded by hand, no commit.
+                why = (f"the firewall refused to save a rescue point, a copy of its "
+                       f"candidate configuration, before this push ({snap_error}). "
+                       "It demands a full commit, which a configuration load on it "
+                       "leaves behind: commit on the firewall, then push again.")
+                if not (push_options or {}).get("push_without_rescue_point"):
+                    yield StepResult(
+                        step="rescue point", success=False,
+                        detail=f"nothing was written: {why} To push without a rollback "
+                               "on failure, tick \"Continue without a rollback point\" "
+                               "in the push dialog.")
+                    return
+                yield StepResult(
+                    step="rescue point", success=True,
+                    detail=f"(!) continuing without a rollback on failure, as chosen: {why}")
         inner = self._push_impl(
             device=device, config=config, strand=strand,
             skip_sections=skip_sections, mgmt_override=mgmt_override,
             vpn_certs=vpn_certs, merge=merge)
         try:
             for result in inner:
-                if result.step.startswith(self._MODIFYING_STEP_PREFIXES):
+                if step_modifies(result.step):
                     armed = True
                 if not result.success:
                     failed = True
@@ -4157,40 +4436,130 @@ class PanwDriver(DeployDriver):
         except Exception as e:
             # Surface as a failed step instead of re-raising: the worker
             # marks the job failed either way, and returning normally lets
-            # the revert step below still reach the push log.
+            # the rollback step below still reach the push log.
             failed = True
             yield StepResult(step="push", success=False,
                              detail=f"push aborted: {e}")
         finally:
             inner.close()
-        if failed and armed and not self._deploy_ctx(device)["panorama"]:
-            yield self._revert_candidate(device)
+        if self._deploy_ctx(device)["panorama"]:
+            return
+        if failed and armed:
+            keep, step = self._roll_back(device, snapshot, snap_error)
+            yield step
+            if not keep and snapshot:
+                self._drop_snapshot(device, snapshot)
+        elif snapshot:
+            # Nothing to take back: the rescue point has served its purpose
+            # and a full candidate copy should not linger on the firewall.
+            self._drop_snapshot(device, snapshot)
 
-    def _revert_candidate(self, device: dict) -> StepResult:
-        """op 'revert config' against the target (active HA member), so a
-        failed push leaves a consistent candidate behind. Reported as a
-        non-fatal step either way - the original push failure stays the
-        primary error."""
+    def _take_snapshot(self, device: dict, strand: str) -> tuple[str | None, str | None]:
+        """Save the candidate under a name of ours, before anything is written.
+        Returns (filename, error): on failure the push goes ahead without a
+        rescue point and the rollback step says so. PAN-OS refuses to save
+        while it demands a full commit ("Partial save is not allowed"), which
+        any configuration load on that box leaves behind - measured on the lab
+        PA, and not something Gateshift can clear, because clearing it means
+        committing."""
+        name = f"{self._SNAPSHOT_PREFIX}-{strand}.xml"
+        if len(name) > 32:      # a strand name nobody has today would do this
+            name = f"{self._SNAPSHOT_PREFIX}.xml"
+        try:
+            dev = self._resolve_active_node(device)
+        except Exception:
+            dev = device
+        try:
+            self._api_op(dev, f"<save><config><to>{name}</to></config></save>")
+            return name, None
+        except Exception as e:
+            return None, str(e)
+
+    def rescue_point_refusal(self, device: dict) -> str | None:
+        """The generate-time probe behind the push option (docs/PUSH_OPTIONS_PLAN.md):
+        None when the firewall saves a rescue point, else its refusal. Uses the
+        fixed fallback name, so the probe leaves one file the next push
+        overwrites. A Panorama target has no rescue point and is never asked."""
+        if self._deploy_ctx(device)["panorama"]:
+            return None
+        try:
+            dev = self._resolve_active_node(device)
+        except Exception:
+            dev = device
+        try:
+            self._api_op(dev, f"<save><config><to>{self._SNAPSHOT_PREFIX}.xml</to></config></save>")
+            return None
+        except Exception as e:
+            return str(e)
+
+    def _drop_snapshot(self, device: dict, name: str) -> None:
+        """Remove a rescue point we no longer need. Best effort, and it does
+        NOT work with the credentials Gateshift asks for: deleting a saved
+        configuration needs superuser privileges. The fixed name is what keeps
+        that harmless - the next push of this strand overwrites the file."""
+        try:
+            dev = self._resolve_active_node(device)
+        except Exception:
+            dev = device
+        try:
+            self._api_op(dev, f"<delete><config><saved>{name}</saved></config></delete>")
+        except Exception:
+            pass
+
+    def _roll_back(self, device: dict, snapshot: str | None,
+                   snap_error: str | None) -> tuple[bool, StepResult]:
+        """Take a broken-off push back. Returns (keep_snapshot, step).
+
+        The ladder, best outcome first: restore our snapshot, else the
+        admin-scoped revert this driver used before, else say what is left and
+        name the file so the operator can load it by hand. Reported as a
+        non-fatal step either way - the original push failure stays the primary
+        error."""
         try:
             device = self._resolve_active_node(device)
         except Exception:
-            pass    # revert against the registered node is better than none
+            pass    # rolling back against the registered node is better than none
+        if snapshot:
+            try:
+                self._api_op(
+                    device,
+                    f"<load><config><from>{snapshot}</from></config></load>")
+                return False, StepResult(
+                    step="roll back", success=True,
+                    detail=f"push failed mid-way: {rollback_phrase('snapshot')}, "
+                           "restored from the rescue point, the configuration saved on "
+                           "the firewall before it. A Network strand pushed earlier and "
+                           "not committed yet is still there. (!) The restore is a "
+                           "configuration load, so the firewall now wants a full commit "
+                           "before it accepts a partial one again.")
+            except Exception as e:
+                snap_error = f"restoring it failed ({e})"
+        # No snapshot, or it could not be loaded: the old route, which the box
+        # refuses once it demands a full commit.
         try:
             res = self._api_op(device, "<revert><config/></revert>")
             msg = (res.findtext(".//line") or res.findtext(".//msg") or "").strip()
-            return StepResult(
-                step="revert candidate", success=True,
-                detail="push failed mid-way: reverted the candidate to the "
-                       "running config so follow-up pushes start from a "
-                       f"consistent state ({msg or 'reverted'}). Note: this "
-                       "discards ALL uncommitted candidate changes on the "
-                       "target, including a previously pushed but "
-                       "uncommitted Network strand. If your Network push "
-                       "was not committed yet, push Network again before "
-                       "retrying this strand.")
+            kept = (f" The snapshot {snapshot} stays on the firewall."
+                    if snapshot else "")
+            return bool(snapshot), StepResult(
+                step="roll back", success=True,
+                detail="push failed mid-way and the snapshot could not be used "
+                       f"({snap_error or 'none was taken'}): reverted the "
+                       "candidate to the running config instead "
+                       f"({msg or 'reverted'}). Note: this discards ALL "
+                       "uncommitted candidate changes of this administrator, "
+                       "including a previously pushed but uncommitted Network "
+                       "strand. If your Network push was not committed yet, "
+                       f"push Network again before retrying this strand.{kept}")
         except Exception as e:
             hint = ""
-            if "schema verification failed" in str(e).lower():
+            if "partial revert is not allowed" in str(e).lower():
+                # The box refuses an admin-scoped revert once a configuration
+                # load has happened on it, until a full commit.
+                hint = (" The firewall refuses this revert until it has had a "
+                        "full commit, which is what a configuration load on it "
+                        "leaves behind.")
+            elif "schema verification failed" in str(e).lower():
                 # Known cause: an EMPTY rulebase container (e.g. a bare
                 # <decryption/> left by a pre-M-9 wipe) sits in the RUNNING
                 # config - commit accepted it, but revert refuses to load
@@ -4200,12 +4569,15 @@ class PanwDriver(DeployDriver):
                         "rulebase node in the committed config. A "
                         "successful full push followed by a commit "
                         "clears it.")
-            return StepResult(
-                step="revert candidate", success=True,
-                detail=f"could not revert the candidate ({e}): the target "
-                       "may keep a partially-wiped candidate. Re-run a full "
-                       "push, or revert manually before making other "
-                       f"changes on the device.{hint}")
+            where = (f" The rescue point {snapshot} is still saved on the firewall: load it "
+                     "there to get the candidate back." if snapshot else
+                     (f" No rescue point was saved before the push ({snap_error})." if snap_error else ""))
+            return True, StepResult(
+                step="roll back", success=True,
+                detail=f"could not take the push back ({e}): the target may "
+                       f"keep a partially-wiped candidate.{hint}{where} "
+                       "Re-run a full push, or restore the candidate before "
+                       "making other changes on the device.")
 
     def _push_impl(
         self,
@@ -4534,9 +4906,17 @@ class PanwDriver(DeployDriver):
                     # the key in transit/on-box; IKE uses the key internally).
                     _api_import(base_url, api_key, "private-key", name, kpem.encode(),
                                 passphrase=uuid.uuid4().hex[:31])
-                    yield StepResult(step=f"Import VPN cert {name}", success=True)
+                    # "Push ..." on purpose: the name is the arming contract
+                    # (deploy.base.step_modifies), and this step DOES write to
+                    # the target. In additive-merge mode there is no delete
+                    # phase, so it can be the first write of the push; without
+                    # the prefix a later failure would leave the imported
+                    # certificate behind. The snapshot takes back exactly this
+                    # import, which is why arming it is right now
+                    # (docs/PUSH_ROLLBACK_PLAN.md, follow-up 1).
+                    yield StepResult(step=f"Push VPN cert {name}", success=True)
                 except Exception as e:
-                    yield StepResult(step=f"Import VPN cert {name}", success=False,
+                    yield StepResult(step=f"Push VPN cert {name}", success=False,
                                      detail=str(e))
                     return
 
@@ -4631,6 +5011,7 @@ class PanwDriver(DeployDriver):
                     if rules_root is not None:
                         gt_count = 0
                         gt_failed = 0
+                        gt_missed: list[str] = []
                         for entry in rules_root.findall(".//entry"):
                             gt_el = entry.find("group-tag")
                             if gt_el is None or not (gt_el.text or "").strip():
@@ -4645,10 +5026,30 @@ class PanwDriver(DeployDriver):
                                 gt_count += 1
                             except Exception:
                                 gt_failed += 1
+                                if len(gt_missed) < 12:
+                                    gt_missed.append(rule_name)
                         if gt_count or gt_failed:
                             detail = f"{gt_count} group-tag set"
                             if gt_failed:
-                                detail += f", {gt_failed} failed"
+                                # Named, not just counted: this is the one loss
+                                # the operator cannot see on the rule itself.
+                                _names = ", ".join(gt_missed)
+                                if gt_failed > len(gt_missed):
+                                    _names += f", and {gt_failed - len(gt_missed)} more"
+                                detail += (
+                                    f", {gt_failed} not persisted ({_names}). A group tag "
+                                    "is a grouping label in the rulebase view: the rules "
+                                    "went out complete without it. The usual cause is the "
+                                    "Tags section being skipped in this push, which leaves "
+                                    "the tag it points at absent on the target.")
+                            # NEVER a failed step (2026-10-12). A lost grouping
+                            # label is a declared loss, not a broken push - the
+                            # rule itself is on the target. Until today this
+                            # step reported success=(gt_failed == 0) without
+                            # aborting, so one missed label on one rule left an
+                            # otherwise green push with the wrapper's failure
+                            # flag set, and the revert then discarded the WHOLE
+                            # candidate, including a previously pushed but
+                            # uncommitted Network strand.
                             yield StepResult(step=f"Push {label} group-tags",
-                                             success=(gt_failed == 0),
-                                             detail=detail)
+                                             success=True, detail=detail)

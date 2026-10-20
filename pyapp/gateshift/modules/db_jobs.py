@@ -116,11 +116,20 @@ MODULES = [
 ]
 
 
-# Stable per-rule identity hash. Same SHA1 input across every pipeline stage,
+# Stable per-rule identity hash. Same input across every pipeline stage,
 # so an override applied on one stage's view binds equally on the next stage
 # whenever the underlying rule signature is unchanged. Override tables
 # (apps, zones, logging, track, security_profile, service) all key on this.
 # See feedback_rule_identity_hash + project_enrichment_hash_drift memos.
+#
+# The hash itself is ONE function in the database, gs_rule_hash
+# (sql/init/48_fn_rule_hash.sql), created by the first install, this
+# collector's bootstrap and the webapp's lifespan: both halves of the product
+# stamp and recompute the same definition (docs/DEVICE_IDENTITY_PLAN.md,
+# phase 6). Term 1 is the Device's row id. What this module still composes
+# is the per-stage SOURCE and DESTINATION signature the function takes as
+# parameters; the webapp carries the same four fragments for its migration,
+# and a host test keeps them equal.
 #
 # The ZONE is DELIBERATELY EXCLUDED: it is route-DERIVED, so a network edit
 # (zone delete, interface/route change) re-derives it and would shift the hash
@@ -148,19 +157,14 @@ _HASH_DST_SUBTABLE = (
 
 
 def _hash_sha1_expr(src_sig_sql: str, dst_sig_sql: str) -> str:
-    """Build the SHA1 expression from src/dst signature SQL fragments.
-    Single source of truth for the hash input across all stages. Config
-    (api_import) rules add their stable rule_name so they stay unique even
-    when zone-differentiated or object-based (NULL IPs); syslog rules use ''
-    (no stable name) and rely on the IP/proto/port signature. The route-derived
-    zone is excluded so network edits don't orphan overrides - see header."""
-    return f"""UNHEX(SHA1(CONCAT_WS(0x1f,
-        COALESCE(r.device_host,''), r.action, r.direction,
-        COALESCE(r.proto,''), COALESCE(r.dst_port, 0),
-        COALESCE({src_sig_sql},''), COALESCE({dst_sig_sql},''),
-        CASE WHEN r.source_type = 'api_import'
-             THEN COALESCE(r.rule_name,'') ELSE '' END
-    )))"""
+    """The content_hash of a stage row `r`: a call of gs_rule_hash with the
+    stage's src/dst signature fragments as its two signature parameters.
+    The name of this helper predates the function. No formula lives here: config
+    (api_import) rules add their stable rule_name inside the function, the
+    route-derived zone is excluded there, and the Device's row id is term 1
+    (docs/DEVICE_IDENTITY_PLAN.md, phase 6)."""
+    return (f"gs_rule_hash(r.device_id, r.action, r.direction, r.proto, r.dst_port, "
+            f"{src_sig_sql}, {dst_sig_sql}, r.source_type, r.rule_name)")
 
 
 def _write_content_hash_inline(conn, table: str):
@@ -236,7 +240,7 @@ def _run_quality_filter(conn, src_table: str, params: dict):
 
     conn.execute(text(f"""
         INSERT INTO fw_rules_filtered (
-          generated_at, vendor, device_host, action, direction,
+          generated_at, vendor, device_id, action, direction,
           proto, dst_port,
           application, rule_name, security_profile, security_profile_group,
           hit_count, src_count, dst_count, first_seen, last_seen,
@@ -245,7 +249,7 @@ def _run_quality_filter(conn, src_table: str, params: dict):
           seq_num, schedule
         )
         SELECT
-          @run_ts, vendor, device_host, action, direction,
+          @run_ts, vendor, device_id, action, direction,
           proto, dst_port,
           application, rule_name, security_profile, security_profile_group,
           hit_count, {count_cols}, first_seen, last_seen,
@@ -302,7 +306,7 @@ def _run_quality_filter(conn, src_table: str, params: dict):
 
 
 def _run_endpoint_pairs(conn, src_table: str):
-    """Group src_table rules by (vendor, device_host, action, direction, dst_ip),
+    """Group src_table rules by (vendor, device_id, action, direction, dst_ip),
     accumulating all ports and source IPs. Works on any accumulated/subnet/filtered table."""
 
     # fw_rules_accumulated stores dst_ip inline; subnet/filtered use a _destinations table
@@ -315,7 +319,7 @@ def _run_endpoint_pairs(conn, src_table: str):
 
     conn.execute(text(f"""
         INSERT INTO fw_rules_endpoint_pairs (
-          generated_at, vendor, device_host, action, direction,
+          generated_at, vendor, device_id, action, direction,
           dst_ip, ports, applications,
           rule_name, security_profile, security_profile_group,
           hit_count, first_seen, last_seen, source_type,
@@ -323,7 +327,7 @@ def _run_endpoint_pairs(conn, src_table: str):
           seq_num, schedule
         )
         SELECT
-          @run_ts, r.vendor, r.device_host, r.action, r.direction,
+          @run_ts, r.vendor, r.device_id, r.action, r.direction,
           {dst_col},
           NULLIF(GROUP_CONCAT(DISTINCT
             CASE
@@ -353,17 +357,18 @@ def _run_endpoint_pairs(conn, src_table: str):
         FROM {src_table} r
         {dst_join}
         WHERE r.generated_at = @run_ts
-        GROUP BY r.vendor, r.device_host, r.action, r.direction, {dst_col},
+        GROUP BY r.vendor, r.device_id, r.action, r.direction, {dst_col},
                  r.negate_source, r.negate_destination, r.negate_service
     """))
 
-    # Sources: join back to pick up all src_ips for each merged rule
+    # Sources: join back to pick up all src_ips for each merged rule, matched
+    # by the Device's id (docs/DEVICE_IDENTITY_PLAN.md, phase 5)
     if inline_dst:
         ep_match = f"""
             JOIN {src_table} r
               ON  r.generated_at  = @run_ts
               AND r.vendor        <=> ep.vendor
-              AND r.device_host   <=> ep.device_host
+              AND r.device_id     <=> ep.device_id
               AND r.action         =  ep.action
               AND r.direction      =  ep.direction
               AND r.dst_ip        <=> ep.dst_ip"""
@@ -372,7 +377,7 @@ def _run_endpoint_pairs(conn, src_table: str):
             JOIN {src_table} r
               ON  r.generated_at  = @run_ts
               AND r.vendor        <=> ep.vendor
-              AND r.device_host   <=> ep.device_host
+              AND r.device_id     <=> ep.device_id
               AND r.action         =  ep.action
               AND r.direction      =  ep.direction
             JOIN {src_table}_destinations d
@@ -404,56 +409,11 @@ def _run_endpoint_pairs(conn, src_table: str):
     print(f"[generate] endpoint_pairs: src={src_table}")
 
 
-# MIN(NULLIF(vendor,'')) so the aggregate's '' sentinel (COALESCE(vendor,''))
-# behaves like a flow's NULL vendor under MIN - i.e. it's skipped, matching the
-# old fw_flows MIN(vendor).
-_VENDOR_TO_PLATFORM = """
-    CASE MIN(NULLIF(vendor, ''))
-        WHEN 'opnsense'  THEN 'opnsense'
-        WHEN 'palo-alto' THEN 'panw'
-        WHEN 'fortinet'  THEN 'fortigate'
-        ELSE NULL
-    END
-"""
-
-
-def _auto_register_devices(conn):
-    """Register new syslog device_hosts and fill in platform from vendor where
-    detectable.
-
-    Reads the ingest-maintained fw_rule_aggregates (~15k rows; carries
-    device_host, vendor and seen_syslog) instead of scanning raw fw_flows -
-    same invariant as 27_infer_nat_rules ("generate derives only from
-    aggregates; ingest owns raw-flow aggregation"). seen_syslog=1 selects rows
-    that had a syslog source; the '' device_host sentinel is excluded (matches
-    the old `device_host IS NOT NULL`).
-
-    Plan: project_nat_evidence_aggregate_active_plan (P4 - second invariant
-    violator found during smoke; 2.8M-row scan, ~129 s → sub-second).
-    """
-    try:
-        conn.execute(text(f"""
-            INSERT IGNORE INTO fw_devices (host_name, platform, role)
-            SELECT device_host, {_VENDOR_TO_PLATFORM}, 'source'
-            FROM fw_rule_aggregates
-            WHERE device_host != '' AND seen_syslog = 1
-              AND device_host NOT IN (SELECT host_name FROM fw_devices)
-            GROUP BY device_host
-        """))
-        # Also fill in platform for existing auto-registered devices (platform IS NULL)
-        conn.execute(text(f"""
-            UPDATE fw_devices d
-            JOIN (
-                SELECT device_host, {_VENDOR_TO_PLATFORM} AS platform
-                FROM fw_rule_aggregates
-                WHERE device_host != '' AND seen_syslog = 1
-                GROUP BY device_host
-            ) t ON t.device_host = d.host_name
-            SET d.platform = t.platform
-            WHERE d.platform IS NULL AND t.platform IS NOT NULL
-        """))
-    except Exception as e:
-        print(f"[generate] auto_register_devices failed: {e}")
+# A generate used to mint fw_devices rows out of the names the aggregates carried
+# (_auto_register_devices). That made the registry derive from the
+# pipeline, and two boxes sending one hostname became one Device. A sender
+# is a row in fw_log_senders now and points at a Device only when the
+# operator maps it (docs/DEVICE_IDENTITY_PLAN.md, phase 4, D1).
 
 
 def run_sql_jobs(engine0, db_name: str, jobs_dir: str, since_dt=None, until_dt=None, days_back: int = 7) -> int:
@@ -488,8 +448,6 @@ def run_sql_jobs(engine0, db_name: str, jobs_dir: str, since_dt=None, until_dt=N
             WHERE event_ts IS NOT NULL AND event_ts >= @since_ts
         """)).scalar()
         print(f"[generate] days_back={int(days_back)} events_in_scope={int(total_events or 0)}")
-
-        _auto_register_devices(conn)
 
         pipeline_cfg = _load_pipeline_config(conn)
 
@@ -579,13 +537,11 @@ def run_sql_jobs(engine0, db_name: str, jobs_dir: str, since_dt=None, until_dt=N
                         "fw_rules_subnet", "fw_rules_filtered"):
                 conn.execute(text(f"""
                     UPDATE {tbl} c
-                    JOIN fw_devices d
-                      ON d.display_name = c.device_host OR d.host_name = c.device_host
                     JOIN fw_imported_rules ir
-                      ON ir.device_id = d.id AND ir.rule_name = c.rule_name
+                      ON ir.device_id = c.device_id AND ir.rule_name = c.rule_name
                      AND ir.import_ts = (
                            SELECT MAX(import_ts) FROM fw_imported_rules
-                           WHERE device_id = d.id
+                           WHERE device_id = c.device_id
                          )
                     SET c.`sequence` = ir.seq_num
                     WHERE c.source_type = 'api_import'

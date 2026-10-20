@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS fw_rules_filtered (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor       VARCHAR(64) NULL,
-  device_host  VARCHAR(255) NULL,
+  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  device_id  INT NULL,
   action       ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction    ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
   proto        VARCHAR(16) NULL,
@@ -29,16 +30,18 @@ CREATE TABLE IF NOT EXISTS fw_rules_filtered (
   `sequence`   SMALLINT UNSIGNED NULL,
   source_type  VARCHAR(16) NOT NULL DEFAULT 'syslog',
   -- Stable per-rule identity for override tables (apps, zones, logging, …).
-  -- SHA1 over device_host + action + direction + proto + dst_port + sorted
-  -- (src_ip⊕src_zone) + sorted (dst_ip⊕dst_zone⊕dst_nat). Filled in a
+  -- gs_rule_hash (48_fn_rule_hash.sql) over the Device's id + action +
+  -- direction + proto + dst_port + the sorted src/dst signatures. Filled in a
   -- post-pipeline UPDATE (see gateshift/modules/db_jobs.py::_run_quality_filter).
   -- Replaces the legacy (device_host, action, proto, dst_port) "natkey",
   -- which conflated distinct rules - see feedback_rule_identity_hash memory.
   content_hash BINARY(20) NULL,
+  KEY idx_device_id (device_id),
   PRIMARY KEY (id),
   KEY idx_generated    (generated_at),
   KEY idx_proto_port   (proto, dst_port),
-  KEY idx_content_hash (content_hash)
+  KEY idx_content_hash (content_hash),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fw_rules_filtered_sources (

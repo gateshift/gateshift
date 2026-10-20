@@ -22,6 +22,8 @@ import json
 from sqlalchemy import text
 
 import refmodel
+from deploy._forti_common import FORTI_FACTORY_SERVICE_NAMES
+from deploy.checkpoint import CP_PREDEFINED_OBJECTS
 from deploy.panw import _api_url, _api_delete
 
 _VSYS = "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']"
@@ -44,10 +46,7 @@ _FORTI_CMDB_PATH = {
 # EXCLUSION list, so over-listing only protects more and under-listing merely falls
 # back to today's behaviour + operator review + CP delete-time integrity. Principled
 # follow-up: capture CP's predefined flag at import (needs live meta-info + re-import).
-_CP_PREDEFINED = {
-    "All_Internet", "LocalMachine_Loopback", "CP_default_Office_Mode_addresses_pool",
-    "InternalNet", "DMZNet", "LocalMachine", "NAT-hide-services",
-}
+_CP_PREDEFINED = frozenset(CP_PREDEFINED_OBJECTS)      # one list, kept with the driver
 
 # FortiOS FACTORY-DEFAULT objects (addresses / groups / services). Every FortiGate ships
 # these; the import stores them like any object because FortiOS exposes NO reliable
@@ -64,21 +63,7 @@ _FORTI_PREDEFINED = frozenset({
     "login.microsoft.com", "login.microsoftonline.com", "login.windows.net",
     "EMS_ALL_UNKNOWN_CLIENTS", "EMS_ALL_UNMANAGEABLE_CLIENTS", "FCTEMS_ALL_FORTICLOUD_SERVERS",
     "G Suite", "Microsoft Office 365",
-    # service-groups
-    "Email Access", "Exchange Server", "Web Access", "Windows AD",
-    # services
-    "ALL", "ALL_TCP", "ALL_UDP", "ALL_ICMP", "ALL_ICMP6", "NONE", "AFS3", "AH", "AOL",
-    "BGP", "CVSPSERVER", "DCE-RPC", "DHCP", "DHCP6", "DNS", "ESP", "FINGER", "FTP",
-    "FTP_GET", "FTP_PUT", "GOPHER", "GRE", "GTP", "H323", "HTTP", "HTTPS", "IKE", "IMAP",
-    "IMAPS", "INFO_ADDRESS", "INFO_REQUEST", "Internet-Locator-Service", "IRC", "KERBEROS",
-    "L2TP", "LDAP", "LDAP_UDP", "MGCP", "MMS", "MS-SQL", "MYSQL", "NetMeeting", "NFS",
-    "NNTP", "NTP", "ONC-RPC", "OSPF", "PC-Anywhere", "PING", "PING6", "POP3", "POP3S",
-    "PPTP", "QUAKE", "RADIUS", "RADIUS-OLD", "RAUDIO", "RDP", "REXEC", "RIP", "RLOGIN",
-    "RSH", "RTSP", "SAMBA", "SCCP", "SIP", "SIP-MSNmessenger", "SMB", "SMTP", "SMTPS",
-    "SNMP", "SOCKS", "SQUID", "SSH", "SYSLOG", "TALK", "TELNET", "TFTP", "TIMESTAMP",
-    "TRACEROUTE", "UUCP", "VDOLIVE", "VNC", "WAIS", "WINFRAME", "WINS", "X-WINDOWS",
-    "webproxy",
-})
+}) | FORTI_FACTORY_SERVICE_NAMES      # services + service groups, one list (deploy._forti_common)
 
 # platform → predefined/system name-set withheld from deletion candidacy.
 _PREDEFINED = {"checkpoint": _CP_PREDEFINED, "fortigate": _FORTI_PREDEFINED}

@@ -6,7 +6,7 @@ USE gateshift;
 TRUNCATE TABLE fw_rules_consolidated_1;
 
 INSERT INTO fw_rules_consolidated_1 (
-  generated_at, vendor, device_host, action, direction,
+  generated_at, vendor, device_id, action, direction,
   iface_in, iface_out, src_zone, dst_zone,
   src_ip, src_nat, dst_ip, dst_nat,
   proto, dst_port, application, rule_name,
@@ -17,7 +17,7 @@ INSERT INTO fw_rules_consolidated_1 (
 )
 SELECT
   @run_ts,
-  vendor, device_host, action, direction,
+  vendor, device_id, action, direction,
   MIN(iface_in)     AS iface_in,
   MIN(iface_out)    AS iface_out,
   MIN(src_zone)     AS src_zone,
@@ -46,7 +46,7 @@ SELECT
   MIN(schedule) AS schedule
 FROM (
   SELECT
-    c.vendor, c.device_host, c.action, c.direction,
+    c.vendor, c.device_id, c.action, c.direction,
     c.iface_in, c.iface_out, c.src_zone, c.dst_zone,
     c.src_ip,
     c.src_nat,
@@ -72,7 +72,7 @@ FROM (
   WHERE c.generated_at = @run_ts
 ) t
 GROUP BY
-  vendor, device_host, action, direction,
+  vendor, device_id, action, direction,
   src_ip, dst_ip, dst_nat, proto, dst_port,
   rule_name,
   -- Negate-split per project_rule_negation_plan conflict-policy

@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS fw_objects (
   port_to SMALLINT UNSIGNED NULL,
 
   vendor VARCHAR(64) NULL,
-  device_host VARCHAR(255) NULL,
+  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  device_id INT NULL,
   external_id VARCHAR(255) NULL,
 
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -32,7 +33,10 @@ CREATE TABLE IF NOT EXISTS fw_objects (
   UNIQUE KEY uq_type_name (obj_type, name),
   UNIQUE KEY uq_ip (obj_type, ip, ip_prefix),
   UNIQUE KEY uq_service (obj_type, proto, port_from, port_to),
-  UNIQUE KEY uq_ext (obj_type, vendor, device_host, external_id),
+  UNIQUE KEY uq_ext (obj_type, vendor, device_id, external_id),
 
-  PRIMARY KEY (id)
+  KEY idx_device_id (device_id),
+
+  PRIMARY KEY (id),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

@@ -97,6 +97,8 @@
        that order - a log-discovered box has neither and nothing to re-read. #}
     {% set _can_refetch_source = selected_device and (
          selected_device.platform in ('panw', 'checkpoint', 'fortigate', 'asa', 'firepower')
+         or (selected_device.platform in cloud_platforms
+             and (selected_device.cloud_has_bundle or selected_device.has_api))
          or (selected_device.platform == 'opnsense'
              and (selected_device.opn_has_stored_config or selected_device.has_api))) %}
     {# Interfaces-sub-tab only (id-toggled in switchMain): both actions are
@@ -105,11 +107,13 @@
     {# the fetch/reset actions moved into the Interfaces toolbar (user request 2026-10-04) - see #main-interfaces #}
   </div>
 
-  {# ── Enrichment rulebase bar (top level: Access · NAT · TP) ──
+  {# ── Enrichment rulebase bar (top level: Access · NAT · Policy Routing) ──
        Split Enrichment by rulebase so the access-specific knobs
        (Zones, Security Profiles, Applications, Logging, UTM) sit
-       under Access and NAT / CP-TP get their own top-level slot.
-       The sub-sub bar below shows only the Access knobs. #}
+       under Access and the others get their own top-level slot.
+       The sub-sub bar below shows only the Access knobs.
+       Decryption, Threat Prevention and VPN left this bar on 2026-10-12
+       (CE backlog 6): they are sub-tabs of Rules and Network now. #}
   <div id="enrichment-rulebase-bar" class="hidden">{# tabs live in the navigation tree (U13) #}</div>
 
   <div id="enrichment-subtab-bar" class="hidden">
@@ -146,7 +150,9 @@
     {# ══ Network panel - Interfaces / Routing (VRFs + Static Routing) ══ #}
     <div id="primary-network">
     {% if _hero_for_no_data %}
-      {{ empty_hero(empty_state, 'Interfaces, Routing and Zones') }}
+      {# named so switchMain can step it aside for a sub that lives outside it
+         (VPN, whose tunnels come from the source import) #}
+      <div id="network-hero">{{ empty_hero(empty_state, 'Interfaces, Routing and Zones') }}</div>
     {% else %}
 
     {# ── Interfaces ── #}
@@ -159,7 +165,7 @@
     {# OPNsense is zone-native either way, but for different reasons: a config
        import carries real interface groups, while the log path treats interface
        names as zones. Both want the same handling here. #}
-    {% set _src_is_zone_native = _src_platform in ('panw', 'asa', 'opnsense', 'firepower') %}
+    {% set _src_is_zone_native = _src_platform in ('panw', 'asa', 'opnsense', 'firepower') or _src_platform in cloud_platforms %}
     <div id="main-interfaces" class="hidden">
       <div style="padding:16px 20px;">
         {# ── Toolbar - Add + Bulk-Delete. Mirrors the Ruleset>NAT pattern:
@@ -693,7 +699,17 @@
                  `loop.index0` with the route index, so the bulk toolbar/checkbox
                  ids must reference this, not the inner loop. #}
               {% set _vr_idx = loop.index0 %}
-              {% set _iface_names = (iface_zones | map(attribute='interface_name') | list) if iface_zones else [] %}
+              {# The interfaces a route of THIS virtual router may name: its
+                 members (an interface without a VR counts as default's). A
+                 route bound to another VR's interface is rejected by PAN-OS
+                 ("not a valid reference", 2026-10-18), so the pick lists do
+                 not offer one; a VR without members falls back to all. #}
+              {% set _all_ifaces = (iface_zones | map(attribute='interface_name') | list) if iface_zones else [] %}
+              {% set _vr_members = (iface_zones | selectattr('vr_name', 'equalto', v.name) | map(attribute='interface_name') | list) if iface_zones else [] %}
+              {% if v.name == 'default' and iface_zones %}
+              {% set _vr_members = _vr_members + (iface_zones | rejectattr('vr_name') | map(attribute='interface_name') | list) %}
+              {% endif %}
+              {% set _iface_names = _vr_members or _all_ifaces %}
               {% if routing_locked %}
               <div class="dash" style="padding:8px 0;font-size:var(--fs-body);">
                 Assign at least one interface IP in the <strong style="color:var(--tx);">Interfaces</strong> tab to enable connected-route auto-derivation.
@@ -789,8 +805,14 @@
                            next-hop). Show the next-hop-derived egress (same
                            LPM the deploy uses) as a read-only placeholder;
                            without one the browser would display the FIRST
-                           option - lying 'eth0' for every such route. #}
-                        <option value="" selected disabled>{% if rt.derived_iface %}{{ rt.derived_iface }} (auto){% else %}- Via next hop{% endif %}</option>
+                           option - lying 'eth0' for every such route.
+                           When NOTHING can be derived, the cell says so
+                           (CE backlog 1) instead of reading like an ordinary
+                           state: the gateway sits in no interface subnet of
+                           this virtual router, so a FortiGate or Palo Alto
+                           target drops the route and a Check Point target
+                           takes it and leaves it inactive. #}
+                        <option value="" selected disabled>{% if rt.derived_iface %}{{ rt.derived_iface }} (auto){% elif rt.egress_unresolvable %}- no egress for this gateway{% else %}- Via next hop{% endif %}</option>
                         {% elif rt.interface_name not in _iface_names %}
                         <option value="{{ rt.interface_name }}" selected>{{ rt.interface_name }} (unknown)</option>
                         {% endif %}
@@ -801,6 +823,11 @@
                       {% else %}
                       <span class="text-gray-400">{{ rt.interface_name }}</span>
                       {% endif %}
+                      {# CE backlog 1: an off-link gateway is a decision for the
+                         operator, so it is marked here rather than only showing
+                         up as a declared drop after the build. #}
+                      {% if rt.egress_unresolvable %}<span class="text-amber-400 font-sans text-[10px] ml-1"
+                            title="The gateway {{ rt.next_hop }} is in no interface subnet of this virtual router, so no egress interface can be derived for it. A FortiGate target refuses such a route and a Palo Alto target refuses the whole candidate, so both leave it out and say so in the Review. A Check Point target takes it and Gaia leaves it inactive until the gateway is reachable, for example once the VPN tunnel is up. Pick an interface here to make it pushable everywhere.">no egress</span>{% endif %}
                     </td>
                     <td class="py-1.5 pr-8 font-mono text-gray-500 {% if not _is_bh %}cursor-pointer hover:text-gray-300{% endif %} transition-colors" data-field="next_hop"
                         {% if not _is_bh %}onclick="editNextHop(this, {{ rt.id }}, '{{ rt.next_hop or '' }}')"
@@ -854,23 +881,25 @@
                              placeholder="Metric"
                              class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-0.5 font-mono text-gray-200 text-xs focus:outline-none focus:border-blue-500">
                     </td>
-                    <td class="py-1.5 pr-2 network-zone-col">
-                      <div class="flex items-center gap-2">
+                    <td class="py-1.5 pr-2 network-zone-col"></td>
+                  </tr>
+                  {# The row's actions live in a second row that spans the
+                     visible columns: the zone column is hidden, so a cell in
+                     it hid the Add Route and Cancel buttons and the Discard
+                     toggle with it (found 2026-10-18, only Enter saved a route). #}
+                  <tr id="route-add-actions-{{ loop.index0 }}" class="hidden bg-gray-800/40">
+                    <td colspan="6" class="py-1.5 pr-4">
+                      <div class="flex items-center gap-3">
                         <label class="text-[10px] text-gray-500 flex items-center gap-1 cursor-pointer"
                                title="Discard route: drops matching traffic with no next-hop required.">
                           <input type="checkbox" id="new-route-blackhole-{{ loop.index0 }}" class="accent-amber-500"
                                  onchange="(function(c, idx){var i=document.getElementById('new-route-iface-'+idx);var n=document.getElementById('new-route-nh-'+idx);if(i)i.disabled=c;if(n)n.disabled=c;if(c){if(i)i.value='';if(n)n.value='';}})(this.checked, {{ loop.index0 }})">
                           Discard
                         </label>
-                        <div class="ml-auto flex items-center gap-1">
-                          <button type="button" onclick="addRoute({{ loop.index0 }}, '{{ v.name }}')"
-                                  class="btn">
-                            Add Route
-                          </button>
-                          <button type="button" onclick="routeHideAddRow({{ loop.index0 }})"
-                                  class="px-2 py-0.5 text-xs rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors">
-                            Cancel
-                          </button>
+                        <div class="ml-auto flex items-center gap-2">
+                          <button type="button" onclick="routeHideAddRow({{ loop.index0 }})" class="btn">Cancel</button>
+                          <button type="button" onclick="addRoute({{ loop.index0 }}, '{{ v.name }}')" class="btn"
+                                  title="Save this route (Enter in the prefix or next hop field does the same)">Save Route</button>
                         </div>
                       </div>
                     </td>
@@ -998,12 +1027,208 @@
     </div>
 
     {% endif %}{# /_hero_for_no_data #}
+    {# VPN moved here from Target Settings (2026-10-12, CE backlog 6):
+       tunnels are network configuration. Outside the hero above for the
+       same reason as Decryption under Rules. #}
+    {# ── IPSec VPN (CE plan P6) - route-based site-to-site tunnels, peer of
+         NAT/Decryption. Target-driven: PA + Forti + Check Point Communities.
+         Source PSKs are never migrated; the operator may set a PSK per tunnel
+         in Gateshift (stored encrypted, injected at push) - else a placeholder
+         is pushed. ── #}
+    <div id="main-vpn" class="hidden">
+      {% if not selected_device %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      {% elif not selected_target %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see VPN config.
+      </div>
+      {% elif selected_target.platform in ('panw', 'fortigate', 'checkpoint') %}
+        {% if not vpn_tunnels %}
+        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No IPSec VPN tunnels imported.</div>
+        {% else %}
+        <div style="padding:16px 20px;">
+          {% if selected_target.platform == 'checkpoint' %}
+          {# CP encryption-domain mode (CP-VPN plan CP-3). The peer domain is
+             always derived (selectors / active routes); this switch is the LOCAL
+             gateway domain: manual group (complete, incl. routed-internal nets) vs
+             CP-native based-on-topology (connected-only). #}
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:var(--fs-body);">
+            <span class="dash">Local encryption domain:</span>
+            <select id="cp-vpn-domain-mode" onchange="cpVpnDomainMode('{{ selected_target.id }}', this.value)" class="inp" style="font-size:var(--fs-body);padding:4px 8px;">
+              <option value="manual" {% if (cp_vpn_domain_mode or 'manual') == 'manual' %}selected{% endif %}>Manual group (derived)</option>
+              <option value="topology" {% if cp_vpn_domain_mode == 'topology' %}selected{% endif %}>Based on topology (CP-native)</option>
+            </select>
+            <span class="dash" style="color:var(--tx3);">manual = complete (incl. routed-internal). Topology = connected-only, needs gateway topology</span>
+          </div>
+          {# CP community topology (VR-3). meshed = one community per tunnel
+             (always-correct default); star = one community per crypto-group
+             (center = this gateway, satellites = peers sharing crypto). #}
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:var(--fs-body);">
+            <span class="dash">Community topology:</span>
+            <select id="cp-vpn-topology" onchange="cpVpnTopology('{{ selected_target.id }}', this.value)" class="inp" style="font-size:var(--fs-body);padding:4px 8px;">
+              <option value="meshed" {% if (cp_vpn_topology or 'meshed') == 'meshed' %}selected{% endif %}>Meshed (one per tunnel)</option>
+              <option value="star" {% if cp_vpn_topology == 'star' %}selected{% endif %}>Star (one per crypto-group)</option>
+            </select>
+            <span class="dash" style="color:var(--tx3);">star groups peers that share crypto/IKE-version/auth into one hub community. Switching may leave the other type's communities behind</span>
+          </div>
+          {% endif %}
+          {# Bulk-action bar - filter→select→apply, same as the Decryption tab. #}
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;">
+            <input type="text" placeholder="Filter by name…" oninput="bulkFilter('vpn-table',this.value,'vpn-sel-count')"
+                   class="inp" style="font-size:var(--fs-body);padding:6px 10px;width:180px;">
+            <button onclick="vpnBulk('enable')" class="btn">Enable</button>
+            <button onclick="vpnBulk('disable')" class="btn">Disable</button>
+            <button onclick="vpnBulk('remove')" class="btn danger">Remove</button>
+            <span id="vpn-sel-count" class="mut" style="font-size:var(--fs-body);margin-left:4px;">0 selected</span>
+          </div>
+          <table id="vpn-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
+            <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
+              <th style="padding:6px 8px;text-align:center;width:28px;"><input type="checkbox" onclick="bulkSelectAll('vpn-table',this,'vpn-sel-count')" title="Select all (filtered)"></th>
+              <th style="padding:6px 8px;">#</th><th style="padding:6px 8px;">Name</th>
+              <th style="padding:6px 8px;">Peer</th><th style="padding:6px 8px;">Local IF</th>
+              <th style="padding:6px 8px;">Auth</th><th style="padding:6px 8px;">IKE</th>
+              <th style="padding:6px 8px;">IKE Crypto</th><th style="padding:6px 8px;">IPSec Crypto</th>
+              <th style="padding:6px 8px;">Tunnel IF{% if selected_target and selected_target.platform == 'fortigate' %}<div class="dash" style="font-size:var(--fs-caption);font-weight:400;text-transform:none;letter-spacing:0;">Implicit on FortiGate, value not pushed</div>{% endif %}</th>
+              <th style="padding:6px 8px;">Domain (Local → Remote)</th>
+              <th style="padding:6px 8px;text-align:center;">On</th>
+              <th style="padding:6px 8px;"></th></tr></thead>
+            <tbody>
+            {% for v in vpn_tunnels %}
+              <tr data-hash="{{ v.vpn_hash }}" data-name="{{ v.name|lower }}" style="border-bottom:1px solid var(--line);{% if v.disabled or v.deleted %}opacity:0.45;{% endif %}">
+                <td style="padding:6px 8px;text-align:center;"><input type="checkbox" class="bulk-cb" onchange="_bulkCount('vpn-table','vpn-sel-count')"></td>
+                <td style="padding:6px 8px;color:var(--tx3);">{{ v.position }}</td>
+                <td style="padding:6px 8px;color:var(--tx);">{{ v.name }}{% if v.deleted %} <span class="dash" style="font-size:var(--fs-caption);">(removed)</span>{% elif v._edited_fields %} <span class="dash" title="Has edits: {{ v._edited_fields|join(', ') }}" style="font-size:var(--fs-caption);color:var(--amber);">●</span>{% endif %}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ v.peer_address or '-' }}{% if v.peer_type and v.peer_type != 'ip' %} <span class="dash" style="font-size:var(--fs-caption);">({{ v.peer_type }})</span>{% endif %}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">
+                  {# Forti phase1 needs a local egress interface; CP carries none
+                     → operator picks it here (rendered as phase1.interface). #}
+                  {% set _ifn = (iface_zones | map(attribute='interface_name') | list) if iface_zones else [] %}
+                  <select onchange="vpnEdit('{{ v.vpn_hash }}','local_interface',this.value)"
+                          {% if v.deleted %}disabled{% endif %}
+                          class="inp" style="font-size:var(--fs-small);padding:3px 6px;{% if not v.local_interface %}color:var(--amber);{% endif %}">
+                    <option value="" {% if not v.local_interface %}selected{% endif %}>- Set local IF -</option>
+                    {% if v.local_interface and v.local_interface not in _ifn %}
+                    <option value="{{ v.local_interface }}" selected>{{ v.local_interface }}</option>
+                    {% endif %}
+                    {% for _n in _ifn %}
+                    <option value="{{ _n }}" {% if _n == v.local_interface %}selected{% endif %}>{{ _n }}</option>
+                    {% endfor %}
+                  </select>
+                </td>
+                <td style="padding:6px 8px;white-space:nowrap;">{{ v.auth_type }}{% if v.auth_type == 'psk' %}
+                    {% if v.psk_set %}<span class="dash" title="PSK set in Gateshift (encrypted), injected at push" style="font-size:var(--fs-small);color:var(--green,#C8D8E8);">●●●</span>
+                      <button onclick="vpnSetPsk('{{ v.vpn_hash }}',true)" class="btn" title="Replace the stored PSK">Edit</button>
+                      <button onclick="vpnClearPsk('{{ v.vpn_hash }}')" class="btn danger" title="Remove the stored PSK">Clear</button>
+                    {% else %}<span class="dash" title="No PSK set: a placeholder is pushed. Set one to inject the real key (encrypted) at push." style="font-size:var(--fs-caption);color:var(--amber);">(!)</span>
+                      <button onclick="vpnSetPsk('{{ v.vpn_hash }}',false)" class="btn" title="Store a PSK (encrypted) for push">Set PSK</button>
+                    {% endif %}
+                  {% elif v.auth_type == 'cert' %}
+                    {% if v.cert_set %}<span class="dash" title="Identity cert uploaded (key encrypted), imported at push" style="font-size:var(--fs-small);color:var(--green,#C8D8E8);">{{ v.cert_name }}</span>
+                      <button onclick="vpnUploadCert('{{ v.vpn_hash }}','{{ v.cert_name }}')" class="btn" title="Replace the uploaded cert">Edit</button>
+                      <button onclick="vpnClearCert('{{ v.vpn_hash }}')" class="btn danger" title="Remove the uploaded cert">Clear</button>
+                    {% else %}<span class="dash" title="Cert-auth: upload the local identity cert (PEM + key) to migrate it{% if v.cert_ref %}, source ref: {{ v.cert_ref }}{% endif %}" style="font-size:var(--fs-caption);color:var(--amber);">(!) cert{% if v.cert_ref %} ({{ v.cert_ref }}){% endif %}</span>
+                      <button onclick="vpnUploadCert('{{ v.vpn_hash }}','{{ v.cert_ref or '' }}')" class="btn" title="Upload the identity cert (PEM + key, encrypted)">Upload Cert</button>
+                    {% endif %}
+                  {% endif %}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ v.ike_version }}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ v.ike_crypto_profile or '-' }}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ v.ipsec_crypto_profile or '-' }}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">
+                  {# VTI binding - editable so the operator can re-point or
+                     RELEASE it (a set tunnel-IF blocks deleting that
+                     interface via the reference guard; without an editor
+                     the reference was permanent - pa2fgt finding). Offers
+                     tunnel-type interfaces; empty = unbound. #}
+                  {% set _tun_ifn = (iface_zones | selectattr('iface_type', 'equalto', 'tunnel') | map(attribute='interface_name') | list) if iface_zones else [] %}
+                  {# FortiGate targets: the VTI is implicit (named after the
+                       phase1) - the slot is not pushed there, it only manages
+                       the source-side interface reference. Grey + terse
+                       'implicit' marker, no hiding (user decision 2026-09-01). #}
+                  {% set _tun_implicit = selected_target and selected_target.platform == 'fortigate' %}
+                  <select onchange="vpnEdit('{{ v.vpn_hash }}','tunnel_interface',this.value)"
+                          {% if v.deleted %}disabled{% endif %}
+                          class="inp" style="font-size:var(--fs-small);padding:3px 6px;{% if _tun_implicit %}color:var(--tx3);opacity:0.65;{% elif not v.tunnel_interface %}color:var(--amber);{% endif %}">
+                    <option value="" {% if not v.tunnel_interface %}selected{% endif %}>-</option>
+                    {% if v.tunnel_interface and v.tunnel_interface not in _tun_ifn %}
+                    <option value="{{ v.tunnel_interface }}" selected>{{ v.tunnel_interface }}</option>
+                    {% endif %}
+                    {% for _n in _tun_ifn %}
+                    <option value="{{ _n }}" {% if _n == v.tunnel_interface %}selected{% endif %}>{{ _n }}</option>
+                    {% endfor %}
+                  </select>{% if v.raw_extras.v1_out_of_scope %} <span class="dash" title="Collected, not pushed: {{ v.raw_extras.v1_out_of_scope }}" style="font-size:var(--fs-caption);color:var(--amber);">(not pushed)</span>{% endif %}</td>
+                <td style="padding:6px 8px;color:var(--tx2);font-size:var(--fs-small);">
+                  {% if v.traffic_selectors %}{% for s in v.traffic_selectors %}{{ s.local }}→{{ s.remote }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="dash" title="Route-based: domain derived from routing at deploy">route-based</span>{% endif %}
+                </td>
+                <td style="padding:6px 8px;text-align:center;">
+                  <input type="checkbox" {% if not v.disabled %}checked{% endif %} {% if v.deleted %}disabled{% endif %}
+                         onchange="vpnEdit('{{ v.vpn_hash }}','disabled',!this.checked)" title="Enable / disable">
+                </td>
+                <td style="padding:6px 8px;white-space:nowrap;">
+                  {% if v.deleted %}
+                    <button onclick="vpnEdit('{{ v.vpn_hash }}','deleted',false)" class="btn">Restore</button>
+                  {% else %}
+                    {% if v._edited_fields %}<button onclick="vpnReset('{{ v.vpn_hash }}')" class="btn" title="Drop all edits, revert to import">Reset</button>{% endif %}
+                    <button onclick="vpnEdit('{{ v.vpn_hash }}','deleted',true)" class="btn danger" title="Remove from push (soft-delete)">×</button>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+
+          {# PSK modal - replaces window.prompt (prompts can't mask input). #}
+          <div id="vpn-psk-modal" style="display:none;position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.6);">
+            <div style="max-width:420px;margin:14vh auto;background:var(--bg2,#1a1d23);border:1px solid var(--line);border-radius:0;padding:18px 20px;">
+              <div id="vpn-psk-title" style="font-weight:600;color:var(--tx);margin-bottom:12px;">Set pre-shared key</div>
+              <input type="hidden" id="vpn-psk-hash">
+              <label class="dash" style="font-size:var(--fs-small);">Pre-shared key</label>
+              <input id="vpn-psk-value" type="password" autocomplete="new-password"
+                     onkeydown="if(event.key==='Enter')vpnSubmitPsk();if(event.key==='Escape')document.getElementById('vpn-psk-modal').style.display='none';"
+                     style="width:100%;margin:3px 0 14px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);">
+              <div style="text-align:right;">
+                <button onclick="document.getElementById('vpn-psk-modal').style.display='none'" class="btn">Cancel</button>
+                <button onclick="vpnSubmitPsk()" class="btn">Save</button>
+              </div>
+            </div>
+          </div>
+          {# Cert-upload modal (CR-1) - shared, populated per tunnel via JS.
+             PEM cert + key (key encrypted at rest); optional passphrase + name. #}
+          <div id="vpn-cert-modal" style="display:none;position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.6);">
+            <div style="max-width:640px;margin:6vh auto;background:var(--bg2,#1a1d23);border:1px solid var(--line);border-radius:0;padding:18px 20px;">
+              <div style="font-weight:600;color:var(--tx);margin-bottom:4px;">Upload VPN identity certificate</div>
+              <div class="dash" style="font-size:var(--fs-small);margin-bottom:12px;">PEM certificate + private key. The key is stored <strong style="color:var(--tx);">encrypted</strong> and imported into the push. It is never shown again.</div>
+              <input type="hidden" id="vpn-cert-hash">
+              <label class="dash" style="font-size:var(--fs-small);">Reference name (on target)</label>
+              <input id="vpn-cert-name" type="text" placeholder="gateshift-vpn-cert" style="width:100%;margin:3px 0 10px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);">
+              <label class="dash" style="font-size:var(--fs-small);">Certificate (PEM)</label>
+              <textarea id="vpn-cert-pem" rows="6" placeholder="-----BEGIN CERTIFICATE-----" style="width:100%;margin:3px 0 10px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-small);"></textarea>
+              <label class="dash" style="font-size:var(--fs-small);">Private key (PEM)</label>
+              <textarea id="vpn-cert-key" rows="6" placeholder="-----BEGIN PRIVATE KEY-----" style="width:100%;margin:3px 0 10px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-small);"></textarea>
+              <label class="dash" style="font-size:var(--fs-small);">Key passphrase (if encrypted)</label>
+              <input id="vpn-cert-pass" type="password" autocomplete="off" style="width:100%;margin:3px 0 14px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);">
+              <div style="text-align:right;">
+                <button onclick="document.getElementById('vpn-cert-modal').style.display='none'" class="btn">Cancel</button>
+                <button onclick="vpnSubmitCert()" class="btn">Upload</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+      {% else %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+        IPSec VPN migration is not yet supported for <strong style="color:var(--tx);">{{ selected_target.platform | plat }}</strong> targets.
+      </div>
+      {% endif %}
+    </div>
+
     </div>{# end primary-network #}
 
     {# ══ Ruleset panel - Security / NAT / Policy Routing ══ #}
     <div id="primary-ruleset" class="hidden">
     {% if _hero_for_no_data_or_gen %}
-      {{ empty_hero(empty_state, 'Firewall rules, NAT and policy routing') }}
+      {# named so switchMain can step it aside for the subs that live outside
+         it (Decryption, Threat Prevention) #}
+      <div id="ruleset-hero">{{ empty_hero(empty_state, 'Firewall rules, NAT and policy routing') }}</div>
     {% else %}
 
     {# ── NAT - editable list fragment (Phase C, project_nat_full_scope_plan).
@@ -1263,6 +1488,223 @@
     {# Policy Routing (PBF) moved to Network tab (#main-policy-routing). #}
 
     {% endif %}{# /_hero_for_no_data_or_gen #}
+    {# Decryption and Threat Prevention moved here from Target Settings
+       (2026-10-12, CE backlog 6): they are rulesets of their own, not
+       fields on existing rules. They sit OUTSIDE the empty-state hero
+       above, because their rules come from the source import: they stay
+       reachable before the first generate, as they were under Target
+       Settings. switchMain hides #ruleset-hero while one of them is the
+       active sub. #}
+    {# ── Decryption (SSL/TLS Inspection, Phase 5) - its own rulebase, peer of
+         NAT/TP. Target-driven: PA/CP show the decryption rulebase, FortiGate
+         shows the ssl-ssh-profile objects. Read-only in V1 (editing = Phase 5d);
+         certs are referenced by name - the operator provisions the CA on the
+         target (ref-only). ── #}
+    <div id="main-decryption" class="hidden">
+      {% if not selected_device %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      {% elif not selected_target %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see decryption config.
+      </div>
+      {% elif selected_target.platform in ('panw', 'checkpoint') %}
+        {# PA/CP: the decryption RULEBASE. #}
+        {% if not ssl_rules %}
+        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No decryption rules imported.</div>
+        {% else %}
+        <div style="padding:16px 20px;">
+          {# the intro paragraph went on 2026-10-05 (user request) - the view hint
+             above the page already says what this view is for #}
+          {% if selected_target.platform == 'checkpoint' %}
+          {# URL-category mapping (project_cp_url_category_map_plan, P3): a
+             predefined source category (e.g. PA financial-services) must
+             REFERENCE a Check Point predefined category (Financial Services) -
+             taxonomies differ, so only reliable name-matches auto-map; the
+             operator attaches the rest from the target's fetched catalog.
+             Unmapped/orphaned categories gate the Decryption push (P4). #}
+          <div id="cp-urlcat-panel" style="margin-bottom:14px;padding:12px 14px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;">
+              <span class="dash" style="font-size:var(--fs-body);">
+                <strong style="color:var(--tx);">URL-category mapping → Check Point</strong> - attach the url-category from the target's catalog. Custom categories migrate as-is. Unmapped categories block the Decryption push.
+              </span>
+              <button onclick="fetchCpUrlCatalog()" class="btn" style="white-space:nowrap;">Fetch from Target</button>
+            </div>
+            <div id="cp-urlcat-status" class="mut" style="font-size:var(--fs-small);margin-bottom:8px;"></div>
+            <table id="cp-urlcat-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
+              <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
+                <th style="padding:5px 8px;">Source Category</th>
+                <th style="padding:5px 8px;">→ Check Point Category</th>
+                <th style="padding:5px 8px;width:170px;">Status</th>
+              </tr></thead>
+              <tbody id="cp-urlcat-body"></tbody>
+            </table>
+          </div>
+          {% endif %}
+          {# Bulk-action bar - same filter→select→apply pattern as the Access
+             enrichment knobs, adapted to the rulebase (bulk action + enable/
+             disable/remove). #}
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;">
+            <input type="text" placeholder="Filter by name…" oninput="bulkFilter('ssl-table',this.value,'ssl-sel-count')"
+                   class="inp" style="font-size:var(--fs-body);padding:6px 10px;width:180px;">
+            <select id="ssl-bulk-action" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+              <option value="decrypt">decrypt</option>
+              <option value="no-decrypt">bypass</option>
+            </select>
+            <button onclick="sslBulk('action')" class="btn">Apply to Selection</button>
+            <span style="width:1px;height:18px;background:var(--line);margin:0 2px;"></span>
+            <button onclick="sslBulk('enable')" class="btn">Enable</button>
+            <button onclick="sslBulk('disable')" class="btn">Disable</button>
+            <button onclick="sslBulk('remove')" class="btn danger">Remove</button>
+            <span id="ssl-sel-count" class="mut" style="font-size:var(--fs-body);margin-left:4px;">0 selected</span>
+          </div>
+          <table id="ssl-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
+            <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
+              <th style="padding:6px 8px;text-align:center;width:28px;"><input type="checkbox" onclick="bulkSelectAll('ssl-table',this,'ssl-sel-count')" title="Select all (filtered)"></th>
+              <th style="padding:6px 8px;">#</th><th style="padding:6px 8px;">Name</th>
+              <th style="padding:6px 8px;">Action</th><th style="padding:6px 8px;">Type</th>
+              <th style="padding:6px 8px;">Source</th><th style="padding:6px 8px;">Destination</th>
+              <th style="padding:6px 8px;">Service</th><th style="padding:6px 8px;">URL Category</th>
+              <th style="padding:6px 8px;">Cert</th><th style="padding:6px 8px;text-align:center;">On</th>
+              <th style="padding:6px 8px;"></th></tr></thead>
+            <tbody>
+            {% for r in ssl_rules %}
+              <tr data-hash="{{ r.ssl_hash }}" data-name="{{ r.name|lower }}" style="border-bottom:1px solid var(--line);{% if r.disabled or r.deleted %}opacity:0.45;{% endif %}">
+                <td style="padding:6px 8px;text-align:center;"><input type="checkbox" class="bulk-cb" onchange="_bulkCount('ssl-table','ssl-sel-count')"></td>
+                <td style="padding:6px 8px;color:var(--tx3);">{{ r.position }}</td>
+                <td style="padding:6px 8px;color:var(--tx);">{{ r.name }}{% if r.deleted %} <span class="dash" style="font-size:var(--fs-caption);">(removed)</span>{% elif r._edited_fields %} <span class="dash" title="Has edits: {{ r._edited_fields|join(', ') }}" style="font-size:var(--fs-caption);color:var(--amber);">●</span>{% endif %}</td>
+                <td style="padding:6px 8px;">
+                  <select onchange="sslEdit('{{ r.ssl_hash }}','action',this.value)" {% if r.deleted %}disabled{% endif %}
+                          class="inp" style="font-size:var(--fs-small);padding:3px 6px;">
+                    <option value="decrypt" {% if r.action == 'decrypt' %}selected{% endif %}>decrypt</option>
+                    <option value="no-decrypt" {% if r.action == 'no-decrypt' %}selected{% endif %}>bypass</option>
+                  </select>
+                </td>
+                <td style="padding:6px 8px;">{{ r.ssl_type }}{% if r.raw_extras.v1_out_of_scope %} <span class="dash" title="Collected, not pushed: the push covers HTTPS forward-proxy decryption only" style="font-size:var(--fs-caption);">(not pushed)</span>{% endif %}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ (r.src_zones + r.sources)|join(', ') or 'any' }}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ (r.dst_zones + r.destinations)|join(', ') or 'any' }}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ r.services|join(', ') or 'any' }}</td>
+                <td style="padding:6px 8px;color:var(--tx2);">{{ r.url_categories|join(', ') or 'any' }}</td>
+                <td style="padding:6px 8px;">
+                  <input type="text" value="{{ r.cert_ref or '' }}" placeholder="-"
+                         onchange="sslEdit('{{ r.ssl_hash }}','cert_ref',this.value)" {% if r.deleted %}disabled{% endif %}
+                         class="inp" style="font-size:var(--fs-small);padding:3px 6px;width:120px;">
+                </td>
+                <td style="padding:6px 8px;text-align:center;">
+                  <input type="checkbox" {% if not r.disabled %}checked{% endif %} {% if r.deleted %}disabled{% endif %}
+                         onchange="sslEdit('{{ r.ssl_hash }}','disabled',!this.checked)" title="Enable / disable">
+                </td>
+                <td style="padding:6px 8px;white-space:nowrap;">
+                  {% if r.deleted %}
+                    <button onclick="sslEdit('{{ r.ssl_hash }}','deleted',false)" class="btn">Restore</button>
+                  {% else %}
+                    {% if r._edited_fields %}<button onclick="sslReset('{{ r.ssl_hash }}')" class="btn" title="Drop all edits, revert to import">Reset</button>{% endif %}
+                    <button onclick="sslEdit('{{ r.ssl_hash }}','deleted',true)" class="btn danger" title="Remove from push (soft-delete)">×</button>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      {% elif selected_target.platform == 'fortigate' %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+        FortiGate has no decryption rulebase: TLS inspection is a reusable
+        <strong style="color:var(--tx);">ssl-ssh-profile</strong> attached per security policy.
+        Attach an existing target profile under <em>UTM Profiles → SSL/SSH Inspection</em>.
+      </div>
+      {% else %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+        Decryption is not supported for <strong style="color:var(--tx);">{{ selected_target.platform | plat }}</strong>.
+      </div>
+      {% endif %}
+    </div>
+
+    {# ── Threat Prevention (CP-only) - own rulebase, lifted out of the old
+         Security Profiles sub-tab. Live-render via driver.generate_tp_rules()
+         - same code path as Push, so the preview reflects what Deploy emits. ── #}
+    <div id="main-tp" class="hidden">
+      {% if not selected_device %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      {% elif not selected_target %}
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see Threat-Prevention config.
+      </div>
+      {% elif selected_target.platform == 'checkpoint' %}
+        <div style="padding:16px 20px;display:flex;flex-direction:column;gap:16px;">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+            <select id="cp-tp-layer" onchange="_onCheckpointTpLayerChange()" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
+              <option value="">- Pick TP-Layer -</option>
+            </select>
+            <select id="cp-tp-strategy" onchange="_onCpTpStrategyChange()" class="inp" style="font-size:var(--fs-body);padding:6px 10px;"
+                    title="How the TP ruleset is generated. One rule either way: with a single profile, several scoped rules behave identically to one union-scope rule on Check Point (first-match, scope matches source or destination)">
+              <option value="baseline">Baseline, protect everything (Any)</option>
+              <option value="protected-assets">Protected assets: destinations of inspected rules</option>
+              {% if selected_device and selected_device.platform == 'checkpoint' and cp_tp_import_layers %}
+              <option value="source">Source ruleset: re-render the imported TP rules 1:1</option>
+              {% endif %}
+            </select>
+            {% if selected_device and selected_device.platform == 'checkpoint' and cp_tp_import_layers %}
+            <select id="cp-tp-source-layer" class="inp hidden" style="font-size:var(--fs-body);padding:6px 10px;"
+                    title="Source TP layer to re-render (imported from the source device)">
+              {% for l in cp_tp_import_layers %}
+              <option value="{{ l.layer }}">{{ l.layer }} · {{ l.rules }} rule(s){% if l.exceptions %} + {{ l.exceptions }} exception(s){% endif %}</option>
+              {% endfor %}
+            </select>
+            {% endif %}
+            <select id="cp-tp-default-profile" onchange="_updateCheckpointTpApplyState()" class="inp"
+                    style="font-size:var(--fs-body);padding:6px 10px;" title="Default Threat-Prevention profile">
+              <option value="">- Pick TP-Profile -</option>
+            </select>
+            <select id="cp-tp-track" class="inp"
+                    style="font-size:var(--fs-body);padding:6px 10px;" title="Track / Log setting for generated TP-rules">
+              <option value="Log" selected>Log</option>
+              <option value="None">None</option>
+            </select>
+            <button onclick="applyCheckpointTp()" id="cp-tp-apply-btn" disabled
+                    title="Save the TP-layer config and generate the Threat Prevention ruleset preview" class="btn">Generate TP Ruleset</button>
+            <button onclick="clearCheckpointTp()" class="btn"
+                    title="Remove Gateshift's saved TP config for this layer (does NOT delete the layer on the gateway)">Clear Layer</button>
+            <span id="cp-tp-status" class="mut" style="font-size:var(--fs-body);margin-left:4px;"></span>
+          </div>
+          {# no inline display: the .hidden class does the hiding, and an
+             inline display:none would beat classList.remove('hidden') - the
+             drift banner could never show (found 2026-10-12, predates the
+             pane move) #}
+          <div id="cp-tp-drift-banner" class="tag bad hidden"
+               style="width:auto;padding:8px 12px;border-radius:0;font-size:var(--fs-body);"></div>
+          <div id="cp-tp-preview-wrap" class="hidden">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <span class="mut" style="font-size:var(--fs-body);">
+                Generated TP-rules (<span id="cp-tp-preview-count">0</span>)
+              </span>
+            </div>
+            <div class="twrap" style="margin:0;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Name</th>
+                    <th>Source</th>
+                    <th>Destination</th>
+                    <th>Service</th>
+                    <th>Protected Scope</th>
+                    <th>Action</th>
+                    <th>Track</th>
+                  </tr>
+                </thead>
+                <tbody id="cp-tp-preview-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      {% else %}
+        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+          Threat Prevention is Check Point only.
+        </div>
+      {% endif %}
+    </div>
+
     </div>{# end primary-ruleset #}
 
     {# ══ Objects panel - Addresses / Services / their groups ══ #}
@@ -1993,6 +2435,41 @@
             <span id="apps-apply-status" class="mut" style="font-size:var(--fs-body);margin-left:4px;"></span>
           </div>
         </div>
+      {% elif selected_target.platform == 'fortigate' and selected_target.ngfw_mode == 'policy-based' %}
+        {# FortiOS NGFW policy-based mode: applications per policy, matched by name
+           against the FortiGuard catalog, never translated (docs/FGT_POLICY_MODE_PLAN.md). #}
+        <div style="padding:16px 20px;">
+          <span class="dash" style="display:block;font-size:var(--fs-body);margin-bottom:10px;">
+            Policy-based NGFW mode on the target: applications are matched per policy.
+            Auto-assign takes a source application only when the FortiGuard catalog carries the same name,
+            everything else stays for you to pick here, the push declares what found no match.
+          </span>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+            <span class="hdr-cap" style="white-space:nowrap;">Set Application</span>
+            <select id="apps-apply-application" class="inp" style="font-size:var(--fs-body);padding:6px 10px;"
+                    title="The target's application catalog (FortiGuard signatures, custom applications, groups).">
+              <option value="any">any</option>
+              <option value="auto">Auto-assign by name</option>
+            </select>
+            <span class="hdr-cap" style="white-space:nowrap;margin-left:6px;">Set Service/Port</span>
+            <select id="apps-apply-service" class="inp" style="font-size:var(--fs-body);padding:6px 10px;"
+                    title="application-default renders as service ALL with the application's default ports enforced.">
+              <option value="original">original</option>
+              <option value="any">any</option>
+              <option value="application-default">application-default</option>
+            </select>
+            <button onclick="applyEnrichment()" id="apps-apply-btn" class="btn">Apply to Selection</button>
+            <button onclick="clearEnrichment()" class="btn">Clear</button>
+            <span id="apps-apply-status" class="mut" style="font-size:var(--fs-body);margin-left:4px;"></span>
+          </div>
+        </div>
+      {% elif selected_target.platform == 'fortigate' %}
+        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
+          This FortiGate runs in <strong style="color:var(--tx);">profile-based</strong> NGFW mode{% if not selected_target.ngfw_mode %} (mode not read yet, a generate probes it){% endif %}:
+          a policy matches no applications of its own, application control is the
+          <strong style="color:var(--tx);">Application Control</strong> profile in UTM Profiles.
+          Per-policy applications need the box in policy-based NGFW mode.
+        </div>
       {% elif selected_target.platform == 'checkpoint' %}
         <div style="padding:16px 20px;">
           <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
@@ -2146,6 +2623,8 @@
             and optional session-start / packet-capture flags, then apply
             to the selected rules. When mode is <code style="color:var(--tx);">disable</code> the
             session-start and packet-capture flags have no effect.
+            <code style="color:var(--tx);">utm</code> does not apply to a rule that denies
+            traffic, which inspects nothing, so such rules are skipped and named.
             Use <strong style="color:var(--tx);">Clear</strong> to fall back to the target-default
             from the Forti settings.
           </span>
@@ -2354,7 +2833,7 @@
       </div>
       {% else %}
       <div style="padding:16px 20px;" id="tags-section-container"
-           hx-get="/enrichment/tags/list-fragment?device={{ device }}&target={{ selected_target.id }}"
+           hx-get="/enrichment/tags/list-fragment?device={{ device_id }}&target={{ selected_target.id }}"
            hx-trigger="load"
            hx-swap="innerHTML">
         <div class="dash" style="font-style:italic;">Loading tag catalog…</div>
@@ -2362,402 +2841,8 @@
       {% endif %}
     </div>
 
-    {# ── Threat Prevention (CP-only) - own rulebase, lifted out of the old
-         Security Profiles sub-tab. Live-render via driver.generate_tp_rules()
-         - same code path as Push, so the preview reflects what Deploy emits. ── #}
-    <div id="main-tp-enrichment" class="hidden">
-      {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
-      {% elif not selected_target %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see Threat-Prevention config.
-      </div>
-      {% elif selected_target.platform == 'checkpoint' %}
-        <div style="padding:16px 20px;display:flex;flex-direction:column;gap:16px;">
-          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
-            <select id="cp-tp-layer" onchange="_onCheckpointTpLayerChange()" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
-              <option value="">- Pick TP-Layer -</option>
-            </select>
-            <select id="cp-tp-strategy" onchange="_onCpTpStrategyChange()" class="inp" style="font-size:var(--fs-body);padding:6px 10px;"
-                    title="How the TP ruleset is generated. One rule either way: with a single profile, several scoped rules behave identically to one union-scope rule on Check Point (first-match, scope matches source or destination)">
-              <option value="baseline">Baseline, protect everything (Any)</option>
-              <option value="protected-assets">Protected assets: destinations of inspected rules</option>
-              {% if selected_device and selected_device.platform == 'checkpoint' and cp_tp_import_layers %}
-              <option value="source">Source ruleset: re-render the imported TP rules 1:1</option>
-              {% endif %}
-            </select>
-            {% if selected_device and selected_device.platform == 'checkpoint' and cp_tp_import_layers %}
-            <select id="cp-tp-source-layer" class="inp hidden" style="font-size:var(--fs-body);padding:6px 10px;"
-                    title="Source TP layer to re-render (imported from the source device)">
-              {% for l in cp_tp_import_layers %}
-              <option value="{{ l.layer }}">{{ l.layer }} · {{ l.rules }} rule(s){% if l.exceptions %} + {{ l.exceptions }} exception(s){% endif %}</option>
-              {% endfor %}
-            </select>
-            {% endif %}
-            <select id="cp-tp-default-profile" onchange="_updateCheckpointTpApplyState()" class="inp"
-                    style="font-size:var(--fs-body);padding:6px 10px;" title="Default Threat-Prevention profile">
-              <option value="">- Pick TP-Profile -</option>
-            </select>
-            <select id="cp-tp-track" class="inp"
-                    style="font-size:var(--fs-body);padding:6px 10px;" title="Track / Log setting for generated TP-rules">
-              <option value="Log" selected>Log</option>
-              <option value="None">None</option>
-            </select>
-            <button onclick="applyCheckpointTp()" id="cp-tp-apply-btn" disabled
-                    title="Save the TP-layer config and generate the Threat Prevention ruleset preview" class="btn">Generate TP Ruleset</button>
-            <button onclick="clearCheckpointTp()" class="btn"
-                    title="Remove Gateshift's saved TP config for this layer (does NOT delete the layer on the gateway)">Clear Layer</button>
-            <span id="cp-tp-status" class="mut" style="font-size:var(--fs-body);margin-left:4px;"></span>
-          </div>
-          <div id="cp-tp-drift-banner" class="tag bad hidden"
-               style="display:none;width:auto;padding:8px 12px;border-radius:0;font-size:var(--fs-body);"></div>
-          <div id="cp-tp-preview-wrap" class="hidden">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-              <span class="mut" style="font-size:var(--fs-body);">
-                Generated TP-rules (<span id="cp-tp-preview-count">0</span>)
-              </span>
-            </div>
-            <div class="twrap" style="margin:0;">
-              <table>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Name</th>
-                    <th>Source</th>
-                    <th>Destination</th>
-                    <th>Service</th>
-                    <th>Protected Scope</th>
-                    <th>Action</th>
-                    <th>Track</th>
-                  </tr>
-                </thead>
-                <tbody id="cp-tp-preview-body"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      {% else %}
-        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-          Threat Prevention is Check Point only.
-        </div>
-      {% endif %}
-    </div>
 
-    {# ── Decryption (SSL/TLS Inspection, Phase 5) - its own rulebase, peer of
-         NAT/TP. Target-driven: PA/CP show the decryption rulebase, FortiGate
-         shows the ssl-ssh-profile objects. Read-only in V1 (editing = Phase 5d);
-         certs are referenced by name - the operator provisions the CA on the
-         target (ref-only). ── #}
-    <div id="main-decryption-enrichment" class="hidden">
-      {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
-      {% elif not selected_target %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see decryption config.
-      </div>
-      {% elif selected_target.platform in ('panw', 'checkpoint') %}
-        {# PA/CP: the decryption RULEBASE. #}
-        {% if not ssl_rules %}
-        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No decryption rules imported.</div>
-        {% else %}
-        <div style="padding:16px 20px;">
-          {# the intro paragraph went on 2026-10-05 (user request) - the view hint
-             above the page already says what this view is for #}
-          {% if selected_target.platform == 'checkpoint' %}
-          {# URL-category mapping (project_cp_url_category_map_plan, P3): a
-             predefined source category (e.g. PA financial-services) must
-             REFERENCE a Check Point predefined category (Financial Services) -
-             taxonomies differ, so only reliable name-matches auto-map; the
-             operator attaches the rest from the target's fetched catalog.
-             Unmapped/orphaned categories gate the Decryption push (P4). #}
-          <div id="cp-urlcat-panel" style="margin-bottom:14px;padding:12px 14px;border:1px solid var(--line);border-radius:0;background:var(--bg2);">
-            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;">
-              <span class="dash" style="font-size:var(--fs-body);">
-                <strong style="color:var(--tx);">URL-category mapping → Check Point</strong> - attach the url-category from the target's catalog. Custom categories migrate as-is. Unmapped categories block the Decryption push.
-              </span>
-              <button onclick="fetchCpUrlCatalog()" class="btn" style="white-space:nowrap;">Fetch from Target</button>
-            </div>
-            <div id="cp-urlcat-status" class="mut" style="font-size:var(--fs-small);margin-bottom:8px;"></div>
-            <table id="cp-urlcat-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
-              <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
-                <th style="padding:5px 8px;">Source Category</th>
-                <th style="padding:5px 8px;">→ Check Point Category</th>
-                <th style="padding:5px 8px;width:170px;">Status</th>
-              </tr></thead>
-              <tbody id="cp-urlcat-body"></tbody>
-            </table>
-          </div>
-          {% endif %}
-          {# Bulk-action bar - same filter→select→apply pattern as the Access
-             enrichment knobs, adapted to the rulebase (bulk action + enable/
-             disable/remove). #}
-          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;">
-            <input type="text" placeholder="Filter by name…" oninput="bulkFilter('ssl-table',this.value,'ssl-sel-count')"
-                   class="inp" style="font-size:var(--fs-body);padding:6px 10px;width:180px;">
-            <select id="ssl-bulk-action" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
-              <option value="decrypt">decrypt</option>
-              <option value="no-decrypt">bypass</option>
-            </select>
-            <button onclick="sslBulk('action')" class="btn">Apply to Selection</button>
-            <span style="width:1px;height:18px;background:var(--line);margin:0 2px;"></span>
-            <button onclick="sslBulk('enable')" class="btn">Enable</button>
-            <button onclick="sslBulk('disable')" class="btn">Disable</button>
-            <button onclick="sslBulk('remove')" class="btn danger">Remove</button>
-            <span id="ssl-sel-count" class="mut" style="font-size:var(--fs-body);margin-left:4px;">0 selected</span>
-          </div>
-          <table id="ssl-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
-            <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
-              <th style="padding:6px 8px;text-align:center;width:28px;"><input type="checkbox" onclick="bulkSelectAll('ssl-table',this,'ssl-sel-count')" title="Select all (filtered)"></th>
-              <th style="padding:6px 8px;">#</th><th style="padding:6px 8px;">Name</th>
-              <th style="padding:6px 8px;">Action</th><th style="padding:6px 8px;">Type</th>
-              <th style="padding:6px 8px;">Source</th><th style="padding:6px 8px;">Destination</th>
-              <th style="padding:6px 8px;">Service</th><th style="padding:6px 8px;">URL Category</th>
-              <th style="padding:6px 8px;">Cert</th><th style="padding:6px 8px;text-align:center;">On</th>
-              <th style="padding:6px 8px;"></th></tr></thead>
-            <tbody>
-            {% for r in ssl_rules %}
-              <tr data-hash="{{ r.ssl_hash }}" data-name="{{ r.name|lower }}" style="border-bottom:1px solid var(--line);{% if r.disabled or r.deleted %}opacity:0.45;{% endif %}">
-                <td style="padding:6px 8px;text-align:center;"><input type="checkbox" class="bulk-cb" onchange="_bulkCount('ssl-table','ssl-sel-count')"></td>
-                <td style="padding:6px 8px;color:var(--tx3);">{{ r.position }}</td>
-                <td style="padding:6px 8px;color:var(--tx);">{{ r.name }}{% if r.deleted %} <span class="dash" style="font-size:var(--fs-caption);">(removed)</span>{% elif r._edited_fields %} <span class="dash" title="Has edits: {{ r._edited_fields|join(', ') }}" style="font-size:var(--fs-caption);color:var(--amber);">●</span>{% endif %}</td>
-                <td style="padding:6px 8px;">
-                  <select onchange="sslEdit('{{ r.ssl_hash }}','action',this.value)" {% if r.deleted %}disabled{% endif %}
-                          class="inp" style="font-size:var(--fs-small);padding:3px 6px;">
-                    <option value="decrypt" {% if r.action == 'decrypt' %}selected{% endif %}>decrypt</option>
-                    <option value="no-decrypt" {% if r.action == 'no-decrypt' %}selected{% endif %}>bypass</option>
-                  </select>
-                </td>
-                <td style="padding:6px 8px;">{{ r.ssl_type }}{% if r.raw_extras.v1_out_of_scope %} <span class="dash" title="Collected, not pushed: the push covers HTTPS forward-proxy decryption only" style="font-size:var(--fs-caption);">(not pushed)</span>{% endif %}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ (r.src_zones + r.sources)|join(', ') or 'any' }}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ (r.dst_zones + r.destinations)|join(', ') or 'any' }}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ r.services|join(', ') or 'any' }}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ r.url_categories|join(', ') or 'any' }}</td>
-                <td style="padding:6px 8px;">
-                  <input type="text" value="{{ r.cert_ref or '' }}" placeholder="-"
-                         onchange="sslEdit('{{ r.ssl_hash }}','cert_ref',this.value)" {% if r.deleted %}disabled{% endif %}
-                         class="inp" style="font-size:var(--fs-small);padding:3px 6px;width:120px;">
-                </td>
-                <td style="padding:6px 8px;text-align:center;">
-                  <input type="checkbox" {% if not r.disabled %}checked{% endif %} {% if r.deleted %}disabled{% endif %}
-                         onchange="sslEdit('{{ r.ssl_hash }}','disabled',!this.checked)" title="Enable / disable">
-                </td>
-                <td style="padding:6px 8px;white-space:nowrap;">
-                  {% if r.deleted %}
-                    <button onclick="sslEdit('{{ r.ssl_hash }}','deleted',false)" class="btn">Restore</button>
-                  {% else %}
-                    {% if r._edited_fields %}<button onclick="sslReset('{{ r.ssl_hash }}')" class="btn" title="Drop all edits, revert to import">Reset</button>{% endif %}
-                    <button onclick="sslEdit('{{ r.ssl_hash }}','deleted',true)" class="btn danger" title="Remove from push (soft-delete)">×</button>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% endif %}
-      {% elif selected_target.platform == 'fortigate' %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        FortiGate has no decryption rulebase: TLS inspection is a reusable
-        <strong style="color:var(--tx);">ssl-ssh-profile</strong> attached per security policy.
-        Attach an existing target profile under <em>UTM Profiles → SSL/SSH Inspection</em>.
-      </div>
-      {% else %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Decryption is not supported for <strong style="color:var(--tx);">{{ selected_target.platform | plat }}</strong>.
-      </div>
-      {% endif %}
-    </div>
 
-    {# ── IPSec VPN (CE plan P6) - route-based site-to-site tunnels, peer of
-         NAT/Decryption. Target-driven: PA + Forti + Check Point Communities.
-         Source PSKs are never migrated; the operator may set a PSK per tunnel
-         in Gateshift (stored encrypted, injected at push) - else a placeholder
-         is pushed. ── #}
-    <div id="main-vpn-enrichment" class="hidden">
-      {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
-      {% elif not selected_target %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see VPN config.
-      </div>
-      {% elif selected_target.platform in ('panw', 'fortigate', 'checkpoint') %}
-        {% if not vpn_tunnels %}
-        <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No IPSec VPN tunnels imported.</div>
-        {% else %}
-        <div style="padding:16px 20px;">
-          {% if selected_target.platform == 'checkpoint' %}
-          {# CP encryption-domain mode (CP-VPN plan CP-3). The peer domain is
-             always derived (selectors / active routes); this switch is the LOCAL
-             gateway domain: manual group (complete, incl. routed-internal nets) vs
-             CP-native based-on-topology (connected-only). #}
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:var(--fs-body);">
-            <span class="dash">Local encryption domain:</span>
-            <select id="cp-vpn-domain-mode" onchange="cpVpnDomainMode('{{ selected_target.id }}', this.value)" class="inp" style="font-size:var(--fs-body);padding:4px 8px;">
-              <option value="manual" {% if (cp_vpn_domain_mode or 'manual') == 'manual' %}selected{% endif %}>Manual group (derived)</option>
-              <option value="topology" {% if cp_vpn_domain_mode == 'topology' %}selected{% endif %}>Based on topology (CP-native)</option>
-            </select>
-            <span class="dash" style="color:var(--tx3);">manual = complete (incl. routed-internal). Topology = connected-only, needs gateway topology</span>
-          </div>
-          {# CP community topology (VR-3). meshed = one community per tunnel
-             (always-correct default); star = one community per crypto-group
-             (center = this gateway, satellites = peers sharing crypto). #}
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:var(--fs-body);">
-            <span class="dash">Community topology:</span>
-            <select id="cp-vpn-topology" onchange="cpVpnTopology('{{ selected_target.id }}', this.value)" class="inp" style="font-size:var(--fs-body);padding:4px 8px;">
-              <option value="meshed" {% if (cp_vpn_topology or 'meshed') == 'meshed' %}selected{% endif %}>Meshed (one per tunnel)</option>
-              <option value="star" {% if cp_vpn_topology == 'star' %}selected{% endif %}>Star (one per crypto-group)</option>
-            </select>
-            <span class="dash" style="color:var(--tx3);">star groups peers that share crypto/IKE-version/auth into one hub community. Switching may leave the other type's communities behind</span>
-          </div>
-          {% endif %}
-          {# Bulk-action bar - filter→select→apply, same as the Decryption tab. #}
-          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;">
-            <input type="text" placeholder="Filter by name…" oninput="bulkFilter('vpn-table',this.value,'vpn-sel-count')"
-                   class="inp" style="font-size:var(--fs-body);padding:6px 10px;width:180px;">
-            <button onclick="vpnBulk('enable')" class="btn">Enable</button>
-            <button onclick="vpnBulk('disable')" class="btn">Disable</button>
-            <button onclick="vpnBulk('remove')" class="btn danger">Remove</button>
-            <span id="vpn-sel-count" class="mut" style="font-size:var(--fs-body);margin-left:4px;">0 selected</span>
-          </div>
-          <table id="vpn-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
-            <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
-              <th style="padding:6px 8px;text-align:center;width:28px;"><input type="checkbox" onclick="bulkSelectAll('vpn-table',this,'vpn-sel-count')" title="Select all (filtered)"></th>
-              <th style="padding:6px 8px;">#</th><th style="padding:6px 8px;">Name</th>
-              <th style="padding:6px 8px;">Peer</th><th style="padding:6px 8px;">Local IF</th>
-              <th style="padding:6px 8px;">Auth</th><th style="padding:6px 8px;">IKE</th>
-              <th style="padding:6px 8px;">IKE Crypto</th><th style="padding:6px 8px;">IPSec Crypto</th>
-              <th style="padding:6px 8px;">Tunnel IF{% if selected_target and selected_target.platform == 'fortigate' %}<div class="dash" style="font-size:var(--fs-caption);font-weight:400;text-transform:none;letter-spacing:0;">Implicit on FortiGate, value not pushed</div>{% endif %}</th>
-              <th style="padding:6px 8px;">Domain (Local → Remote)</th>
-              <th style="padding:6px 8px;text-align:center;">On</th>
-              <th style="padding:6px 8px;"></th></tr></thead>
-            <tbody>
-            {% for v in vpn_tunnels %}
-              <tr data-hash="{{ v.vpn_hash }}" data-name="{{ v.name|lower }}" style="border-bottom:1px solid var(--line);{% if v.disabled or v.deleted %}opacity:0.45;{% endif %}">
-                <td style="padding:6px 8px;text-align:center;"><input type="checkbox" class="bulk-cb" onchange="_bulkCount('vpn-table','vpn-sel-count')"></td>
-                <td style="padding:6px 8px;color:var(--tx3);">{{ v.position }}</td>
-                <td style="padding:6px 8px;color:var(--tx);">{{ v.name }}{% if v.deleted %} <span class="dash" style="font-size:var(--fs-caption);">(removed)</span>{% elif v._edited_fields %} <span class="dash" title="Has edits: {{ v._edited_fields|join(', ') }}" style="font-size:var(--fs-caption);color:var(--amber);">●</span>{% endif %}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ v.peer_address or '-' }}{% if v.peer_type and v.peer_type != 'ip' %} <span class="dash" style="font-size:var(--fs-caption);">({{ v.peer_type }})</span>{% endif %}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">
-                  {# Forti phase1 needs a local egress interface; CP carries none
-                     → operator picks it here (rendered as phase1.interface). #}
-                  {% set _ifn = (iface_zones | map(attribute='interface_name') | list) if iface_zones else [] %}
-                  <select onchange="vpnEdit('{{ v.vpn_hash }}','local_interface',this.value)"
-                          {% if v.deleted %}disabled{% endif %}
-                          class="inp" style="font-size:var(--fs-small);padding:3px 6px;{% if not v.local_interface %}color:var(--amber);{% endif %}">
-                    <option value="" {% if not v.local_interface %}selected{% endif %}>- Set local IF -</option>
-                    {% if v.local_interface and v.local_interface not in _ifn %}
-                    <option value="{{ v.local_interface }}" selected>{{ v.local_interface }}</option>
-                    {% endif %}
-                    {% for _n in _ifn %}
-                    <option value="{{ _n }}" {% if _n == v.local_interface %}selected{% endif %}>{{ _n }}</option>
-                    {% endfor %}
-                  </select>
-                </td>
-                <td style="padding:6px 8px;white-space:nowrap;">{{ v.auth_type }}{% if v.auth_type == 'psk' %}
-                    {% if v.psk_set %}<span class="dash" title="PSK set in Gateshift (encrypted), injected at push" style="font-size:var(--fs-small);color:var(--green,#C8D8E8);">●●●</span>
-                      <button onclick="vpnSetPsk('{{ v.vpn_hash }}',true)" class="btn" title="Replace the stored PSK">Edit</button>
-                      <button onclick="vpnClearPsk('{{ v.vpn_hash }}')" class="btn danger" title="Remove the stored PSK">Clear</button>
-                    {% else %}<span class="dash" title="No PSK set: a placeholder is pushed. Set one to inject the real key (encrypted) at push." style="font-size:var(--fs-caption);color:var(--amber);">(!)</span>
-                      <button onclick="vpnSetPsk('{{ v.vpn_hash }}',false)" class="btn" title="Store a PSK (encrypted) for push">Set PSK</button>
-                    {% endif %}
-                  {% elif v.auth_type == 'cert' %}
-                    {% if v.cert_set %}<span class="dash" title="Identity cert uploaded (key encrypted), imported at push" style="font-size:var(--fs-small);color:var(--green,#C8D8E8);">{{ v.cert_name }}</span>
-                      <button onclick="vpnUploadCert('{{ v.vpn_hash }}','{{ v.cert_name }}')" class="btn" title="Replace the uploaded cert">Edit</button>
-                      <button onclick="vpnClearCert('{{ v.vpn_hash }}')" class="btn danger" title="Remove the uploaded cert">Clear</button>
-                    {% else %}<span class="dash" title="Cert-auth: upload the local identity cert (PEM + key) to migrate it{% if v.cert_ref %}, source ref: {{ v.cert_ref }}{% endif %}" style="font-size:var(--fs-caption);color:var(--amber);">(!) cert{% if v.cert_ref %} ({{ v.cert_ref }}){% endif %}</span>
-                      <button onclick="vpnUploadCert('{{ v.vpn_hash }}','{{ v.cert_ref or '' }}')" class="btn" title="Upload the identity cert (PEM + key, encrypted)">Upload Cert</button>
-                    {% endif %}
-                  {% endif %}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ v.ike_version }}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ v.ike_crypto_profile or '-' }}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">{{ v.ipsec_crypto_profile or '-' }}</td>
-                <td style="padding:6px 8px;color:var(--tx2);">
-                  {# VTI binding - editable so the operator can re-point or
-                     RELEASE it (a set tunnel-IF blocks deleting that
-                     interface via the reference guard; without an editor
-                     the reference was permanent - pa2fgt finding). Offers
-                     tunnel-type interfaces; empty = unbound. #}
-                  {% set _tun_ifn = (iface_zones | selectattr('iface_type', 'equalto', 'tunnel') | map(attribute='interface_name') | list) if iface_zones else [] %}
-                  {# FortiGate targets: the VTI is implicit (named after the
-                       phase1) - the slot is not pushed there, it only manages
-                       the source-side interface reference. Grey + terse
-                       'implicit' marker, no hiding (user decision 2026-09-01). #}
-                  {% set _tun_implicit = selected_target and selected_target.platform == 'fortigate' %}
-                  <select onchange="vpnEdit('{{ v.vpn_hash }}','tunnel_interface',this.value)"
-                          {% if v.deleted %}disabled{% endif %}
-                          class="inp" style="font-size:var(--fs-small);padding:3px 6px;{% if _tun_implicit %}color:var(--tx3);opacity:0.65;{% elif not v.tunnel_interface %}color:var(--amber);{% endif %}">
-                    <option value="" {% if not v.tunnel_interface %}selected{% endif %}>-</option>
-                    {% if v.tunnel_interface and v.tunnel_interface not in _tun_ifn %}
-                    <option value="{{ v.tunnel_interface }}" selected>{{ v.tunnel_interface }}</option>
-                    {% endif %}
-                    {% for _n in _tun_ifn %}
-                    <option value="{{ _n }}" {% if _n == v.tunnel_interface %}selected{% endif %}>{{ _n }}</option>
-                    {% endfor %}
-                  </select>{% if v.raw_extras.v1_out_of_scope %} <span class="dash" title="Collected, not pushed: {{ v.raw_extras.v1_out_of_scope }}" style="font-size:var(--fs-caption);color:var(--amber);">(not pushed)</span>{% endif %}</td>
-                <td style="padding:6px 8px;color:var(--tx2);font-size:var(--fs-small);">
-                  {% if v.traffic_selectors %}{% for s in v.traffic_selectors %}{{ s.local }}→{{ s.remote }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="dash" title="Route-based: domain derived from routing at deploy">route-based</span>{% endif %}
-                </td>
-                <td style="padding:6px 8px;text-align:center;">
-                  <input type="checkbox" {% if not v.disabled %}checked{% endif %} {% if v.deleted %}disabled{% endif %}
-                         onchange="vpnEdit('{{ v.vpn_hash }}','disabled',!this.checked)" title="Enable / disable">
-                </td>
-                <td style="padding:6px 8px;white-space:nowrap;">
-                  {% if v.deleted %}
-                    <button onclick="vpnEdit('{{ v.vpn_hash }}','deleted',false)" class="btn">Restore</button>
-                  {% else %}
-                    {% if v._edited_fields %}<button onclick="vpnReset('{{ v.vpn_hash }}')" class="btn" title="Drop all edits, revert to import">Reset</button>{% endif %}
-                    <button onclick="vpnEdit('{{ v.vpn_hash }}','deleted',true)" class="btn danger" title="Remove from push (soft-delete)">×</button>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-
-          {# PSK modal - replaces window.prompt (prompts can't mask input). #}
-          <div id="vpn-psk-modal" style="display:none;position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.6);">
-            <div style="max-width:420px;margin:14vh auto;background:var(--bg2,#1a1d23);border:1px solid var(--line);border-radius:0;padding:18px 20px;">
-              <div id="vpn-psk-title" style="font-weight:600;color:var(--tx);margin-bottom:12px;">Set pre-shared key</div>
-              <input type="hidden" id="vpn-psk-hash">
-              <label class="dash" style="font-size:var(--fs-small);">Pre-shared key</label>
-              <input id="vpn-psk-value" type="password" autocomplete="new-password"
-                     onkeydown="if(event.key==='Enter')vpnSubmitPsk();if(event.key==='Escape')document.getElementById('vpn-psk-modal').style.display='none';"
-                     style="width:100%;margin:3px 0 14px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);">
-              <div style="text-align:right;">
-                <button onclick="document.getElementById('vpn-psk-modal').style.display='none'" class="btn">Cancel</button>
-                <button onclick="vpnSubmitPsk()" class="btn">Save</button>
-              </div>
-            </div>
-          </div>
-          {# Cert-upload modal (CR-1) - shared, populated per tunnel via JS.
-             PEM cert + key (key encrypted at rest); optional passphrase + name. #}
-          <div id="vpn-cert-modal" style="display:none;position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.6);">
-            <div style="max-width:640px;margin:6vh auto;background:var(--bg2,#1a1d23);border:1px solid var(--line);border-radius:0;padding:18px 20px;">
-              <div style="font-weight:600;color:var(--tx);margin-bottom:4px;">Upload VPN identity certificate</div>
-              <div class="dash" style="font-size:var(--fs-small);margin-bottom:12px;">PEM certificate + private key. The key is stored <strong style="color:var(--tx);">encrypted</strong> and imported into the push. It is never shown again.</div>
-              <input type="hidden" id="vpn-cert-hash">
-              <label class="dash" style="font-size:var(--fs-small);">Reference name (on target)</label>
-              <input id="vpn-cert-name" type="text" placeholder="gateshift-vpn-cert" style="width:100%;margin:3px 0 10px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);">
-              <label class="dash" style="font-size:var(--fs-small);">Certificate (PEM)</label>
-              <textarea id="vpn-cert-pem" rows="6" placeholder="-----BEGIN CERTIFICATE-----" style="width:100%;margin:3px 0 10px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-small);"></textarea>
-              <label class="dash" style="font-size:var(--fs-small);">Private key (PEM)</label>
-              <textarea id="vpn-cert-key" rows="6" placeholder="-----BEGIN PRIVATE KEY-----" style="width:100%;margin:3px 0 10px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-small);"></textarea>
-              <label class="dash" style="font-size:var(--fs-small);">Key passphrase (if encrypted)</label>
-              <input id="vpn-cert-pass" type="password" autocomplete="off" style="width:100%;margin:3px 0 14px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);border-radius:0;color:var(--tx);font-size:var(--fs-body);">
-              <div style="text-align:right;">
-                <button onclick="document.getElementById('vpn-cert-modal').style.display='none'" class="btn">Cancel</button>
-                <button onclick="vpnSubmitCert()" class="btn">Upload</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        {% endif %}
-      {% else %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        IPSec VPN migration is not yet supported for <strong style="color:var(--tx);">{{ selected_target.platform | plat }}</strong> targets.
-      </div>
-      {% endif %}
-    </div>
 
     {# ── Zones - Iface→Zone bindings + per-rule zone overrides. Two-level
          sub-tabs: Interfaces (foundation) and Rules (per-rule edits). ── #}
@@ -2851,7 +2936,7 @@
              a broken tab (logs->forti finding 2026-08-31). #}
           {% if display.module == 'endpoint_pairs' %}
           <div class="tag warn" style="font-size:var(--fs-small);padding:3px 9px;margin-bottom:8px;font-style:italic;">
-            Row selection is disabled in Endpoint-pairs mode: disable `Endpoint pairs` in the Consolidation panel (Ruleset &gt; Security) and Apply to select rules here.
+            Row selection is disabled in Endpoint-pairs mode: disable `Endpoint pairs` in the Consolidation panel (Rules &gt; Firewall) and Apply to select rules here.
           </div>
           {% endif %}
         </div>
@@ -3183,6 +3268,11 @@
      edits these. Phase 4 removes the markup outright. */
   .network-zone-col { display: none; }
 
+  /* Interfaces > IP addresses: the example text is dim, and it leaves the
+     field when the field is entered (user decision 2026-10-18). */
+  .iface-ip-input::placeholder { color: var(--tx3); }
+  .iface-ip-input:focus::placeholder { color: transparent; }
+
   /* Selected-but-filtered rows stay visible but greyed out so the user can
      still see what they selected when narrowing the filter. Non-selected
      filtered rows are hidden (display:none) by applyFilters(). */
@@ -3336,8 +3426,13 @@
   window._netDid = _netDid;
   var _targetId = {{ (selected_target.id if selected_target else None) | tojson }};
   var _targetPlatform = {{ (selected_target.platform if selected_target else None) | tojson }};
+  // FortiGate only: the NGFW mode (pin or last probe) gates the per-policy application features
+  var _targetNgfwMode = {{ (selected_target.get('ngfw_mode') if selected_target else None) | tojson }};
+  var _targetHasApps = (_targetPlatform === 'panw' || _targetPlatform === 'checkpoint'
+                        || (_targetPlatform === 'fortigate' && _targetNgfwMode === 'policy-based'));
   window._targetId = _targetId;
   window._targetPlatform = _targetPlatform;
+  window._targetNgfwMode = _targetNgfwMode;
   // The project this page works in (P1.4) - the pair's decisions. Travels
   // as X-Gateshift-Project on every request (base.html), so a pair that
   // carries several projects writes into the one on screen.
@@ -3856,8 +3951,7 @@
     var status = document.getElementById('iface-bulk-status');
     confirmModal({
       title: 'Delete ' + ids.length + ' interface' + (ids.length === 1 ? '' : 's') + '?',
-      body: ['Deleted in this project: routes pointing at them leave with them.',
-             'The Device keeps the interfaces. Restore them from the project Overview.'],
+      body: 'Please confirm. Interfaces can be restored from the project Overview.',
       confirmLabel: 'Delete',
       danger: true,
     }).then(function(ok) {
@@ -3982,20 +4076,27 @@
   // ── Routing table: Add-row toggle + bulk delete + bulk change-iface
   // (per-VR - each VR carries its own selection set keyed by vr-name) ──
   function routeShowAddRow(panelIdx) {
-    var row = document.getElementById('route-add-row-' + panelIdx);
-    if (row) row.classList.remove('hidden');
+    ['route-add-row-' + panelIdx, 'route-add-actions-' + panelIdx].forEach(function(id) {
+      var row = document.getElementById(id);
+      if (row) row.classList.remove('hidden');
+    });
     var first = document.getElementById('new-route-prefix-' + panelIdx);
     if (first) first.focus();
   }
   function routeHideAddRow(panelIdx) {
-    var row = document.getElementById('route-add-row-' + panelIdx);
-    if (row) row.classList.add('hidden');
+    ['route-add-row-' + panelIdx, 'route-add-actions-' + panelIdx].forEach(function(id) {
+      var row = document.getElementById(id);
+      if (row) row.classList.add('hidden');
+    });
     ['new-route-prefix-' + panelIdx,
      'new-route-iface-' + panelIdx,
-     'new-route-nh-' + panelIdx].forEach(function(id) {
+     'new-route-nh-' + panelIdx,
+     'new-route-metric-' + panelIdx].forEach(function(id) {
       var el = document.getElementById(id);
-      if (el) el.value = '';
+      if (el) { el.value = ''; el.disabled = false; }
     });
+    var bh = document.getElementById('new-route-blackhole-' + panelIdx);
+    if (bh) bh.checked = false;
   }
 
   window._routeSel = window._routeSel || {};
@@ -4040,7 +4141,7 @@
     var status = document.getElementById('route-bulk-status-' + vrIdx);
     confirmModal({
       title: 'Delete ' + ids.length + ' route' + (ids.length === 1 ? '' : 's') + '?',
-      body: 'Deleted in this project. The Device keeps the routes. Restore them from the project Overview.',
+      body: 'Please confirm. Routes can be restored from the project Overview.',
       confirmLabel: 'Delete',
       danger: true,
     }).then(function(ok) {
@@ -4484,9 +4585,21 @@
 
   // The Shadowed filter's DOM pass: badges on the shadowed rows, every other row hidden.
   // Fed by the chip's own scan or by the generate's report (Review finding go-to, 2026-10-04).
-  function _shadowApply(found, count) {
+  // What the analysis could NOT judge belongs on the chip: the filter shows
+  // full shadowing only, and a rule it has no opinion on must not look like a
+  // rule it cleared (2026-10-20).
+  function _shadowChipTitle(mute) {
+    var chipEl = document.getElementById('rules-shadow-chip');
+    if (chipEl) {
+      chipEl.title = 'Rules an earlier, broader rule makes unreachable'
+                   + (mute ? '. ' + mute : '');
+    }
+  }
+
+  function _shadowApply(found, count, mute) {
     var cnt = document.getElementById('rules-shadow-count');
     if (cnt) cnt.textContent = String(count || 0);
+    _shadowChipTitle(mute);
     document.querySelectorAll('#rules-container tr.group-row').forEach(function(row) {
       var f = found[row.dataset.rhash || ''];
       if (f) {
@@ -4526,13 +4639,23 @@
         return;
       }
       var d = res.data || {};
+      // The rules the analysis has no opinion on: naming them keeps an empty
+      // result from reading as "everything here is reachable".
+      var mute = d.skipped
+        ? (d.skipped + ' rule' + (d.skipped === 1 ? '' : 's')
+           + ' could not be judged (negation, or addresses or services that do '
+           + 'not resolve)')
+        : '';
       if (!d.count) {
         if (cnt) cnt.textContent = '0';
         showToast('No shadowed rules found'
-                  + (d.zones_in_match ? '' : ' (zoneless target semantics)'), 'success');
+                  + (d.zones_in_match ? '' : ' (zoneless target semantics)')
+                  + (mute ? '. ' + mute : ''), mute ? 'warn' : 'success');
+        _shadowChipTitle(mute);
         return;
       }
-      _shadowApply(d.shadowed || {}, d.count);
+      _shadowApply(d.shadowed || {}, d.count, mute);
+      if (mute) showToast(mute, 'warn');
     }).catch(function() {
       if (cnt) cnt.textContent = '?';
       showToast('Shadowing analysis failed', 'error');
@@ -4740,18 +4863,27 @@
   function _normTab(n) { return (n === 'review') ? 'deploy' : n; }
   // The members of the Configuration main tab (U11) - primaries that live in its strip.
   const _CONFIG_TABS       = ['network', 'ruleset', 'objects', 'enrichment'];
-  const _NETWORK_SUBS      = ['interfaces', 'routing', 'policy-routing'];
-  // Enrichment is split by rulebase: Access · NAT · (CP) TP. _ENRICHMENT_SUBS
-  // only lists the Access sub-sub-tabs; NAT and TP are top-level rulebase
-  // panes handled by switchEnrichmentRulebase, not switchMain.
+  const _NETWORK_SUBS      = ['interfaces', 'routing', 'policy-routing', 'vpn'];
+  // Enrichment is split by rulebase: Access · NAT · (PA) Policy Routing.
+  // _ENRICHMENT_SUBS only lists the Access sub-sub-tabs; NAT and Policy
+  // Routing are top-level rulebase panes handled by switchEnrichmentRulebase,
+  // not switchMain.
+  // Decryption, Threat Prevention and VPN left this register on 2026-10-12
+  // (CE backlog 6): they are rulesets of their own, so they became subs of
+  // Rules (decryption, tp) and Network (vpn). A stored rulebase value of
+  // theirs is migrated at init, see the 'enrichment-rulebase' block below.
   // 'organization' is intentionally omitted for the first release (the tab is
   // hidden - see _show_organization in the rulebase bar). Dropping it here means
   // any stray navigation to it (saved localStorage state, hash, fallback) is
   // coerced to 'access' at switchEnrichmentRulebase's guard, so the inert
   // #primary-organization panel can never be shown. Re-add to re-enable.
-  const _ENRICHMENT_RULEBASES = ['access', 'nat', 'tp', 'routing', 'decryption', 'vpn'];
+  const _ENRICHMENT_RULEBASES = ['access', 'nat', 'routing'];
   const _ENRICHMENT_SUBS      = ['zones-enrichment', 'security-profiles', 'applications', 'utm-profiles', 'logging', 'schedule-enrichment', 'identity-enrichment', 'tags-enrichment'];
-  const _RULESET_SUBS      = ['security', 'nat'];
+  const _RULESET_SUBS      = ['security', 'nat', 'decryption', 'tp'];
+  // Subs whose pane sits OUTSIDE its primary's empty-state hero: their rules
+  // come from the source import, not from the pipeline, so they stay
+  // reachable before the first generate (CE backlog 6).
+  const _HERO_FREE_SUBS    = ['decryption', 'tp', 'vpn'];
   const _ORG_SUBS          = ['org-access', 'org-nat', 'org-tp'];
   // Phase 2c: the Ruleset>Security sub-sub-tabs (Accumulate / Grouping) moved
   // into Organization > Access as Toggle + Selector in the sub-tab header.
@@ -4768,6 +4900,17 @@
   var _SECURITY_SUBSUB_KEY = 'subsub-security';
   var _currentMainSub = 'interfaces';
   var _currentSecuritySub = null;
+
+  // A cleanup batch leaves a pending regenerate (the dot in the header); a
+  // view that depends on the pipeline flushes it on entry. Called per PRIMARY
+  // for Rules and Target Settings, and per SUB for VPN, which moved to
+  // Network, whose other subs deliberately leave the pipeline alone.
+  function _flushPendingRegen() {
+    var _rd = document.getElementById('regen-pending-dot');
+    if (_rd && !_rd.classList.contains('hidden') && typeof htmx !== 'undefined') {
+      htmx.trigger(document.body, 'configSaved');
+    }
+  }
 
   function _subGroup(name) {
     if (_NETWORK_SUBS.indexOf(name) >= 0)     return 'network';
@@ -4900,9 +5043,9 @@
     'enr-rb-btn-access': "Target settings for the firewall ruleset: pick a knob on the left.",
     'enr-rb-btn-nat': "Target-specific NAT settings per rule.",
     'enr-rb-btn-routing': "PAN-OS specifics of policy-based forwarding.",
-    'enr-rb-btn-tp': "Check Point threat prevention: generation mode, profile, layer and a preview. Create a profile or layer on the target and re-enter this view to make it available.",
-    'enr-rb-btn-decryption': "Decryption rules derived from the source: review, soft-delete, mind the forward-proxy certificate. Certificates are referenced by name: provision the CA on the target, and for a Check Point target fetch its url-category catalog here.",
-    'enr-rb-btn-vpn': "Site-to-site tunnels: set pre-shared keys and certificates, see what the target can express.",
+    'main-btn-tp': "Check Point threat prevention: generation mode, profile, layer and a preview. Create a profile or layer on the target and re-enter this view to make it available.",
+    'main-btn-decryption': "Decryption rules derived from the source: review, soft-delete, mind the forward-proxy certificate. Certificates are referenced by name: provision the CA on the target, and for a Check Point target fetch its url-category catalog here.",
+    'main-btn-vpn': "Site-to-site tunnels: set pre-shared keys and certificates, see what the target can express.",
     'primary-btn-deploy': "Review the target configuration, check which findings are open, then push it in full or in picked scopes.",
   };
   // The page head: the active view's menu path, from the same marked items the
@@ -4959,10 +5102,7 @@
     // auto-regen is suppressed on those tabs) - entering a rules-dependent
     // view re-renders the fragment, which then auto-runs the pipeline once.
     if (name === 'ruleset' || name === 'enrichment') {   // Review & Deploy runs the pipeline inside its build
-      var _rd = document.getElementById('regen-pending-dot');
-      if (_rd && !_rd.classList.contains('hidden') && typeof htmx !== 'undefined') {
-        htmx.trigger(document.body, 'configSaved');
-      }
+      _flushPendingRegen();
     }
     // Enforce tab locks
     var btn = document.getElementById('primary-btn-' + name);
@@ -5053,7 +5193,7 @@
     // UTM profile, surfaced via the Security Profiles column), so scope this
     // to the same targets as the Applications sub-tab (panw / checkpoint).
     // Mirrors the zone/log/prof column gating below.
-    var _hasApp = (_targetPlatform === 'panw' || _targetPlatform === 'checkpoint');
+    var _hasApp = _targetHasApps;   // panw, checkpoint, fortigate in policy-based mode
     document.body.classList.toggle('show-app-col',
                                    name === 'enrichment' && _hasApp);
 
@@ -5133,16 +5273,17 @@
   }
 
   // ── Enrichment rulebase switcher ────────────────────────────────
-  // Enrichment is split into three rulebase containers (Access · NAT ·
-  // CP-TP). Access wraps the existing per-feature sub-sub-tabs (Zones /
-  // Security Profiles / Applications / UTM / Logging); NAT and TP each
-  // own a single pane. This switcher toggles the rulebase pick and
-  // delegates to switchMain when the user lands on Access.
+  // Enrichment is split by rulebase: Access · NAT · (PA) Policy Routing.
+  // Access wraps the per-feature sub-sub-tabs (Zones / Security Profiles /
+  // Applications / UTM / Logging); NAT and Policy Routing each own a single
+  // pane. This switcher toggles the rulebase pick and delegates to switchMain
+  // when the user lands on Access. Decryption, Threat Prevention and VPN left
+  // this switcher on 2026-10-12 (CE backlog 6) - see the register above.
   function switchEnrichmentRulebase(name) {
     if (_ENRICHMENT_RULEBASES.indexOf(name) < 0) name = 'access';
 
-    // If the requested rulebase has no button rendered (e.g. TP outside
-    // CP), fall back to the first visible rulebase.
+    // If the requested rulebase has no button rendered (e.g. Policy Routing
+    // outside PA), fall back to the first visible rulebase.
     var requestedBtn = document.getElementById('enr-rb-btn-' + name);
     if (!requestedBtn) {
       for (var i = 0; i < _ENRICHMENT_RULEBASES.length; i++) {
@@ -5160,10 +5301,7 @@
 
     var accessSubBar = document.getElementById('enrichment-subtab-bar');
     var natPane      = document.getElementById('main-nat-enrichment');
-    var tpPane       = document.getElementById('main-tp-enrichment');
     var routingPane  = document.getElementById('main-routing-enrichment');
-    var decryptPane  = document.getElementById('main-decryption-enrichment');
-    var vpnPane      = document.getElementById('main-vpn-enrichment');
 
     // Organization rulebase swaps in the (former primary) org pane + its own
     // sub-tab bar; every other rulebase keeps them hidden + shows the enrichment
@@ -5194,10 +5332,7 @@
     if (name === 'access') {
       if (accessSubBar) accessSubBar.classList.remove('hidden');
       if (natPane) natPane.classList.add('hidden');
-      if (tpPane)  tpPane.classList.add('hidden');
       if (routingPane) routingPane.classList.add('hidden');
-      if (decryptPane) decryptPane.classList.add('hidden');
-      if (vpnPane) vpnPane.classList.add('hidden');
       // Always land on the leftmost access sub-sub-tab (Zone Mapping).
       var savedSub = 'zones-enrichment';
       var savedBtn = document.getElementById('main-btn-' + savedSub);
@@ -5209,49 +5344,19 @@
       }
       switchMain(savedSub);
     } else {
-      // NAT / TP - hide the access sub-sub bar + all access panes, show
-      // the picked rulebase pane.
+      // NAT / Policy Routing - hide the access sub-sub bar + all access
+      // panes, show the picked rulebase pane.
       if (accessSubBar) accessSubBar.classList.add('hidden');
       _ENRICHMENT_SUBS.forEach(function(sub) {
         var p = document.getElementById('main-' + sub);
         if (p) p.classList.add('hidden');
       });
-      // The firewall-rules table belongs to the Firewall rulebase (key 'access') only -
-      // NAT and TP each render their own preview/table inside their pane.
+      // The firewall-rules table belongs to the Firewall rulebase (key 'access')
+      // only - NAT and Policy Routing render their own table inside their pane.
       var rs = document.getElementById('rules-section');
       if (rs) rs.classList.add('hidden');
-      if (routingPane) routingPane.classList.add('hidden');
-      if (decryptPane) decryptPane.classList.add('hidden');
-      if (vpnPane) vpnPane.classList.add('hidden');
-      if (name === 'nat') {
-        if (natPane) natPane.classList.remove('hidden');
-        if (tpPane)  tpPane.classList.add('hidden');
-      } else if (name === 'tp') {
-        if (tpPane)  tpPane.classList.remove('hidden');
-        if (natPane) natPane.classList.add('hidden');
-        // Auto-fetch CP TP-Layers / Profiles on first entry, same
-        // pattern as the other enrichment-tab catalogs.
-        if (_targetPlatform === 'checkpoint'
-            && typeof loadCheckpointThreatLayers === 'function') {
-          loadCheckpointThreatLayers();
-          if (typeof loadCheckpointThreatProfiles === 'function') {
-            loadCheckpointThreatProfiles();
-          }
-        }
-      } else if (name === 'routing') {
-        if (routingPane) routingPane.classList.remove('hidden');
-        if (natPane) natPane.classList.add('hidden');
-        if (tpPane)  tpPane.classList.add('hidden');
-      } else if (name === 'decryption') {
-        if (decryptPane) decryptPane.classList.remove('hidden');
-        if (natPane) natPane.classList.add('hidden');
-        if (tpPane)  tpPane.classList.add('hidden');
-        loadCpUrlCategoryMap();
-      } else if (name === 'vpn') {
-        if (vpnPane) vpnPane.classList.remove('hidden');
-        if (natPane) natPane.classList.add('hidden');
-        if (tpPane)  tpPane.classList.add('hidden');
-      }
+      if (natPane) natPane.classList.toggle('hidden', name !== 'nat');
+      if (routingPane) routingPane.classList.toggle('hidden', name !== 'routing');
     }
 
     localStorage.setItem('enrichment-rulebase', name);
@@ -5316,15 +5421,25 @@
       b.classList.toggle('on', t === name);
     });
 
+    // Decryption, Threat Prevention and VPN sit OUTSIDE their primary's
+    // empty-state hero (CE backlog 6): the hero steps aside while one of them
+    // is the active sub and comes back for the pipeline-dependent subs.
+    var _heroFree = _HERO_FREE_SUBS.indexOf(name) >= 0;
+    ['ruleset-hero', 'network-hero'].forEach(function (h) {
+      var el = document.getElementById(h);
+      if (el) el.classList.toggle('hidden', _heroFree);
+    });
+
     // Phase 2c removed the Security sub-sub-tab bar; nothing to surface here
     // when entering Security. Display controls (Accumulate / Grouping /
     // Auto-name) now live in Organization > Access.
     _currentSecuritySub = null;
 
     // Rules section visible on Security (and sub-sub-tabs) plus the
-    // Access sub-sub-tabs in Enrichment. NAT and CP-TP rulebases each
-    // render their own table inside their pane (hidden in
-    // switchEnrichmentRulebase). Exception: Enrichment > Zone Mapping
+    // Access sub-sub-tabs in Enrichment. The NAT and Policy Routing
+    // rulebases, and the moved Decryption / Threat Prevention / VPN subs,
+    // each render their own table inside their pane, so they are simply
+    // absent from the list below. Exception: Enrichment > Zone Mapping
     // uses sub-sub-tabs (Interfaces / Rules). The rules-table only
     // belongs to the Rules sub-sub - visibility is finalized inside
     // switchZoneEnrSub.
@@ -5365,9 +5480,10 @@
         && typeof loadPanwSecurityProfiles === 'function') {
       loadPanwSecurityProfiles(false);
     }
-    // CP TP-Layers moved to the dedicated TP rulebase pane -
-    // switchEnrichmentRulebase('tp') triggers the load now.
-    if (name === 'applications' && _targetPlatform === 'panw'
+    // CP TP-Layers load on entering Rules > Threat Prevention: see the
+    // name === 'tp' branch below.
+    if (name === 'applications'
+        && (_targetPlatform === 'panw' || (_targetPlatform === 'fortigate' && _targetNgfwMode === 'policy-based'))
         && typeof loadPanwApplications === 'function') {
       loadPanwApplications(false);
     } else if (name === 'logging' && _targetPlatform === 'panw'
@@ -5382,10 +5498,30 @@
         && typeof _identityOpHint === 'function') {
       _identityOpHint();
     }
+    // Decryption and Threat Prevention came from the enrichment rulebases
+    // (CE backlog 6) and keep the catalog fetches they had on entry there.
+    if (name === 'decryption' && typeof loadCpUrlCategoryMap === 'function') {
+      loadCpUrlCategoryMap();
+    }
+    if (name === 'tp' && _targetPlatform === 'checkpoint'
+        && typeof loadCheckpointThreatLayers === 'function') {
+      loadCheckpointThreatLayers();
+      if (typeof loadCheckpointThreatProfiles === 'function') {
+        loadCheckpointThreatProfiles();
+      }
+    }
+    // VPN under Network: both pipeline hooks follow the SUB, because the other
+    // Network subs edit the network strand directly and deliberately leave the
+    // pipeline alone. Under Target Settings the pane got both from
+    // switchPrimary, so this is parity, not a new trigger.
+    if (name === 'vpn') {
+      _flushPendingRegen();
+    }
 
     // Auto-trigger V1 regen when entering rule-viewing sub-tabs. Network
-    // sub-tabs edit the network strand directly and don't need V1 regen.
-    if (name === 'security' || name === 'nat'
+    // sub-tabs edit the network strand directly and don't need V1 regen -
+    // except VPN, which came from Target Settings with this hook.
+    if (name === 'security' || name === 'nat' || name === 'vpn'
         || _SECURITY_SUBSUBS.indexOf(name) >= 0
         || name === 'security-profiles' || name === 'applications'
         || name === 'logging' || name === 'utm-profiles'
@@ -5494,7 +5630,7 @@
 
   function _zoneSectionEl()      { return document.getElementById('zone-section-fragment'); }
   function _zoneSourceDeviceId() { var s = _zoneSectionEl(); return s ? (s.dataset.sourceDeviceId  || '') : ''; }
-  function _zoneSourceDeviceHost(){var s = _zoneSectionEl(); return s ? (s.dataset.sourceDeviceHost|| '') : ''; }
+  function _zoneSourceDeviceKey() {var s = _zoneSectionEl(); return s ? (s.dataset.sourceDeviceKey || '') : ''; }  /* the policy Device's row id (D5) */
   function _zoneTargetId()       { var s = _zoneSectionEl(); return s ? (s.dataset.targetId       || '') : ''; }
   function _zoneTargetPlatform() { var s = _zoneSectionEl(); return s ? (s.dataset.targetPlatform || '') : ''; }
 
@@ -5502,7 +5638,7 @@
     var section = _zoneSectionEl();
     if (!section) return Promise.resolve();
     return fetch('/enrichment/zones/list-fragment?' +
-                 'device=' + encodeURIComponent(_zoneSourceDeviceHost()) +
+                 'device=' + encodeURIComponent(_zoneSourceDeviceKey()) +
                  '&target=' + encodeURIComponent(_zoneTargetId()) +
                  '&net_did=' + encodeURIComponent(window._netDid || ''))
       .then(function(r) { return r.text(); })
@@ -5844,7 +5980,7 @@
     return document.getElementById('nat-list-tbody-' + (mode || 'editor'));
   }
   function _natSourceDeviceId(mode)   { var s = _natSection(mode); return s ? (s.dataset.sourceDeviceId   || '') : ''; }
-  function _natSourceDeviceHost(mode) { var s = _natSection(mode); return s ? (s.dataset.sourceDeviceHost || '') : ''; }
+  function _natSourceDeviceKey(mode)  { var s = _natSection(mode); return s ? (s.dataset.sourceDeviceKey  || '') : ''; }  /* the source Device's row id (D5) */
   function _natTargetId(mode)         { var s = _natSection(mode); return s ? (s.dataset.targetId         || '') : ''; }
   function _natTargetPlatform(mode)   { var s = _natSection(mode); return s ? (s.dataset.targetPlatform   || '') : ''; }
 
@@ -5854,7 +5990,7 @@
     var section = _natSection(mode);
     if (!section) return Promise.resolve();
     return fetch('/nat-rules/list-fragment?mode=' + mode +
-                 '&device=' + encodeURIComponent(_natSourceDeviceHost(mode)) +
+                 '&device=' + encodeURIComponent(_natSourceDeviceKey(mode)) +
                  '&target=' + encodeURIComponent(_natTargetId(mode)))
       .then(function(r) { return r.text(); })
       .then(function(html) {
@@ -5905,8 +6041,8 @@
   // are removed - the catalog is now edited only via the inline
   // + Add form.
   function _tagSection() { return document.getElementById('tags-section-fragment'); }
-  function _tagSourceHost() {
-    var s = _tagSection(); return s ? (s.dataset.sourceDeviceHost || '') : '';
+  function _tagSourceKey() {   /* the source Device's row id (D5) */
+    var s = _tagSection(); return s ? (s.dataset.sourceDeviceKey || '') : '';
   }
   function _tagTargetId() {
     var s = _tagSection(); return s ? (s.dataset.targetId || '') : '';
@@ -5915,7 +6051,7 @@
     var container = document.getElementById('tags-section-container');
     if (container && typeof htmx !== 'undefined') {
       htmx.ajax('GET', '/enrichment/tags/list-fragment?device='
-        + encodeURIComponent(_tagSourceHost())
+        + encodeURIComponent(_tagSourceKey())
         + '&target=' + encodeURIComponent(_tagTargetId()),
         { target: '#tags-section-container', swap: 'innerHTML' });
     }
@@ -6890,7 +7026,7 @@
     var auto=(src==='auto'||src==='synthetic')?'<span class="obj-source text-[10px] text-gray-600" title="Auto-generated">auto</span>':'';
     var col3,col4;
     if(kind==='service'){ col3='<span class="uppercase">'+_escH(o.protocol)+'</span>'; col4='<span class="font-mono text-blue-300">'+_escH(o.port)+'</span>'; }
-    else if(kind==='address'){ col3=_escH(o.type); col4='<span class="font-mono text-blue-300">'+_escH(o.value)+'</span>'; }
+    else if(kind==='address'){ col3=_escH(o.type); col4='<span class="font-mono text-blue-300">'+_escH(o.value)+'</span>'+(o.value6?' <span class="text-gray-500">+</span> <span class="font-mono text-blue-300">'+_escH(o.value6)+'</span>':''); }
     else { col3=_escH(o.type||'');
       col4=(o.type==='dynamic')?'<span class="text-gray-400 italic">'+_escH(o.filter||'')+'</span>'
            :(o.members||[]).map(function(m){return '<span class="px-1.5 py-0.5 bg-gray-700 rounded text-gray-300 font-mono">'+_escH(m)+'</span>';}).join(' '); }
@@ -8171,6 +8307,34 @@
     _savedPrimary = 'enrichment';
     localStorage.setItem('enrichment-rulebase', 'organization');
   }
+  // Decryption, Threat Prevention and VPN left Target Settings on 2026-10-12
+  // (CE backlog 6): Decryption and TP are Rules subs, VPN is a Network one.
+  // A user parked on one of them is taken to its new place instead of landing
+  // on Target Settings > Firewall, where the stale value would be coerced.
+  // Done through the one-shot key, because opening a primary otherwise always
+  // lands on its leftmost sub; a real tab-once from a technical reload wins.
+  // Three conditions, each for a case the bare value cannot tell apart:
+  //  - the source gate: nothing on this page is navigable, so the stored value
+  //    STAYS and the migration happens on the next unlocked load;
+  //  - the primary the user actually left: the stored rulebase outlives any
+  //    number of visits elsewhere, and hijacking a landing on Review & Deploy
+  //    months later is not a migration;
+  //  - the leaf being rendered: the three are target-gated per platform, and
+  //    without it a stored 'tp' would open a Check-Point pane on a PA target
+  //    with no marked path.
+  try {
+    var _movedRb = localStorage.getItem('enrichment-rulebase');
+    if ((_movedRb === 'decryption' || _movedRb === 'tp' || _movedRb === 'vpn')
+        && !window._gateLocked) {
+      localStorage.removeItem('enrichment-rulebase');
+      if (_savedPrimary === 'enrichment'
+          && document.getElementById('main-btn-' + _movedRb)
+          && !sessionStorage.getItem('tab-once')) {
+        sessionStorage.setItem('tab-once',
+          (_movedRb === 'vpn' ? 'network' : 'ruleset') + ':' + _movedRb);
+      }
+    }
+  } catch (e) { /* non-fatal */ }
   // Navigation tree (U13): every switch re-marks the active path; folds and
   // the rail mode come back from storage.
   (function () {
@@ -8783,8 +8947,13 @@
   // Technical reload that RETURNS to the given enrichment rulebase: the
   // "primary lands leftmost" rule (switchPrimary) would otherwise throw the
   // user back to Access after every save-reload. Consumed one-shot at init.
-  function _rbReload(rb) {
-    try { sessionStorage.setItem('tab-once', 'enrichment:' + rb); } catch (e) { /* non-fatal */ }
+  // A write in the Decryption or VPN pane reloads the page; the one-shot key
+  // brings the user back to the pane they were in. Both panes are subs now
+  // (CE backlog 6), so the key names their primary, which _subGroup knows.
+  function _rbReload(sub) {
+    try {
+      sessionStorage.setItem('tab-once', (_subGroup(sub) || 'enrichment') + ':' + sub);
+    } catch (e) { /* non-fatal */ }
     window.location.reload();
   }
   // ── SSL Decryption per-rule edit (Phase 5d) - mirror of PBF full-edit.
@@ -8896,7 +9065,7 @@
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device_id: _vpnPskDeviceId, vpn_hash: hash, cert_pem: '', key_pem: ''}),
     }).then(function(r) {
-      if (r.ok) { showToast('Certificate cleared', 'info'); window.location.reload(); }
+      if (r.ok) { showToast('Certificate cleared', 'info'); _rbReload('vpn'); }
       else showToast('Cert clear failed', 'error');
     }).catch(function() { showToast('Cert clear failed', 'error'); });
   }
@@ -8933,7 +9102,10 @@
     });
     _bulkCount(tableId, countId);
   }
-  function _bulkSend(url, hashKey, hashes, edits) {
+  // `sub` keeps the caller's pane across the reload (the Decryption and VPN
+  // tables are the only users). Without it the reload lands on the primary's
+  // leftmost sub, which the move would make Rules > Firewall.
+  function _bulkSend(url, hashKey, hashes, edits, sub) {
     if (!hashes.length) { showToast('No rows selected', 'info'); return; }
     var body = {edits: edits}; body[hashKey] = hashes;
     fetch(url, {
@@ -8941,7 +9113,7 @@
       body: JSON.stringify(body),
     }).then(function(r) {
       if (!r.ok) { r.json().then(function(d) { showToast((d && d.error) || 'Bulk action failed', 'error'); }).catch(function(){ showToast('Bulk action failed', 'error'); }); return; }
-      window.location.reload();
+      if (sub) _rbReload(sub); else window.location.reload();
     }).catch(function() { showToast('Bulk action failed', 'error'); });
   }
   function sslBulk(kind) {
@@ -8949,13 +9121,13 @@
               : (kind === 'enable') ? {disabled: false}
               : (kind === 'disable') ? {disabled: true}
               : (kind === 'remove') ? {deleted: true} : null;
-    if (edits) _bulkSend('/enrichment/ssl/edit', 'ssl_hashes', _bulkSelected('ssl-table'), edits);
+    if (edits) _bulkSend('/enrichment/ssl/edit', 'ssl_hashes', _bulkSelected('ssl-table'), edits, 'decryption');
   }
   function vpnBulk(kind) {
     var edits = (kind === 'enable') ? {disabled: false}
               : (kind === 'disable') ? {disabled: true}
               : (kind === 'remove') ? {deleted: true} : null;
-    if (edits) _bulkSend('/enrichment/vpn/edit', 'vpn_hashes', _bulkSelected('vpn-table'), edits);
+    if (edits) _bulkSend('/enrichment/vpn/edit', 'vpn_hashes', _bulkSelected('vpn-table'), edits, 'vpn');
   }
   // CP-VPN tab (CP-3): the local encryption-domain mode (manual group vs CP
   // based-on-topology), saved per target gateway as a deploy setting.
@@ -9115,6 +9287,23 @@
     });
   }
 
+  // The rules of the selection that DENY traffic (the renderer's own rule:
+  // anything that is not a permit). FortiOS takes no UTM logging on such a
+  // policy, which inspects nothing, so the pane leaves them alone instead of
+  // letting the renderer rewrite the value later (2026-10-19).
+  function _selectedDenyRhashes() {
+    var sel = window._ruleSelection || new Set();
+    var out = new Set();
+    document.querySelectorAll('#rules-container tbody tr.group-row').forEach(function (row) {
+      var a = (row.dataset.faction || '').trim();
+      if (row.dataset.rid && row.dataset.rhash && sel.has(row.dataset.rid)
+          && a && ['permit', 'allow', 'accept', 'pass'].indexOf(a) < 0) {
+        out.add(row.dataset.rhash);
+      }
+    });
+    return out;
+  }
+
   function applyFortiLogging(clear) {
     var sel = window._ruleSelection || new Set();
     var status = document.getElementById('forti-log-apply-status');
@@ -9138,13 +9327,29 @@
       logStart  = !!(startCb && startCb.checked);
       capPacket = !!(pcapCb && pcapCb.checked);
     }
+    var _hashes = Array.from(_getSelectedRhashes());
+    var _skippedDeny = 0;
+    if (mode === 'utm') {
+      var _deny = _selectedDenyRhashes();
+      if (_deny.size) {
+        _skippedDeny = _deny.size;
+        _hashes = _hashes.filter(function (h) { return !_deny.has(h); });
+      }
+      if (!_hashes.length) {
+        if (status) {
+          status.textContent = 'All ' + _skippedDeny + ' selected rules deny traffic: UTM logging does not apply to a rule that inspects nothing.';
+          status.className = 'text-xs text-amber-400 ml-2';
+        }
+        return;
+      }
+    }
     if (btn) btn.disabled = true;
     if (status) { status.textContent = clear ? 'clearing…' : 'applying…'; status.className = 'text-xs text-gray-500 ml-2'; }
     fetch('/enrichment/forti-logging/apply', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        rule_hashes: Array.from(_getSelectedRhashes()),
+        rule_hashes: _hashes,
         clear: !!clear,
         log_traffic: mode,
         log_start: logStart,
@@ -9167,8 +9372,14 @@
           if (d.capture_packet) flags.push('pcap');
           var flagStr = flags.length ? ' [+' + flags.join('+') + ']' : '';
           msg = (d.written || 0) + ' rule(s) → ' + (d.log_traffic || '') + flagStr;
+          if (_skippedDeny) {
+            msg += ', ' + _skippedDeny + ' deny rule(s) skipped (UTM logging does not apply to a rule that inspects nothing)';
+          }
         }
-        if (status) { status.textContent = msg; status.className = 'text-xs text-emerald-400 ml-2'; }
+        if (status) {
+          status.textContent = msg;
+          status.className = 'text-xs ' + (_skippedDeny ? 'text-amber-400' : 'text-emerald-400') + ' ml-2';
+        }
         if (typeof htmx !== 'undefined') htmx.trigger(document.body, 'configSaved');
       })
       .catch(function(e) {
@@ -9711,7 +9922,10 @@
         body: JSON.stringify({rule_hashes: hashes, application: 'any'}),
       }).then(_jsonRes));
     } else if (app === 'auto') {
-      calls.push(fetch('/enrichment/map-ports/' + _targetId, {
+      // PA: port to application from the catalog's default ports.
+      // FortiGate (policy-based): source application names matched by name.
+      var autoUrl = (_targetPlatform === 'fortigate') ? '/enrichment/map-apps/' : '/enrichment/map-ports/';
+      calls.push(fetch(autoUrl + _targetId, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({rule_hashes: hashes, force: true}),
       }).then(_jsonRes));
@@ -10597,7 +10811,7 @@
   var _reviewStale = {policy: false, network: false};
   var _blockingKinds = ['no_interfaces', 'bond_unsupported', 'vlan_no_parent', 'vlan_no_tag',
                         'vlan_orphan_parent', 'cp_multi_vr', 'vr_orphan', 'forti_loopback_in_zone',
-                        'reserved_target_iface'];
+                        'reserved_target_iface', 'unresolved_reference', 'ipv6_deny_loss'];
 
   // Initialize deploy pane on first reveal. Target comes from the header
   // selection - no per-pane picker. Only renders select_remote settings
@@ -10863,7 +11077,20 @@
     else if (_tc.state === 'outdated') {
       cls += ' outdated'; var s = [];
       if (_tc.stale && _tc.stale.policy) s.push('policy'); if (_tc.stale && _tc.stale.network) s.push('network');
-      text = 'Outdated, rebuilding…'; detail = (s.join(' and ') || 'edits') + ' changed since ' + (_tc.built_at || '');
+      text = 'Outdated, rebuilding…';
+      // A version change stales both strands and has no edit timestamp: say
+      // which version built it instead of claiming an edit (E4).
+      var edited = !!(_tc.stale_at && (_tc.stale_at.policy || _tc.stale_at.network));
+      var builtBy = _tc.built_version ? ('Gateshift ' + _tc.built_version)
+                                      : 'an earlier Gateshift version';
+      if (_tc.stale_version && !edited) {
+        detail = builtBy + ' built it, this is {{ app_version }}';
+      } else if (_tc.stale_version) {
+        detail = (s.join(' and ') || 'edits') + ' changed since ' + (_tc.built_at || '')
+               + ', and ' + builtBy + ' built it';
+      } else {
+        detail = (s.join(' and ') || 'edits') + ' changed since ' + (_tc.built_at || '');
+      }
     } else {
       text = 'Built ' + (_tc.built_at || '');
     }
@@ -11008,7 +11235,14 @@
     reserved_target_iface: ['Target interfaces the target reserves (HA, management)', 'network', 'interfaces', 'Rename the source interface under Network > Interfaces so it misses the reserved name, or mark it skip.'],
     mgmt_target_iface: ["The target's management interface is deferred", 'network', 'interfaces', 'Nothing to do now: the push dialog asks before it touches the management interface, last.'],
     cp_cluster_iface_unmatched: ['Cluster interfaces without a match on the target', 'network', 'interfaces', "Name the interfaces like the cluster's under Network > Interfaces (Fetch Target Interfaces lists them)."],
+    cp_iface_unmatched: ['Physical interfaces the gateway does not have', 'network', 'interfaces', "Gaia creates no physical interface. Rename each to one of the gateway's ports under Network > Interfaces (Fetch Target Interfaces lists them), make it a VLAN on a port, or mark it skip."],
     tunnel_unsupported: ['Tunnel interfaces the target cannot take', 'network', 'interfaces', 'Mark the tunnel interfaces skip. The VPN section creates the ones the target needs.'],
+    iface_subnet_overlap: ['Ports outside this push still carry a subnet it assigns', 'network', 'interfaces', 'FortiOS refuses the overlap. Set "Reset the data ports this push does not address" in the push dialog, or map the source interface onto that port under Network > Interfaces.'],
+    iface_subnet_overlap_accepted: ['Ports outside this push will be reset (option set)', 'network', 'interfaces', 'Nothing to do: the push clears those ports before it applies the addresses.'],
+    pa_rescue_point_refused: ['The firewall refuses to save a rollback point', 'network', 'routing', 'The firewall demands a full commit, which a configuration load on it leaves behind. A push stops before writing until the firewall is committed, or "Continue without a rollback point" is set in the push dialog.'],
+    pa_rescue_point_refused_accepted: ['Push without a rollback point (option set)', 'network', 'routing', 'Nothing to do: the push goes ahead. A push that breaks off cannot be taken back and leaves a partly written candidate.'],
+    ipv6_deny_loss: ['Deny rules losing IPv6 members this target does not carry', 'objects', null, 'The rule denied IPv6 traffic the target cannot express in this version, so the migrated rule would let it through. Skip the rule for this push, or exclude the IPv6 member in the project and build again.'],
+    unresolved_reference: ['Rules referencing objects the build does not create', 'objects', null,'A value has no address or service object, or the object is empty or dropped for this target, and a side without it would match wider than the source. Create the object with exactly that value under Objects, give an empty group a member, or exclude the rule, then build again.'],
   };
   // Readable names for the drivers' field keys, and what one item of the
   // field is (a rule, an interface, a route, a tunnel).
@@ -11026,6 +11260,7 @@
     source: 'source members', services: 'services', fqdn: 'FQDN objects', schedule: 'schedule',
     applications: 'applications', url_categories: 'URL categories', value: 'object value',
     connected_route: 'connected route', prefix: 'route prefix',
+    tp_rule: 'threat prevention rules',
   };
   var _RV_FIELD_ITEM = {
     interface: 'interface', static_route: 'route', connected_route: 'route', next_hop: 'route', local_interface: 'tunnel',
@@ -11033,11 +11268,13 @@
     value: 'object', fqdn: 'object', address: 'object', address_group: 'group', service_group: 'service group', prefix: 'route',
     url_category: 'URL category', 'site-category': 'decryption rule', nat_rule: 'NAT rule', vip: 'NAT rule',
     pbf_rule: 'policy routing rule', policy_route: 'policy routing rule', zone_member: 'zone', metric: 'route', route_device: 'route',
+    tp_rule: 'threat prevention rule',
   };
   // whole items (objects, routes, interfaces, URL categories) read "N things not pushed";
   // fields of a rule read "N rules: field not pushed / replaced"
   var _RV_WHOLE_ITEM = {url_category: 1, value: 1, fqdn: 1, address: 1, address_group: 1, service_group: 1, interface: 1,
-                        static_route: 1, connected_route: 1, pbf_rule: 1, policy_route: 1, 'site-category': 1, route_device: 1};
+                        static_route: 1, connected_route: 1, pbf_rule: 1, policy_route: 1, 'site-category': 1, route_device: 1,
+                        tp_rule: 1};
   function _rvPlural(w, n) { return n === 1 ? w : (/y$/.test(w) ? w.slice(0, -1) + 'ies' : w + 's'); }
   // Casing (docs/OPERATING.md Terms): kind captions in Title Case, driver
   // reasons as sentences - the report keeps the raw vocabulary.
@@ -11071,6 +11308,7 @@
     // target gets instead) is shown per item, so 700 zone drops are one row.
     var drops = {};
     (rep.dropped_fields || []).forEach(function (d) {
+      if (d.issue) return;   // lifted into validation_issues above (a blocker row), not a second warning row
       var key = (d.field || '?') + '|' + (d.reason || '');
       var g = (drops[key] = drops[key] || {field: d.field || '?', reason: d.reason || '', rules: [], fallbacks: []});
       g.rules.push(String(d.rule_id || '?'));
@@ -11096,8 +11334,9 @@
                     : (itemKind === 'NAT rule') ? {tab: 'ruleset', sub: 'nat'}
                     : (itemKind === 'policy routing rule') ? {tab: 'network', sub: 'policy-routing'}
                     : (itemKind === 'interface' || itemKind === 'route' || itemKind === 'zone') ? {tab: 'network', sub: (itemKind === 'route' ? 'routing' : 'interfaces')}
-                    : (itemKind === 'tunnel') ? {tab: 'enrichment', sub: 'vpn'}
-                    : (itemKind === 'decryption rule') ? {tab: 'enrichment', sub: 'decryption'}
+                    : (itemKind === 'tunnel') ? {tab: 'network', sub: 'vpn'}
+                    : (itemKind === 'decryption rule') ? {tab: 'ruleset', sub: 'decryption'}
+                    : (itemKind === 'threat prevention rule') ? {tab: 'ruleset', sub: 'tp'}
                     : (itemKind === 'URL category') ? {tab: 'objects', obj: 'url_category'}
                     : (itemKind === 'group') ? {tab: 'objects', obj: 'address_group'}
                     : (itemKind === 'service group') ? {tab: 'objects', obj: 'service_group'}
@@ -11129,22 +11368,44 @@
                 count: shN,
                 detail: 'Judged with the target\'s match semantics. These rules never match there and are pushed as they are'
                   + (shDup ? ' - ' + shDup + ' of them duplicate the earlier rule outright' : '')
-                  + '. Disable what is dead under Rules > Firewall with the Shadowed filter'
-                  + (shLog.shadow_skipped ? '; ' + shLog.shadow_skipped + ' rule' + (shLog.shadow_skipped === 1 ? '' : 's') + ' could not be analysed (negation, unresolved objects)' : '') + '.',
+                  + '. Disable what is dead under Rules > Firewall with the Shadowed filter.'
+                  + (shLog.shadow_skipped ? ' ' + shLog.shadow_skipped + ' further rule' + (shLog.shadow_skipped === 1 ? '' : 's') + ' got no verdict (negation, or addresses or services that do not resolve), so they are neither cleared nor flagged.' : ''),
                 items: shLog.shadowed.map(function (r) { return r[1] + ' \u2192 ' + (r[2] === 'duplicate' ? 'duplicate of ' : 'shadowed by ') + r[3]; }),
                 go: {tab: 'ruleset', sub: 'security', shadowed: true}});
     } else if (shLog.shadow_error) {
       out.push({sev: 'warning', title: 'Shadowing scan failed', count: 1,
-                detail: 'The generate could not judge shadowing: ' + shLog.shadow_error + '. The rules are pushed as they are; the Shadowed filter under Rules > Firewall runs the scan on its own.',
+                detail: 'The generate could not judge shadowing: ' + shLog.shadow_error + '. The rules are pushed as they are. The Shadowed filter under Rules > Firewall runs the scan on its own.',
+                items: [], go: {tab: 'ruleset', sub: 'security'}});
+    } else if (shLog.shadow_skipped) {
+      // Nothing dead found, but the scan had no opinion on some rules: say so
+      // rather than leave an empty result that reads as a clean bill. The
+      // target's own verification can still report those (2026-10-20).
+      out.push({sev: 'note', title: 'No unreachable rules found, ' + shLog.shadow_skipped + ' without a verdict',
+                count: shLog.shadow_skipped,
+                detail: 'No rule is fully covered by an earlier one. For '
+                  + shLog.shadow_skipped + ' rule' + (shLog.shadow_skipped === 1 ? '' : 's')
+                  + ' the scan has no opinion, because of negation or addresses or services that do not resolve. The target may still report them at install time.',
                 items: [], go: {tab: 'ruleset', sub: 'security'}});
     }
     (rep.mode_notes || []).forEach(function (note) {
       out.push({sev: 'warning', title: 'The target mode could not be read', count: 0, detail: note, items: [], go: null});
     });
     if (_reviewStale.policy || _reviewStale.network) {
-      out.unshift({sev: 'blocker', title: 'The configuration changed since this generate',
-                   count: 0, detail: 'Generate again: the push refuses a stale configuration and would generate anew.',
-                   items: [], go: null});
+      // Nothing in the project changed when only the version differs (E4):
+      // the finding says which version built it instead of claiming an edit.
+      var _verOnly = !!(_tc && _tc.stale_version)
+                  && !(_tc && _tc.stale_at && (_tc.stale_at.policy || _tc.stale_at.network));
+      out.unshift(_verOnly
+        ? {sev: 'blocker', title: 'Another Gateshift version built this configuration',
+           count: 0,
+           detail: ((_tc && _tc.built_version) ? ('Gateshift ' + _tc.built_version)
+                                               : 'An earlier Gateshift version')
+                 + ' built it, this is {{ app_version }}. Generate again: the push refuses it '
+                 + 'and would generate anew.',
+           items: [], go: null}
+        : {sev: 'blocker', title: 'The configuration changed since this generate',
+           count: 0, detail: 'Generate again: the push refuses a stale configuration and would generate anew.',
+           items: [], go: null});
     }
     var order = {blocker: 0, warning: 1, note: 2};
     out.sort(function (a, b) { return (order[a.sev] - order[b.sev]) || (b.count - a.count); });
@@ -11437,8 +11698,8 @@
     var row = document.getElementById('zone-row-' + zoneId);
     var zoneName = row ? row.getAttribute('data-zone-name') : '';
     confirmModal({
-      title: 'Delete zone?',
-      body: 'Delete zone "' + zoneName + '" in this project. The Device keeps it. Restore it from the project Overview.',
+      title: zoneName ? 'Delete zone "' + zoneName + '"?' : 'Delete zone?',
+      body: 'Please confirm. Zones can be restored from the project Overview.',
       confirmLabel: 'Delete',
       danger: true,
     }).then(function(ok) {
@@ -11471,7 +11732,7 @@
     checkpoint: {
       policy: [
         ['address_objects', 'Address Objects',
-            ['Hosts','Networks','Address Ranges','Address Groups']],
+            ['Hosts','Networks','Address Ranges','Domains','Address Groups']],
         ['services',        'Services',
             ['Services-TCP','Services-UDP','Services-ICMP',
              'Services-ICMP6','Services-Other','Service Groups']],
@@ -11502,7 +11763,7 @@
     fortigate: {
       policy: [
         ['address_objects', 'Address Objects',
-            ['Address Objects','Address Groups']],
+            ['Address Objects','Address Groups','Address Objects v6','Address Groups v6']],
         ['services',        'Services',
             ['Service Objects','Service Groups']],
         ['nat_objects',     'NAT Objects (VIPs + IP Pools)',
@@ -11511,6 +11772,7 @@
         ['schedules',       'Schedules',
             ['Schedules Recurring','Schedules Onetime','Schedules Group']],
         ['rules',           'Firewall rules (NAT inline)', ['Rules']],
+        ['security_policies', 'Security Policies (layer 7, policy-based mode)', ['Security Policies']],
         ['central_snat',    'Central SNAT',    ['Central SNAT']],
       ],
     },
@@ -11671,7 +11933,7 @@
                 + '<span class="flex-1">' + ui
                 + '<span class="block text-amber-400/90 text-[10.5px] mt-0.5">(!) '
                 + _cpUrlcatGate.unmapped + ' URL categor' + plural + ' unmapped ('
-                + preview + '): attach in Target Settings > Decryption to enable.</span>'
+                + preview + '): attach in Rules > Decryption to enable.</span>'
                 + '</span>'
                 + '<span class="text-gray-500">(' + count + ')</span>'
                 + '</label>';
@@ -11720,6 +11982,48 @@
         + 'class="w-full text-xs px-2 py-1.5 rounded border border-red-700/60 bg-gray-900 text-red-200 placeholder-gray-600">'
         + '</div>';
     }
+    // Push options (docs/PUSH_OPTIONS_PLAN.md): the opt-ins that reach beyond
+    // the estate. Rendered when the generate found a reason for one; the
+    // project's persisted choice pre-ticks the box.
+    var optionsHtml = '';
+    if (_pushStrand === 'network' && window._targetPlatform === 'fortigate') {
+      var _ovIssues = (_deployValidationIssues || []).filter(function(i){
+        return i.kind === 'iface_subnet_overlap' || i.kind === 'iface_subnet_overlap_accepted'; });
+      if (_ovIssues.length) {
+        var _persisted = (_reviewReport && _reviewReport.push_options) || {};
+        var _holders = [];
+        _ovIssues.forEach(function(i){
+          var m = /which (\S+) still carries/.exec(i.detail || '');
+          if (m && _holders.indexOf(m[1]) < 0) _holders.push(m[1]);
+        });
+        optionsHtml = '<div style="border:1px solid var(--line2);background:var(--bg2);padding:10px 12px;text-align:left;margin-bottom:12px;">'
+          + '<p style="color:var(--amber);font-size:var(--fs-body);font-weight:500;margin:0 0 4px;">Ports outside this push</p>'
+          + '<p style="color:var(--tx2);font-size:var(--fs-small);margin:0 0 8px;">' + (_holders.length ? _holders.join(', ') + ' still ' + (_holders.length > 1 ? 'carry' : 'carries') + ' a subnet this push assigns elsewhere. ' : '')
+          + 'FortiOS refuses the overlap unless those ports are cleared first. Management and HA ports stay as they are.</p>'
+          + '<label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">'
+          + '<input type="checkbox" data-pushopt="reset_untouched_ports"' + (_persisted.reset_untouched_ports ? ' checked' : '') + '>'
+          + '<span>Reset the data ports this push does not address' + (_holders.length ? ' (' + _holders.join(', ') + ')' : '') + '</span></label>'
+          + '</div>';
+      }
+    }
+    // PAN-OS rescue point (docs/PUSH_OPTIONS_PLAN.md): the generate probed
+    // whether the firewall saves a rescue point; when it refuses, the push
+    // stops before writing unless the operator continues without a rollback.
+    if (window._targetPlatform === 'panw') {
+      var _rpIssues = (_deployValidationIssues || []).filter(function(i){
+        return i.kind === 'pa_rescue_point_refused' || i.kind === 'pa_rescue_point_refused_accepted'; });
+      if (_rpIssues.length) {
+        var _persistedPa = (_reviewReport && _reviewReport.push_options) || {};
+        optionsHtml += '<div style="border:1px solid var(--line2);background:var(--bg2);padding:10px 12px;text-align:left;margin-bottom:12px;">'
+          + '<p style="color:var(--amber);font-size:var(--fs-body);font-weight:500;margin:0 0 4px;">No rollback point on the firewall</p>'
+          + '<p style="color:var(--tx2);font-size:var(--fs-small);margin:0 0 8px;">The firewall refuses to save a copy of its candidate before the push: it demands a full commit, '
+          + 'which a configuration load leaves behind. Commit on the firewall and push again, or continue without a rollback: a push that breaks off then leaves a partly written candidate.</p>'
+          + '<label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">'
+          + '<input type="checkbox" data-pushopt="push_without_rescue_point"' + (_persistedPa.push_without_rescue_point ? ' checked' : '') + '>'
+          + '<span>Continue without a rollback point</span></label>'
+          + '</div>';
+      }
+    }
     // Backup reminder - FortiGate ONLY, because it is the vendor with no
     // staging: every write lands live and the firewall has no undo.
     // Gateshift stores no backups, so it cannot know whether one exists
@@ -11753,10 +12057,11 @@
       + optNoteHtml
       + backupNoteHtml
       + mgmtWarnHtml
+      + optionsHtml
       + togglesHtml
       + '<div class="flex justify-center gap-3 mt-3">'
       + '<button class="btn" onclick="this.closest(\'.fixed\').remove()">Cancel</button>'
-      + '<button data-pushcontinue class="btn danger" onclick="var d1=this.closest(\'.fixed\'); var skip=_collectSkipSections(d1); _pendingMgmtOverride=_readMgmtConfirm(d1); d1.remove(); confirmPush2(skip)">Continue</button>'
+      + '<button data-pushcontinue class="btn danger" onclick="var d1=this.closest(\'.fixed\'); var skip=_collectSkipSections(d1); _pendingMgmtOverride=_readMgmtConfirm(d1); _pendingPushOptions=_collectPushOptions(d1); d1.remove(); confirmPush2(skip)">Continue</button>'
       + '</div></div>';
     document.body.appendChild(d1);
     if (_pushStrand === 'network'
@@ -11782,9 +12087,18 @@
     if (_pendingSkipSections.length) {
       skipNote = '<p class="text-amber-400/80 text-xs mb-3">Skipping: ' + _pendingSkipSections.join(', ') + '</p>';
     }
+    // What it takes to apply the push, per vendor: the dialog claimed a
+    // manual commit for every target, which is wrong on a FortiGate (every
+    // write is live at once) and the wrong word on Check Point (publish and
+    // install). Same split as the message after the push (2026-10-19).
+    var _applyNote = {
+      panw: 'The push writes the firewall’s candidate configuration. Commit on the firewall to apply it.',
+      fortigate: 'Every change is live the moment it is written. There is nothing to commit afterwards and nothing to take back.',
+      checkpoint: 'The push stages the changes in a management session. Publish them in SmartConsole, then install the policy.',
+    }[window._targetPlatform] || 'Applying the push is the target’s own step.';
     d2.innerHTML = '<div class="bg-gray-800 border border-red-700/60 rounded-lg p-5 max-w-sm text-center">'
       + '<p class="text-red-400 text-sm font-medium mb-1">Are you sure?</p>'
-      + '<p class="text-gray-500 text-xs mb-3">Existing ' + _pushStrand + ' sections will be deleted and replaced. You must commit manually on the target.</p>'
+      + '<p class="text-gray-500 text-xs mb-3">Existing ' + _pushStrand + ' sections will be deleted and replaced. ' + _applyNote + '</p>'
       + skipNote
       + '<div class="flex justify-center gap-3">'
       + '<button class="btn danger" onclick="this.closest(\'.fixed\').remove(); executePush()">Yes, Push Now</button>'
@@ -11794,6 +12108,17 @@
   }
   var _pendingSkipSections = [];
   var _pendingMgmtOverride = false;
+  var _pendingPushOptions = {};
+
+  // The push options ticked in the first dialog, by key (data-pushopt).
+  function _collectPushOptions(d1) {
+    var out = {};
+    if (!d1) return out;
+    d1.querySelectorAll('input[data-pushopt]').forEach(function(cb) {
+      out[cb.getAttribute('data-pushopt')] = !!cb.checked;
+    });
+    return out;
+  }
 
   // True only when the user typed exactly "confirm" in the network-push modal's
   // mgmt-interface field (FortiGate only). Drives the per-push force opt-in.
@@ -12029,15 +12354,19 @@
     // Vendor-honest closing line: PAN-OS stages a candidate that needs a
     // commit; FortiOS applies immediately (no commit step exists there).
     var _isPa = (window._targetPlatform === 'panw');
+    var _isCp = (window._targetPlatform === 'checkpoint');
     document.getElementById('zone-busy-label').textContent = ok
-      ? (_isPa ? 'Push complete \u2014 commit on device' : 'Push complete')
+      ? (_isPa ? 'Push complete \u2014 commit on device'
+               : (_isCp ? 'Push complete \u2014 publish in SmartConsole' : 'Push complete'))
       : (finalEvt && finalEvt.interrupted ? 'Push interrupted (server restart)' : 'Push finished with errors');
     if (ok) {
       var msg = document.createElement('p');
       msg.className = 'text-green-400';
       msg.textContent = _isPa
         ? '[OK] Config pushed to the candidate. Commit on the device to apply.'
-        : '[OK] Config pushed. Changes are active on the target.';
+        : (_isCp
+            ? '[OK] Config pushed to a management session. Publish it in SmartConsole, then install the policy.'
+            : '[OK] Config pushed. Changes are active on the target.');
       logEl.appendChild(msg);
     }
     _pushAddClose(logEl);
@@ -12059,6 +12388,7 @@
         strand: _pushStrand,
         skip_sections: _pendingSkipSections,
         mgmt_override: _pendingMgmtOverride,
+        push_options: _pendingPushOptions,
         // Panorama egress target (SW-3-4): which scope to write into.
         target_dg: (document.getElementById('target-dg-select') || {}).value || '',
         target_template: (document.getElementById('target-template-select') || {}).value || '',
@@ -12505,8 +12835,7 @@
   function deleteVrf(id) {
     confirmModal({
       title: 'Delete VRF?',
-      body: ['Deleted in this project: its interfaces and routes show under "default".',
-             'The Device keeps the VRF. Restore it from the project Overview.'],
+      body: 'Please confirm. VRFs can be restored from the project Overview.',
       confirmLabel: 'Delete',
       danger: true,
     }).then(function(ok) {

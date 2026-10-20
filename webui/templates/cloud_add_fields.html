@@ -1,0 +1,107 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# Cloud account as a source: the credential fields of the plain add form,
+   shown instead of the management address when a cloud platform is picked
+   (onAddPlatformChange hides #add-device-legacy-fields). One block per
+   platform; the posted ids land in config.<platform>, the secret in api_key. #}
+<div id="cloud-fields" style="display:none;flex-direction:column;gap:12px;">
+  <div class="field">
+    <label>Name</label>
+    <input type="text" name="cloud_name" class="inp" autocomplete="off">
+  </div>
+  <div class="cloud-block" data-cloud="aws" style="display:none;flex-direction:column;gap:12px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="field" style="min-width:0;"><label>Access key ID</label>
+        <input type="text" name="cloud_access_key_id" data-must="1" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+      <div class="field" style="min-width:0;"><label>Regions <span class="dash">(comma-separated)</span></label>
+        <input type="text" name="cloud_regions" data-must="1" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+      <div class="field" style="min-width:0;grid-column:1 / -1;"><label>VPC IDs <span class="dash">(optional, comma-separated)</span></label>
+        <input type="text" name="cloud_vpc_ids" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+    </div>
+    <div class="field">
+      <label>Secret access key</label>
+      <input type="password" name="cloud_secret" data-must="1" class="inp" autocomplete="new-password">
+    </div>
+  </div>
+  <div class="cloud-block" data-cloud="azure" style="display:none;flex-direction:column;gap:12px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="field" style="min-width:0;"><label>Tenant ID</label>
+        <input type="text" name="cloud_tenant_id" data-must="1" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+      <div class="field" style="min-width:0;"><label>Client ID</label>
+        <input type="text" name="cloud_client_id" data-must="1" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+      <div class="field" style="min-width:0;"><label>Subscription ID</label>
+        <input type="text" name="cloud_subscription_id" data-must="1" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+      <div class="field" style="min-width:0;"><label>Resource groups <span class="dash">(optional, comma-separated)</span></label>
+        <input type="text" name="cloud_resource_groups" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+    </div>
+    <div class="field">
+      <label>Client secret</label>
+      <input type="password" name="cloud_secret" data-must="1" class="inp" autocomplete="new-password">
+    </div>
+  </div>
+  <div class="cloud-block" data-cloud="gcp" style="display:none;flex-direction:column;gap:12px;">
+    {# The key is picked as the file Google Cloud hands out when a key is
+       created, the way gcloud and Terraform take it (user finding
+       2026-10-18: a textarea for the whole JSON was hard to use). The file
+       is read in the browser into the hidden cloud_secret field, nothing
+       else changes server-side; the project and the principal are read from
+       it and shown, and pasting stays possible behind "paste the key". #}
+    <div class="field">
+      <label>Service account key file <span class="dash">(the JSON file Google Cloud downloaded when the key was created)</span></label>
+      <input type="file" id="gcp-key-file" data-must="1" accept=".json,application/json" class="inp" style="padding:6px 10px;"
+             onchange="gcpKeyFilePicked(this)">
+      <div id="gcp-key-status" class="dash" style="font-size:var(--fs-small);min-height:1.2em;"></div>
+      <div class="dash" style="font-size:var(--fs-small);margin-top:4px;">or paste the key</div>
+      <textarea name="cloud_secret" id="gcp-key-text" class="inp" rows="4" autocomplete="off" spellcheck="false"
+                style="width:100%;min-width:0;box-sizing:border-box;font-family:inherit;"
+                oninput="gcpKeyTyped(this)"></textarea>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="field" style="min-width:0;"><label>Project ID <span class="dash">(from the key)</span></label>
+        <input type="text" name="cloud_project_id" id="gcp-project-id" class="inp" style="width:100%;min-width:0;box-sizing:border-box;opacity:0.8;" autocomplete="off" readonly></div>
+      <div class="field" style="min-width:0;"><label>Networks <span class="dash">(optional, comma-separated)</span></label>
+        <input type="text" name="cloud_networks" class="inp" style="width:100%;min-width:0;box-sizing:border-box;" autocomplete="off"></div>
+    </div>
+  </div>
+</div>
+<script>
+  // The GCP key: parsed in the browser for the status line and the project
+  // id; the server parses it again when the account is added.
+  function gcpKeyShow(text) {
+    var status = document.getElementById('gcp-key-status');
+    var pid = document.getElementById('gcp-project-id');
+    var key = null;
+    try { key = JSON.parse(text); } catch (e) { key = null; }
+    var ok = key && key.type === 'service_account' && key.project_id && key.client_email && key.private_key;
+    if (pid) pid.value = ok ? key.project_id : '';
+    if (status) {
+      if (!text) { status.textContent = ''; status.style.color = ''; }
+      else if (ok) { status.textContent = 'Project ' + key.project_id + ', ' + key.client_email; status.style.color = 'var(--tx2)'; }
+      else { status.textContent = 'Not a service account key: the file Google Cloud creates carries type service_account, project_id, client_email and private_key.'; status.style.color = 'var(--amber)'; }
+    }
+    return !!ok;
+  }
+  // A key that does not parse keeps the dialog open: the control carries a
+  // validity message the browser shows on Add (found 2026-10-18: a pasted
+  // key that was not the whole file went to the server and the form was gone).
+  var _GCP_KEY_MSG = 'Not a service account key: pick or paste the whole JSON file Google Cloud created, not only the private key.';
+  function gcpKeyFilePicked(input) {
+    var f = input.files && input.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var text = String(reader.result || '').trim();
+      var ta = document.getElementById('gcp-key-text');
+      if (ta) { ta.value = text; ta.setCustomValidity(''); }
+      input.setCustomValidity(gcpKeyShow(text) ? '' : _GCP_KEY_MSG);
+    };
+    reader.readAsText(f);
+  }
+  function gcpKeyTyped(ta) {
+    var text = (ta.value || '').trim();
+    var file = document.getElementById('gcp-key-file');
+    // a pasted key stands in for the file: the file input stops being required
+    if (file) { file.required = !text; file.setCustomValidity(''); }
+    var ok = gcpKeyShow(text);
+    ta.setCustomValidity(!text || ok ? '' : _GCP_KEY_MSG);
+  }
+</script>

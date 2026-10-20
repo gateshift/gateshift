@@ -38,6 +38,10 @@ from .base import (
     default_rule_disposition,
     error_hint,
     register_driver,
+    unresolved_reference,
+    ipv6_value, ipv6_object_drop, split_ipv6_loss, ipv6_loss,
+    object_values, is_host_cidr, bare_host, host_cidr, is_dual_stack, nat_rule_ipv6,
+    widen_post_nat_destinations,
 )
 
 requests.packages.urllib3.disable_warnings(
@@ -55,6 +59,21 @@ log = logging.getLogger(__name__)
 # the first match. ctx fields: phase ('primary' = the initial POST/PUT failed |
 # 'retry' = the -5→PUT fallback failed), step (label), errcode, status_code,
 # use_put, entry, entry_id, cli_error, captive_physicals.
+
+def _hint_policy_61(ctx: dict) -> str:
+    # -61 on a policy write, and FortiOS sends NO message with it. The one
+    # cause measured so far (7.6.7, 0.9.4 matrix 2026-10-19): logtraffic
+    # 'utm' on a deny policy, which the renderer no longer emits. Name the
+    # combination, since a bare "-61" tells the operator nothing.
+    if ctx.get("errcode") != -61 or ctx.get("step") not in ("Rules", "Security Policies"):
+        return ""
+    e = ctx.get("entry") or {}
+    if str(e.get("action") or "") == "deny" and str(e.get("logtraffic") or "") == "utm":
+        return (". FortiOS takes no UTM logging on a deny policy, which inspects "
+                "nothing. Build again, the renderer logs such a rule whole")
+    return (". FortiOS sends no message with this code. The cause measured so far is "
+            "UTM logging on a deny policy")
+
 
 def _hint_iface_overlap5(ctx: dict) -> str:
     if ctx.get("phase") == "retry" and ctx.get("step") == "Interfaces":
@@ -148,6 +167,43 @@ def _hint_utm_not_attachable(ctx: dict) -> str:
     return ""
 
 
+def _hint_identity_ref(ctx: dict) -> str:
+    # A policy push -3 whose unparseable value is one of the rule's user or
+    # group references: identities migrate by reference, the name must exist
+    # on the target (pa2fgt in policy-based mode, 2026-10-11: the lab box had
+    # no such group, the push stopped at that policy). Point the operator at
+    # the Source User pane, where the reference is mapped or removed.
+    if (ctx.get("phase") == "primary" and ctx.get("step") in ("Rules", "Security Policies")
+            and ctx.get("errcode") == -3):
+        m = re.search(r"value parse error before '([^']+)'", ctx.get("cli_error") or "")
+        if m:
+            val = m.group(1)
+            e = ctx.get("entry") or {}
+            for field, what in (("groups", "user group"), ("users", "user")):
+                names = {x.get("name") for x in (e.get(field) or []) if isinstance(x, dict)}
+                if val in names:
+                    return (f": the policy names {what} '{val}', which this FortiGate does "
+                            f"not have. Identities migrate by reference: create it on the "
+                            f"target, or map or remove it in Target Settings, Firewall, "
+                            f"Source User.")
+    return ""
+
+
+def _hint_cloud_permission_deny(ctx: dict) -> str:
+    # A write through the FortiGate Cloud proxy answered by the CLOUD (its
+    # own error shape, not FortiOS's): the device has no FortiGate Cloud
+    # subscription with Management enabled, the cloud is read-only then.
+    # Any phase, any step: the first write of a push is what trips it.
+    if (ctx.get("status_code") == 403
+            and "permission_deny" in (ctx.get("cli_error") or "")):
+        return (": FortiGate Cloud refused the write (permission_deny). Without "
+                "a FortiGate Cloud subscription with Management enabled for the "
+                "device the cloud is read-only. Enable Management for the device "
+                "in FortiGate Cloud, or register the box with its management "
+                "address and an API token and push through that.")
+    return ""
+
+
 def _hint_api_401(exc) -> str:
     """Explain a bare 401 from the FortiGate REST API.
 
@@ -167,11 +223,14 @@ def _hint_api_401(exc) -> str:
 
 
 _FORTI_ERROR_HINTS = [
+    _hint_policy_61,
     _hint_iface_overlap5,
     _hint_iface_overlap54,
     _hint_iface_404,
     _hint_iface_651_captive,
     _hint_utm_not_attachable,
+    _hint_identity_ref,
+    _hint_cloud_permission_deny,
 ]
 
 
@@ -237,8 +296,14 @@ def _toposort_groups(entries: list[dict]) -> list[dict]:
     )
 
 
+# The catch-all tokens an imported rule side may carry (docs/IPV6_PLAN.md,
+# D5): 'any' is both families, 'any4' and 'any6' one of them.
+_ANY_TOKENS = frozenset({"any", "any4", "any6"})
+
+
 def _prune_group_members(entries: list[dict], created: set[str],
-                         dropped: list, field: str) -> list[dict]:
+                         dropped: list, field: str,
+                         pruned_out: dict[str, list[str]] | None = None) -> list[dict]:
     """Drop group members this push does not actually create.
 
     (!) The group renders resolve members against the RENAME MAPS - every name
@@ -266,6 +331,8 @@ def _prune_group_members(entries: list[dict], created: set[str],
                     reason=("member(s) are not created by this push: "
                             + ", ".join(sorted(gone))),
                 ))
+                if pruned_out is not None:   # the rules that reference the group are told
+                    pruned_out.setdefault(entry["name"], []).extend(sorted(gone))
             if not kept:
                 changed = True
                 dropped.append(DroppedField(
@@ -822,6 +889,13 @@ class FortinetDriver(DeployDriver):
     # drivers by that key (DEPLOY_DRIVERS[device.platform]).
     platform = "fortigate"
 
+    # FortiOS has no candidate configuration: every write is live the moment
+    # it lands, so a broken-off push cannot be taken back as a whole. What this
+    # driver does instead is compensate per section (the wipe-and-retry sweeps,
+    # the push preflights). Declared rather than left implicit
+    # (docs/PUSH_ROLLBACK_PLAN.md).
+    rollback_kind = "none"
+
     # ── Settings ─────────────────────────────────────────────────
 
     def default_settings(self) -> list[dict]:
@@ -890,14 +964,44 @@ class FortinetDriver(DeployDriver):
         active_routes: list[dict] = (),          # CP-only (route-based VPN domains); ignored here
         nat_mode: str = "central",   # 'central' = central-snat-map; 'policy' = per-policy nat
         routing_mode: str = "legacy",  # PA-only render mode (legacy VR / advanced LR); ignored here
+        ngfw_mode: str = "profile-based",   # FortiOS NGFW mode of the target (docs/FGT_POLICY_MODE_PLAN.md)
+        app_catalog: dict | None = None,    # list_applications() of the target, policy-based mode only
     ) -> tuple[dict[str, str], list[dict]]:
         del active_routes, routing_mode
+        policy_based = (ngfw_mode or "").lower() == "policy-based"
+        # FortiGuard application names (case-insensitive) -> catalog entry, for
+        # the layer 7 security policies of policy-based mode. Custom applications
+        # and groups win over a same-named signature.
+        app_index: dict[str, dict] = {}
+        if policy_based and app_catalog:
+            for bucket in ("application-predefined", "application-group", "application"):
+                for e in app_catalog.get(bucket) or []:
+                    nm = (e.get("name") or "").strip()
+                    if nm:
+                        app_index[nm.lower()] = {"name": nm, "id": e.get("id"), "bucket": bucket}
         # Tags ignored - FortiGate policies have no tag concept; per-rule
         # tag-fields surface as DroppedField in the rules-loop below.
         del vrfs, tp_configs, imported_tp, tags
 
         sections: dict[str, str] = {}
         dropped: list[DroppedField] = []
+
+        # IPv6 NAT (docs/IPV6_PLAN.md, section 16): vip6 and ippool6 wait for
+        # the box, a NAT rule that carries the family is declared, not pushed
+        _ipv6_nat_objs = {str(o.get("name") or "") for o in (address_objects or [])
+                          if any(":" in v for v in object_values(o.get("value") or {}))}
+        _kept_nat: list[dict] = []
+        for _n in (nat_rules or []):
+            _v6 = nat_rule_ipv6(_n, _ipv6_nat_objs)
+            if _v6:
+                dropped.append(DroppedField(
+                    rule_id=_n.get("name") or "?", field="nat_rule",
+                    reason=f"carries IPv6 ('{_v6}'): FortiOS vip6 and ippool6 are not written "
+                           "in this version (docs/IPV6_PLAN.md, phase 3)",
+                    fallback="not pushed"))
+            else:
+                _kept_nat.append(_n)
+        nat_rules = _kept_nat
 
         # ── Renames ──
         # Sanitise all object/group/zone names ONCE so lookups + rule refs
@@ -916,6 +1020,20 @@ class FortinetDriver(DeployDriver):
         # (finding 2026-09-01). Keys cover the raw value and, for /32 hosts,
         # the bare IP - same contract as the PA lookup.
         addr_literal: dict[str, str] = {}
+        # Objects a FortiOS ships (deploy._forti_common stock catalog, the set
+        # the delete phase keeps): never pushed, never renamed. A source object
+        # of that name (a FortiGate source's own `Windows AD`, which the import
+        # keeps) resolves to the target's entry by its exact name; pushing it
+        # would overwrite the vendor's definition or, sanitised, duplicate it
+        # as `Windows-AD` (backlog 9, measured 2026-10-11).
+        stock_addrs: set[str] = set()
+        stock_addrgrps: set[str] = set()
+        stock_svcs: set[str] = set()
+        stock_svcgrps: set[str] = set()
+        # an all-addresses object by the family it covers (source name ->
+        # 'any4', 'any6' or 'any'): the rule side treats the reference as
+        # that token, so 0.0.0.0/0 is the IPv4 'all' and ::/0 the IPv6 one
+        any_tok: dict[str, str] = {}
         for o in address_objects:
             n = o.get("name") or ""
             # All-addresses objects map to the builtin `all`: the object-render
@@ -923,23 +1041,52 @@ class FortinetDriver(DeployDriver):
             # resolve to `all` instead of an address with start-ip 0 (BUG-021).
             if _forti_is_any_addr(o.get("value") or {}):
                 addr_rename[n] = "all"
+                _ov = o.get("value") or {}
+                _fam4 = not ipv6_value(_ov.get("value"))
+                _fam6 = (not _fam4) or (
+                    is_dual_stack(_ov) and _forti_is_any_addr({"type": _ov.get("type"), "value": _ov.get("value6")}))
+                any_tok[n] = "any" if (_fam4 and _fam6) else ("any4" if _fam4 else "any6")
+            elif _f.is_stock_entry("firewall/address", n):
+                addr_rename[n] = n
+                stock_addrs.add(n)
             else:
                 addr_rename[n] = _safe_name(n, _LIM_OBJ)
             _val = o.get("value") or {}
-            _v = str(_val.get("value") or "")
-            if n and _v:
+            for _v in object_values(_val):          # both halves of a dual-stack object
+                if not n:
+                    continue
                 addr_literal.setdefault(_v, addr_rename[n])
-                if _val.get("type") == "ip-netmask" and _v.endswith("/32"):
-                    addr_literal.setdefault(_v[:-3], addr_rename[n])
+                if _val.get("type") == "ip-netmask" and is_host_cidr(_v):
+                    addr_literal.setdefault(bare_host(_v), addr_rename[n])
         for o in address_groups:
             n = o.get("name") or ""
-            grp_addr_rename[n] = _safe_name(n, _LIM_OBJ)
+            if _f.is_stock_entry("firewall/addrgrp", n):
+                grp_addr_rename[n] = n
+                stock_addrgrps.add(n)
+            else:
+                grp_addr_rename[n] = _safe_name(n, _LIM_OBJ)
         for o in service_objects:
             n = o.get("name") or ""
-            svc_rename[n] = _safe_name(n, _LIM_OBJ)
+            if _f.is_stock_entry("firewall.service/custom", n):
+                svc_rename[n] = n
+                stock_svcs.add(n)
+            else:
+                svc_rename[n] = _safe_name(n, _LIM_OBJ)
         for o in service_groups:
             n = o.get("name") or ""
-            grp_svc_rename[n] = _safe_name(n, _LIM_OBJ)
+            if _f.is_stock_entry("firewall.service/group", n):
+                grp_svc_rename[n] = n
+                stock_svcgrps.add(n)
+            else:
+                grp_svc_rename[n] = _safe_name(n, _LIM_OBJ)
+
+        def _stock_drop(name: str, field: str, what: str) -> None:
+            dropped.append(DroppedField(
+                rule_id=name, field=field,
+                reason=f"FortiOS ships this {what}: rule references resolve "
+                       "against the target's own object",
+                fallback="not pushed: already on the target",
+                explained=True))
         for z in zones:
             n = z.get("name") or ""
             zone_rename[n] = _safe_name(n, _LIM_ZONE)
@@ -971,7 +1118,13 @@ class FortinetDriver(DeployDriver):
         #        datasource lookup → strip it (loopback.1 → loopback1).
         # iface_to_zone stays on the SOURCE name (source rules reference the
         # original → resolve to the zone).
-        _iface_map: dict[str, str] = dict(_f.tunnel_iface_names(vpn_tunnels))
+        # (!) F8 alone answers "did a VPN tunnel create this interface?" - the
+        # merged map cannot, because F7 renames a dotted name too, and a
+        # tunnel named with a dot (ASA Tunnel.1) then looked VPN-mapped and
+        # went out as 'Tunnel1', which exists nowhere (0.9.4 matrix,
+        # 2026-10-19, asa2fgt: FortiOS refused the zone with errcode -3).
+        _vpn_iface_map: dict[str, str] = dict(_f.tunnel_iface_names(vpn_tunnels))
+        _iface_map: dict[str, str] = dict(_vpn_iface_map)
         for _i in interfaces:
             _nm = (_i.get("interface_name") or "").strip()
             if _nm and _nm not in _iface_map:
@@ -994,11 +1147,43 @@ class FortinetDriver(DeployDriver):
         _tunnel_srcs = {i.get("interface_name") for i in interfaces
                         if (i.get("iface_type") or "").lower() == "tunnel"}
 
-        # ── Address Objects ──
+        # ── Address Objects, both families ──
+        # firewall/address holds the IPv4 half, firewall/address6 the IPv6
+        # one (phase 3 of docs/IPV6_PLAN.md): a v6 object is an address6, a
+        # dual-stack object an address and an address6 of one name, and the
+        # rules reference the name in srcaddr and srcaddr6 as the namespaces
+        # hold it. What a family cannot parse stays declared and remembered
+        # (ipv6_dropped), the rule side then says what it lost.
         addr_entries: list[dict] = []
+        addr6_entries: list[dict] = []
+        ipv6_dropped: set[str] = set()
+        object_ipv6_half: dict[str, list[str]] = {}
+
+        def _addr6_entry(nm: str, value: str, desc: str) -> dict | None:
+            """A firewall/address6 entry for a v6 prefix or range, None when
+            the value is neither."""
+            value = (value or "").strip()
+            if "-" in value and "/" not in value:
+                a, _, b = value.partition("-")
+                e6: dict = {"name": nm, "type": "iprange", "start-ip": a.strip(), "end-ip": b.strip()}
+            else:
+                try:
+                    net6 = ipaddress.ip_network(value, strict=False)
+                except ValueError:
+                    return None
+                if net6.version != 6:
+                    return None
+                e6 = {"name": nm, "type": "ipprefix", "ip6": str(net6)}
+            if desc:
+                e6["comment"] = desc[:255]
+            return e6
+
         for o in address_objects:
             name = o.get("name") or ""
             if not name:
+                continue
+            if name in stock_addrs:
+                _stock_drop(name, "address", "address")
                 continue
             safe = addr_rename[name]
             if safe.lower() in _FORTI_BUILTIN_ADDRS:
@@ -1011,24 +1196,75 @@ class FortinetDriver(DeployDriver):
             t = (v.get("type") or "").lower()
             entry: dict = {"name": safe}
             if t in ("ip-netmask", "ipmask"):
+                _desc6 = (v.get("description") or "").strip()
+                if ipv6_value(v.get("value")):
+                    e6 = _addr6_entry(safe, v.get("value"), _desc6)
+                    if e6 is None:
+                        dropped.append(DroppedField(
+                            rule_id=name, field="address",
+                            reason=f"unparseable IPv6 value '{v.get('value')}'", fallback="not pushed"))
+                        ipv6_dropped.add(name)
+                        continue
+                    addr6_entries.append(e6)
+                    continue
+                if is_dual_stack(v):
+                    e6 = _addr6_entry(safe, v.get("value6"), _desc6)
+                    if e6 is None:
+                        dropped.append(DroppedField(
+                            rule_id=name, field="address",
+                            reason=f"unparseable IPv6 half '{v.get('value6')}' of '{name}'",
+                            fallback="pushed with the IPv4 half"))
+                        object_ipv6_half[safe] = [str(v.get("value6"))]
+                    else:
+                        addr6_entries.append(e6)
                 subnet = _f.cidr_to_subnet(v.get("value"))
                 if not subnet:
                     dropped.append(DroppedField(
                         rule_id=name, field="address",
                         reason=f"unparseable subnet '{v.get('value')}'",
                     ))
+                    if ":" in str(v.get("value") or ""):
+                        ipv6_dropped.add(name)       # the loss is declared by family on the rules
                     continue
                 entry["type"] = "ipmask"
                 entry["subnet"] = subnet
             elif t == "ip-range":
                 rng = (v.get("value") or "").strip()
-                if "-" not in rng:
+                _desc6 = (v.get("description") or "").strip()
+                if ipv6_value(rng):
+                    e6 = _addr6_entry(safe, rng, _desc6)
+                    if e6 is None:
+                        dropped.append(DroppedField(
+                            rule_id=name, field="address",
+                            reason=f"unparseable IPv6 range '{rng}'", fallback="not pushed"))
+                        ipv6_dropped.add(name)
+                        continue
+                    addr6_entries.append(e6)
+                    continue
+                if is_dual_stack(v):
+                    e6 = _addr6_entry(safe, v.get("value6"), _desc6)
+                    if e6 is None:
+                        dropped.append(DroppedField(
+                            rule_id=name, field="address",
+                            reason=f"unparseable IPv6 half '{v.get('value6')}' of '{name}'",
+                            fallback="pushed with the IPv4 half"))
+                        object_ipv6_half[safe] = [str(v.get("value6"))]
+                    else:
+                        addr6_entries.append(e6)
+                start, _, end = rng.partition("-")
+                try:
+                    _ok = ("-" in rng and ipaddress.ip_address(start.strip()).version == 4
+                           and ipaddress.ip_address(end.strip()).version == 4)
+                except ValueError:
+                    _ok = False
+                if not _ok:
                     dropped.append(DroppedField(
                         rule_id=name, field="address",
                         reason=f"unparseable range '{rng}'",
                     ))
+                    if ":" in rng:
+                        ipv6_dropped.add(name)
                     continue
-                start, _, end = rng.partition("-")
                 entry["type"] = "iprange"
                 entry["start-ip"] = start.strip()
                 entry["end-ip"] = end.strip()
@@ -1049,12 +1285,25 @@ class FortinetDriver(DeployDriver):
                 entry["comment"] = desc[:255]
             addr_entries.append(entry)
         sections["Address Objects"] = json.dumps(addr_entries)
+        sections["Address Objects v6"] = json.dumps(addr6_entries)
+        # a dual-stack object is two entries of one name: the second one is a
+        # plus the generate declares, so the Review's kind table reconciles
+        _n4 = {e["name"] for e in addr_entries}
+        for _e6 in addr6_entries:
+            if _e6["name"] in _n4:
+                dropped.append(DroppedField(
+                    rule_id=_e6["name"], field="address", synthesized=True,
+                    reason="a dual-stack object is an address and an address6 of one name on FortiOS",
+                    fallback="the IPv6 half written as its own address6 entry"))
 
         # ── Address Groups ──
         addrgrp_entries: list[dict] = []
         for g in address_groups:
             name = g.get("name") or ""
             if not name:
+                continue
+            if name in stock_addrgrps:
+                _stock_drop(name, "address_group", "address group")
                 continue
             safe = grp_addr_rename[name]
             v = g.get("value") or {}
@@ -1096,10 +1345,66 @@ class FortinetDriver(DeployDriver):
             if desc:
                 entry["comment"] = desc[:255]
             addrgrp_entries.append(entry)
+        # A group is an addrgrp of its IPv4 members and an addrgrp6 of its
+        # IPv6 members, under one name (FortiOS partitions by member family,
+        # section 2a of docs/IPV6_PLAN.md); a group of groups follows its
+        # members' families to a fixed point. Each family's list is then
+        # pruned against what that family creates.
+        _addr4_names = {e["name"] for e in addr_entries} | _FORTI_BUILTIN_ADDRS
+        _addr6_names = {e["name"] for e in addr6_entries} | {"all", "none"}
+        _grp_members = {e["name"]: [m.get("name") for m in (e.get("member") or []) if isinstance(m, dict)]
+                        for e in addrgrp_entries}
+        _grp4: set[str] = set()
+        _grp6: set[str] = set()
+        _changed = True
+        while _changed:
+            _changed = False
+            for _g, _ms in _grp_members.items():
+                if _g not in _grp4 and any(m in _addr4_names or m in _grp4 for m in _ms):
+                    _grp4.add(_g); _changed = True
+                if _g not in _grp6 and any(m in _addr6_names or m in _grp6 for m in _ms):
+                    _grp6.add(_g); _changed = True
+        addrgrp6_entries: list[dict] = []
+        _grp4_entries: list[dict] = []
+        for _e in addrgrp_entries:
+            _ms = _grp_members.get(_e["name"], [])
+            _m4 = [m for m in _ms if m in _addr4_names or m in _grp4]
+            _m6 = [m for m in _ms if m in _addr6_names or m in _grp6]
+            if _m4:
+                _grp4_entries.append({**_e, "member": [{"name": m} for m in _m4]})
+            if _m6:
+                addrgrp6_entries.append({**_e, "member": [{"name": m} for m in _m6]})
+            if not _m4 and not _m6:
+                _grp4_entries.append(_e)      # members of neither family: pruned and declared below
+        addrgrp_entries = _grp4_entries
+        addrgrp_pruned: dict[str, list[str]] = {}
         addrgrp_entries = _prune_group_members(
             addrgrp_entries,
             {e["name"] for e in addr_entries} | _FORTI_BUILTIN_ADDRS,
-            dropped, "address_group")
+            dropped, "address_group", pruned_out=addrgrp_pruned)
+        addrgrp6_entries = _prune_group_members(
+            addrgrp6_entries, {e["name"] for e in addr6_entries} | {"all", "none"},
+            dropped, "address_group6")
+        sections["Address Groups v6"] = json.dumps(_toposort_groups(addrgrp6_entries))
+        _g4 = {e["name"] for e in addrgrp_entries}
+        for _g6 in addrgrp6_entries:
+            if _g6["name"] in _g4:
+                dropped.append(DroppedField(
+                    rule_id=_g6["name"], field="address_group", synthesized=True,
+                    reason="a group of both families is an addrgrp and an addrgrp6 of one name on FortiOS",
+                    fallback="the IPv6 members written as their own addrgrp6 entry"))
+        # the groups (Forti names) that lost an IPv6 member, with the members,
+        # and the groups that keep a dual-stack member whose IPv6 half is not
+        # written: a rule that references either is narrower than the source
+        _ipv6_dropped_safe = {addr_rename[n] for n in ipv6_dropped if n in addr_rename}
+        group_ipv6_loss = {g: [m for m in gone if m in _ipv6_dropped_safe]
+                           for g, gone in addrgrp_pruned.items()}
+        for _ge in addrgrp_entries:
+            _half = [m.get("name") for m in (_ge.get("member") or [])
+                     if isinstance(m, dict) and m.get("name") in object_ipv6_half]
+            if _half:
+                group_ipv6_loss.setdefault(_ge["name"], []).extend(_half)
+        group_ipv6_loss = {g: m for g, m in group_ipv6_loss.items() if m}
         # Nested groups (group-of-groups) must be pushed member-first (BUG-022).
         sections["Address Groups"] = json.dumps(_toposort_groups(addrgrp_entries))
 
@@ -1122,6 +1427,9 @@ class FortinetDriver(DeployDriver):
         for o in service_objects:
             name = o.get("name") or ""
             if not name:
+                continue
+            if name in stock_svcs:
+                _stock_drop(name, "service", "service")
                 continue
             safe = svc_rename[name]
             v = o.get("value") or {}
@@ -1218,6 +1526,9 @@ class FortinetDriver(DeployDriver):
             name = g.get("name") or ""
             if not name:
                 continue
+            if name in stock_svcgrps:
+                _stock_drop(name, "service_group", "service group")
+                continue
             safe = grp_svc_rename[name]
             v = g.get("value") or {}
             members_raw = v.get("members") or []
@@ -1302,7 +1613,8 @@ class FortinetDriver(DeployDriver):
             sname = (s.get("name") or "").strip()
             if not sname:
                 continue
-            if sname.lower() in FORTI_BUILTIN_SCHEDULES:
+            if (sname.lower() in FORTI_BUILTIN_SCHEDULES
+                    or _f.is_stock_entry("firewall.schedule/recurring", sname)):
                 # Built-ins are factory-shipped; pushing them as user objects
                 # collides with the predefined entries. Rule-time refs still
                 # resolve against the native target object - so this is a
@@ -1532,11 +1844,13 @@ class FortinetDriver(DeployDriver):
                 # rule (box-pass B1-1). Omit it declared; the zone still
                 # pushes (empty zones are valid).
                 _src_type = ""
+                _has_row = False
                 for _si in interfaces:
                     if (_si.get("interface_name") or "").strip() == m:
                         _src_type = (_si.get("iface_type") or "").lower()
+                        _has_row = True
                         break
-                if _src_type == "tunnel" and _imap(m) == m:
+                if _src_type == "tunnel" and m not in _vpn_iface_map:
                     dropped.append(DroppedField(
                         rule_id=zname, field="zone_member",
                         reason=f"tunnel iface '{m}' never materializes on "
@@ -1544,6 +1858,24 @@ class FortinetDriver(DeployDriver):
                         fallback="pushed without the member: bind the VPN tunnel "
                                  "interface to the zone once the VPN is "
                                  "set up",
+                    ))
+                    continue
+                # A member this build creates no interface for (skipped in
+                # Network > Interfaces, or gone from the source since the
+                # zone was read) cannot be referenced: FortiOS answers the
+                # whole zone POST with errcode -3 "entry not found in
+                # datasource" and the push stops there, taking every rule
+                # that names the zone with it (0.9.4 matrix, 2026-10-19,
+                # asa2fgt: zone gs-vpn with the member Tunnel1).
+                if not _has_row and m not in _vpn_iface_map:
+                    dropped.append(DroppedField(
+                        rule_id=zname, field="zone_member",
+                        reason=f"this build creates no interface '{m}', so the "
+                               "zone cannot reference it (FortiOS refuses the "
+                               "zone with errcode -3)",
+                        fallback="pushed without the member: bind the interface "
+                                 "to the zone under Network > Interfaces and "
+                                 "build again",
                     ))
                     continue
                 # Normalize to the Forti-safe iface name (F7 dot-strip + F8
@@ -1598,13 +1930,23 @@ class FortinetDriver(DeployDriver):
         # anyway, and the push died on rule 75 of 182 with 'entry not found in
         # datasource' - after 74 rules had already landed on the firewall.
         #
-        # Services are deliberately left alone. An unresolved service name may
-        # be a FortiOS builtin (HTTP, DNS, SSH) that resolves without us
-        # creating it, and there is no closed list to check against, so
-        # narrowing valid_svcs here would drop working references.
+        # Services the same way, against the emitted entries plus the FortiOS
+        # factory services (_f.FORTI_FACTORY_SERVICE_NAMES, captured from
+        # pristine boxes): HTTP, DNS or SSH resolve on the box without us
+        # creating them, any other unknown name is an unresolved reference
+        # (a blocker since 2026-10-10, it used to pass through and fail the
+        # push with -3 after the earlier rules had landed).
         valid_addrs = ({e["name"] for e in addr_entries}
                        | {e["name"] for e in addrgrp_entries}
-                       | _FORTI_BUILTIN_ADDRS)
+                       | _FORTI_BUILTIN_ADDRS
+                       | _f.FORTI_STOCK_ADDRESS_NAMES | _f.FORTI_STOCK_ADDRGRP_NAMES)
+        # the IPv6 namespace a rule's srcaddr6/dstaddr6 may name
+        valid_addrs6 = ({e["name"] for e in addr6_entries}
+                        | {e["name"] for e in addrgrp6_entries}
+                        | {"all", "none"} | _f.FORTI_STOCK_ADDRESS6_NAMES | _f.FORTI_STOCK_ADDRGRP6_NAMES)
+        valid_svcs = ({e["name"] for e in svc_entries}
+                      | {e["name"] for e in svcgrp_entries}
+                      | {"ALL"} | _f.FORTI_FACTORY_SERVICE_NAMES)
         valid_ifaces = ({e["name"] for e in zone_entries} | iface_names
                         | _FORTI_BUILTIN_IFACES)
 
@@ -1696,7 +2038,9 @@ class FortinetDriver(DeployDriver):
                 entry["mode"] = "dhcp"
             else:
                 entry["mode"] = "static"
-                ips = i.get("ip_addresses") or []
+                _all_ips = [str(x) for x in (i.get("ip_addresses") or []) if x]
+                ips = [x for x in _all_ips if ":" not in x]
+                ips6 = [x for x in _all_ips if ":" in x]
                 if ips:
                     payload = _f.iface_cidr_to_payload(ips[0])
                     if payload:
@@ -1706,6 +2050,12 @@ class FortinetDriver(DeployDriver):
                             rule_id=iname, field="interface_ip",
                             reason=f"{len(ips)-1} secondary IP(s) not rendered (V1)",
                         ))
+                if ips6:
+                    # the interface's ipv6 block (docs/IPV6_PLAN.md, phase 3):
+                    # the first address static, the rest as extra addresses
+                    entry["ipv6"] = {"ip6-mode": "static", "ip6-address": ips6[0]}
+                    if len(ips6) > 1:
+                        entry["ipv6"]["ip6-extra-addr"] = [{"prefix": x} for x in ips6[1:]]
             vrf = _vrf_id(i.get("vr_name"))
             if vrf:
                 entry["vrf"] = vrf
@@ -1770,7 +2120,9 @@ class FortinetDriver(DeployDriver):
             return best[1] if best else None
 
         route_entries: list[dict] = []
+        route6_entries: list[dict] = []
         seq = 0
+        seq6 = 0
         for r in routes:
             if r.get("is_connected"):
                 continue
@@ -1781,15 +2133,28 @@ class FortinetDriver(DeployDriver):
             # fw_routes.prefix stores `a.b.c.d/N` (slash already included);
             # only synth the slash for callers that pass a bare network.
             cidr_str = prefix if "/" in prefix else f"{prefix}/{plen}"
-            dst = _f.cidr_to_subnet(cidr_str)
+            is_v6 = ":" in cidr_str
+            if is_v6:
+                # router/static6 takes the prefix as written (phase 3 of
+                # docs/IPV6_PLAN.md); the device derivation is the same
+                try:
+                    dst = str(ipaddress.ip_network(cidr_str, strict=False))
+                except ValueError:
+                    continue
+            else:
+                dst = _f.cidr_to_subnet(cidr_str)
             if not dst:
                 continue
             is_bh = (r.get("route_type") or "static") == "blackhole"
             if is_bh:
                 # FortiOS discard route - `set blackhole enable` flips the
                 # entry to a discard; no gateway/device required.
-                seq += 1
-                entry: dict = {"seq-num": seq, "dst": dst, "blackhole": "enable"}
+                if is_v6:
+                    seq6 += 1
+                    entry: dict = {"seq-num": seq6, "dst": dst, "blackhole": "enable"}
+                else:
+                    seq += 1
+                    entry = {"seq-num": seq, "dst": dst, "blackhole": "enable"}
             else:
                 gw = (r.get("next_hop") or "").strip()
                 dev = (r.get("interface_name") or "").strip()
@@ -1804,8 +2169,12 @@ class FortinetDriver(DeployDriver):
                         fallback="not pushed",
                     ))
                     continue
-                seq += 1
-                entry = {"seq-num": seq, "dst": dst}
+                if is_v6:
+                    seq6 += 1
+                    entry = {"seq-num": seq6, "dst": dst}
+                else:
+                    seq += 1
+                    entry = {"seq-num": seq, "dst": dst}
                 if gw:
                     entry["gateway"] = gw
                 entry["device"] = _imap(dev)   # Forti-safe iface name (F7/F8)
@@ -1818,8 +2187,9 @@ class FortinetDriver(DeployDriver):
             metric_val = r.get("metric")
             if metric_val is not None:
                 entry["distance"] = int(metric_val)
-            route_entries.append(entry)
+            (route6_entries if is_v6 else route_entries).append(entry)
         sections["Static Routes"] = json.dumps(route_entries)
+        sections["Static Routes v6"] = json.dumps(route6_entries)
 
         # ── NAT objects: VIPs + IP-Pools (Phase B4) ──
         # VIPs come back as obj_type='nat_vip' rows; the source-import side
@@ -2021,7 +2391,8 @@ class FortinetDriver(DeployDriver):
             vip_names.add(name)
             vip_entries.append(vip)
             dnat_index.setdefault(od[0], []).append(
-                {"vip": name, "proto": proto, "extport": extport})
+                {"vip": name, "proto": proto, "extport": extport,
+                 "mapped": (n.get("trans_dst") or "").strip(), "mappedip": mappedip})
 
         def _synth_static_vip(n: dict):
             # #1: bidirectional source-static-1:1 → an INBOUND VIP (extip=the
@@ -2058,7 +2429,8 @@ class FortinetDriver(DeployDriver):
             vip_names.add(name)
             vip_entries.append(vip)
             dnat_index.setdefault(mapped_pub, []).append(
-                {"vip": name, "proto": None, "extport": None})
+                {"vip": name, "proto": None, "extport": None,
+                 "mapped": osrc[0], "mappedip": mappedip})
 
         for n in nat_rules or ():
             props = n.get("properties")
@@ -2228,6 +2600,54 @@ class FortinetDriver(DeployDriver):
         log_traffic = (settings.get("log_traffic") or "all").strip()
         comment_tag = (settings.get("comment_tag") or "[Gateshift]").strip()
 
+        # Central NAT mode: a dest-NAT applies before the policy lookup, so a
+        # policy matches the MAPPED (internal) address, and FortiOS refuses a
+        # VIP as a policy dstaddr in that mode ("entry not found in
+        # datasource", pa2fgt with the box in policy-based NGFW mode,
+        # 2026-10-11). Every VIP gets its mapped-side address object here:
+        # the source's own object when one carries the mapped IP, else a
+        # host synthesised for it. The rule loop wires policies to that
+        # object; in policy-NAT mode the VIP itself is the policy's dstaddr
+        # (the FortiOS convention there).
+        _vip_mapped: dict[str, str] = {}
+        if nat_mode == "central":
+            _mapped_ref = {c["vip"]: (c.get("mapped") or "")
+                           for cands in dnat_index.values() for c in cands}
+            for _ve in vip_entries:
+                _vn = _ve.get("name") or ""
+                _rng = str(((_ve.get("mappedip") or [{}])[0] or {}).get("range") or "").strip()
+                if not _vn or not _rng:
+                    continue
+                _ip, _, _end = _rng.partition("-")
+                _ip, _end = _ip.strip(), _end.strip()
+                _nm = (addr_rename.get(_mapped_ref.get(_vn, ""))
+                       or addr_literal.get(_rng) or addr_literal.get(_ip)
+                       or addr_literal.get(host_cidr(_ip)))
+                if not _nm or _nm not in valid_addrs:
+                    _nm = _safe_name(f"r-{_ip}-{_end}" if _end else f"h-{_ip}", _LIM_OBJ)
+                    if _nm not in valid_addrs:
+                        _base, _k = _nm, 1
+                        while _nm in vip_names:
+                            _k += 1
+                            _nm = _safe_name(f"{_base}-{_k}", _LIM_OBJ)
+                        _e: dict = {"name": _nm,
+                                    "comment": f"{comment_tag} mapped address of VIP {_vn}"[:255]}
+                        if _end:
+                            _e.update({"type": "iprange", "start-ip": _ip, "end-ip": _end})
+                        else:
+                            _e.update({"type": "ipmask", "subnet": f"{_ip} 255.255.255.255"})
+                        addr_entries.append(_e)
+                        valid_addrs.add(_nm)
+                        addr_rename[_nm] = _nm      # a defined name for the reference check
+                        addr_literal.setdefault(_rng, _nm)
+                        dropped.append(DroppedField(
+                            rule_id=_nm, field="address", synthesized=True,
+                            reason=f"central NAT mode: a policy matches the mapped address "
+                                   f"of VIP {_vn}, which no source object carries",
+                            fallback="created for the dest-NAT"))
+                _vip_mapped[_vn] = _nm
+            sections["Address Objects"] = json.dumps(addr_entries)
+
         def _resolve_iface_ref(ref: str, rule_id: str) -> str:
             if ref == "any" or not ref:
                 return "any"
@@ -2241,7 +2661,7 @@ class FortinetDriver(DeployDriver):
                 # (tunnel.1) passed validation but no such interface ever
                 # exists on the box; the phase1-renamed one does (matrix
                 # finding M-3, -651 at rule push).
-                if renamed in _tunnel_srcs and _imap(renamed) == renamed:
+                if renamed in _tunnel_srcs and renamed not in _vpn_iface_map:
                     dropped.append(DroppedField(
                         rule_id=rule_id, field="interface_ref",
                         reason=f"tunnel iface '{ref}' never materializes on "
@@ -2271,19 +2691,68 @@ class FortinetDriver(DeployDriver):
                     out.append({"name": nm})
             return out or [{"name": "any"}]
 
-        def _resolve_addr_ref(ref: str, rule_id: str) -> str:
+        # The names the source defines (objects and groups): a lost reference
+        # outside them is undefined, inside them an object this push dropped
+        # (unresolved_reference tells the two apart, only the first blocks
+        # while other members remain).
+        # A VIP this push creates is a dstaddr a FortiOS policy resolves
+        # natively (a source VIP referenced by its own rules, or one
+        # synthesised from a dest-NAT): it counts as defined and as valid.
+        _known_addrs = set(addr_rename) | set(grp_addr_rename) | set(vip_names)
+        _known_svcs = set(svc_rename) | set(grp_svc_rename)
+
+        def _resolve_addr_ref(ref: str, rule_id: str, lost: list | None = None) -> str | None:
+            """The Forti name of a rule address reference; None when nothing
+            this push creates carries it (the ref goes into `lost`, the
+            side's caller reports it once with what remained)."""
             if ref == "any" or not ref:
+                return "all"
+            # Check Point's 'Internet' (anything external, the direction
+            # carried by zones) has no FortiOS object: 'all' with a warning,
+            # the same translation the PAN-OS renderer makes
+            if ref.strip().lower() in ("internet", "all_internet", "all internet", "all-internet"):
+                dropped.append(DroppedField(
+                    rule_id=rule_id, field="address_ref",
+                    reason=f"'{ref}' is a Check Point address family with no FortiOS equivalent",
+                    fallback="replaced by all"))
                 return "all"
             renamed = addr_rename.get(ref, grp_addr_rename.get(
                 ref, addr_literal.get(ref, ref)))
-            if renamed in valid_addrs:
+            if ref in vip_names:          # a VIP this push creates (same name)
+                # central NAT mode: the policy matches the mapped address
+                return _vip_mapped.get(ref, ref) if nat_mode == "central" else ref
+            if renamed in valid_addrs or renamed in valid_addrs6:
                 return renamed
-            dropped.append(DroppedField(
-                rule_id=rule_id, field="address_ref",
-                reason=f"'{ref}' not in addresses/groups: falling back to 'all'",
-                fallback="replaced by all",
-            ))
-            return "all"
+            if lost is not None:
+                lost.append(ref)
+            return None
+
+        def _addr_side(refs: list, rule_id: str, field: str, resolve, action=None) -> list[str]:
+            """One rule side resolved and pruned to what this push creates;
+            a pruned side is reported, a blocker when it would widen. An
+            IPv6 member the push declared, directly or through a group, is
+            declared on the rule by family and action (ipv6_loss,
+            docs/IPV6_PLAN.md D6 and D7); an emptied side stays the
+            unresolved_reference blocker."""
+            lost: list[str] = []
+            out = [r for r in (resolve(a, lost) for a in (refs or ["any"])) if r]
+            v6_lost, other_lost = split_ipv6_loss(lost, ipv6_dropped)
+            if lost and not out:
+                dropped.append(unresolved_reference(rule_id, field, lost, out, what="address",
+                                                    any_word="all", known=_known_addrs))
+            else:
+                if other_lost:
+                    dropped.append(unresolved_reference(rule_id, field, other_lost, out, what="address",
+                                                        any_word="all", known=_known_addrs))
+                if v6_lost:
+                    dropped.append(ipv6_loss(rule_id, field, v6_lost, out, action=action))
+            for g in out:
+                if g in group_ipv6_loss:
+                    dropped.append(ipv6_loss(rule_id, field, group_ipv6_loss[g], out, action=action, via=g))
+                if g in object_ipv6_half:
+                    dropped.append(ipv6_loss(rule_id, field, object_ipv6_half[g], out, action=action,
+                                             via=g, via_kind="object"))
+            return out or ["all"]
 
         # PBF (router/policy) renders src/dst as INLINE subnets, not address-object
         # refs - so it's self-contained and carries NO cross-strand dependency on
@@ -2345,13 +2814,27 @@ class FortinetDriver(DeployDriver):
             list(pbf_rules or []), dropped, resolve_subnets=_resolve_addr_subnets,
             iface_map=_iface_map)
 
-        def _resolve_svc_ref(ref: str, rule_id: str) -> str:
+        def _resolve_svc_ref(ref: str, rule_id: str, lost: list | None = None) -> str | None:
+            """The Forti name of a rule service reference; None when neither
+            this push nor FortiOS itself (the factory services) carries it:
+            the box would refuse the policy (-3) after the earlier rules had
+            landed, so the side's caller prunes and reports it."""
             if ref == "any" or not ref:
                 return "ALL"
             renamed = svc_rename.get(ref, grp_svc_rename.get(ref, ref))
-            # We accept unknown service names (could be Forti builtin like HTTP,
-            # DNS, …). Push surfaces invalid names as errcode -3.
-            return renamed
+            if renamed in valid_svcs:
+                return renamed
+            if lost is not None:
+                lost.append(ref)
+            return None
+
+        def _svc_side(refs: list, rule_id: str) -> list[str]:
+            lost: list[str] = []
+            out = [r for r in (_resolve_svc_ref(s, rule_id, lost) for s in (refs or ["any"])) if r]
+            if lost:
+                dropped.append(unresolved_reference(rule_id, "service", lost, out, what="service",
+                                                    any_word="ALL", known=_known_svcs))
+            return out or ["ALL"]
 
         # ── B-3 phase 2: auto-wire a dest-NAT VIP into the matching allow
         # policy's dstaddr. A dst ref that equals a synthesised VIP's orig_dst
@@ -2366,23 +2849,34 @@ class FortinetDriver(DeployDriver):
             return ((rule.get("proto") or "").lower() == c["proto"]
                     and str(rule.get("port_from") or "").strip() == c["extport"])
 
-        def _wire_dst(ref: str, rule_id: str, rule: dict) -> str:
+        def _wire_dst(ref: str, rule_id: str, rule: dict, lost: list | None = None) -> str | None:
             cands = dnat_index.get(ref) or []
             act = (rule.get("action") or "permit").lower()
             if not cands or act not in ("permit", "allow", "accept", "pass"):
-                return _resolve_addr_ref(ref, rule_id)          # Fund R: allow-only
+                return _resolve_addr_ref(ref, rule_id, lost)    # Fund R: allow-only
             match = [c for c in cands if _vip_matches_service(c, rule)]
             if len(match) == 1:
                 wired_vips.add(match[0]["vip"])
+                if nat_mode == "central":    # DNAT precedes the lookup: match the mapped address
+                    return _vip_mapped.get(match[0]["vip"]) or _resolve_addr_ref(ref, rule_id, lost)
                 return match[0]["vip"]
             if len(match) > 1:                                  # Fund U: ambiguous
                 dropped.append(DroppedField(
                     rule_id=rule_id, field="dstaddr",
                     reason=f"dest '{ref}' matches {len(match)} dest-NAT VIPs: "
                            "ambiguous, not auto-wired (set dstaddr→VIP manually)"))
-            return _resolve_addr_ref(ref, rule_id)              # 0 match → leave as-is
+            return _resolve_addr_ref(ref, rule_id, lost)        # 0 match → leave as-is
+
+        # A central-NAT source matched the translated destination. A
+        # policy-NAT target matches the original one through the VIP, so
+        # the VIP joins the mapped address on such rules; a central-NAT
+        # target matches after translation like the source did (deploy.base).
+        if nat_mode == "policy":
+            rules = widen_post_nat_destinations(rules, nat_rules, address_objects, dropped,
+                                                target="a FortiGate in policy-NAT mode")
 
         rule_entries: list[dict] = []
+        security_entries: list[dict] = []   # policy-based mode: the layer 7 twin of every rule
         seen_rule_names: dict[str, int] = {}
         dropped = DropTagger(dropped)  # rule drops carry the rule's hash (Review change log, R2)
         for i, rule in enumerate(rules):
@@ -2400,6 +2894,8 @@ class FortinetDriver(DeployDriver):
                 continue
 
             for fld, (why, fallback) in _UNSUPPORTED_RULE_FIELDS.items():
+                if fld == "application" and policy_based:
+                    continue   # policy-based mode: applications ride on the security policy below
                 if rule.get(fld):
                     dropped.append(DroppedField(
                         rule_id=rule_id, field=fld, reason=why, fallback=fallback,
@@ -2457,9 +2953,83 @@ class FortinetDriver(DeployDriver):
                     return [{"name": "all"}]
                 return out or [{"name": "all"}]
 
-            srcaddr = _addr_list([_resolve_addr_ref(a, rule_id) for a in (rule.get("sources") or ["any"])])
-            dstaddr = _addr_list([_wire_dst(a, rule_id, rule) for a in (rule.get("destinations") or ["any"])])
-            service = [{"name": _resolve_svc_ref(s, rule_id)} for s in (rule.get("services") or ["any"])] or [{"name": "ALL"}]
+            def _side_families(refs: list, field: str, resolve) -> tuple[list[str], list[str], bool]:
+                """One rule side as (IPv4 names, IPv6 names, family-less):
+                the resolved names sorted into the namespace that holds them
+                (a dual-stack name into both), the catch-all tokens and the
+                all-addresses objects picking the family ('any' both, 'any4'
+                and 'any6' one). A bare 'all' that is nobody's family (the
+                fallback of an emptied side, a Check Point 'Internet') is
+                family-less and follows the other side in _pair_families."""
+                refs = list(refs or ["any"])
+                toks = {any_tok.get(r, r) for r in refs if r in _ANY_TOKENS or r in any_tok}
+                plain = [r for r in refs if r not in _ANY_TOKENS and r not in any_tok]
+                names = _addr_side(plain, rule_id, field, resolve, action=rule.get("action")) if plain else []
+                # a name the IPv6 namespace does not hold (a VIP, a mapped
+                # address) is IPv4
+                v4 = [n for n in names if n != "all" and (n in valid_addrs or n not in valid_addrs6)]
+                v6 = [n for n in names if n != "all" and n in valid_addrs6]
+                wild = "all" in names
+                if "any" in toks or "any4" in toks:
+                    v4.append("all")
+                if "any" in toks or "any6" in toks:
+                    v6.append("all")
+                return v4, v6, wild
+
+            def _pair_families(src: tuple, dst: tuple) -> tuple | None:
+                """The two sides paired by family (section 2a of
+                docs/IPV6_PLAN.md): a family is written when both sides have
+                members in it, a family-less 'all' joins the families of the
+                other side (IPv4 when both are), a family one side alone
+                carries is declared (no packet is of two families, so the
+                source never matched it either), and a rule with no common
+                family is declared and not pushed. None means not pushed."""
+                s4, s6, sw = src
+                d4, d6, dw = dst
+                if sw:
+                    if d4 or dw or not d6:
+                        s4 = s4 + ["all"]
+                    if d6:
+                        s6 = s6 + ["all"]
+                if dw:
+                    if s4 or sw or not s6:
+                        d4 = d4 + ["all"]
+                    if s6:
+                        d6 = d6 + ["all"]
+                f4 = bool(s4 and d4)
+                f6 = bool(s6 and d6)
+                if not f4 and not f6:
+                    # a whole rule gone: the Review counts it under rules
+                    dropped.append(DroppedField(
+                        rule_id=rule_id, field="rule",
+                        reason="the sources and the destinations are of different address families "
+                               f"(sources {', '.join(s4 or s6)}, destinations {', '.join(d4 or d6)}): "
+                               "no packet carries both, the rule matched nothing at the source either",
+                        fallback="not pushed"))
+                    return None
+                for fam, field, have, ok in ((4, "srcaddr", s4, f4), (4, "dstaddr", d4, f4),
+                                             (6, "srcaddr6", s6, f6), (6, "dstaddr6", d6, f6)):
+                    # a side that holds only the catch-all of a token ('any'
+                    # on a rule whose other side is one family) loses no
+                    # object: nothing to declare
+                    if have and not ok and set(have) != {"all"}:
+                        dropped.append(DroppedField(
+                            rule_id=rule_id, field=field,
+                            reason=f"{field} names {', '.join(have)} and the other side has no IPv{fam} "
+                                   "member: the family cannot match (no packet is of two families)",
+                            fallback=f"IPv{fam} left off this policy"))
+                return ((_addr_list(s4) if f4 else []), (_addr_list(d4) if f4 else []),
+                        (_addr_list(s6) if f6 else []), (_addr_list(d6) if f6 else []))
+
+            _paired = _pair_families(
+                _side_families(rule.get("sources"), "srcaddr",
+                               lambda a, lost: _resolve_addr_ref(a, rule_id, lost)),
+                _side_families(rule.get("destinations"), "dstaddr",
+                               lambda a, lost: _wire_dst(a, rule_id, rule, lost)))
+            if _paired is None:
+                continue
+            srcaddr, dstaddr, srcaddr6, dstaddr6 = _paired
+            service = [{"name": n} for n in _svc_side(rule.get("services"), rule_id)]
 
             action_raw = (rule.get("action") or "permit").lower()
             if action_raw in ("permit", "allow", "accept", "pass"):
@@ -2473,14 +3043,32 @@ class FortinetDriver(DeployDriver):
             rule_log_traffic = (rule.get("log_traffic") or log_traffic or "all").strip().lower()
             if rule_log_traffic not in ("all", "utm", "disable"):
                 rule_log_traffic = log_traffic
+            # 'utm' logs what a security profile inspected, and a deny policy
+            # inspects nothing: FortiOS refuses that combination with errcode
+            # -61 and NO message, and the rule push stops at that policy with
+            # everything before it written (measured on 7.6.7, 0.9.4 matrix
+            # 2026-10-19, cp2fgt). The intent is logging, so the denial is
+            # logged whole instead, declared.
+            if action == "deny" and rule_log_traffic == "utm":
+                rule_log_traffic = "all"
+                dropped.append(DroppedField(
+                    rule_id=rule_id, field="log_traffic",
+                    reason="FortiOS takes no UTM logging on a deny policy, which "
+                           "inspects nothing (errcode -61)",
+                    fallback="pushed as logging every packet the rule denies",
+                ))
 
             entry: dict = {
                 "policyid":  i + 1,
                 "name":      rule_name,
                 "srcintf":   srcintf,
                 "dstintf":   dstintf,
-                "srcaddr":   srcaddr,
-                "dstaddr":   dstaddr,
+                # one policy, two field sets (section 2a of docs/IPV6_PLAN.md):
+                # a family's list is sent only when it has members
+                **({"srcaddr": srcaddr} if srcaddr else {}),
+                **({"dstaddr": dstaddr} if dstaddr else {}),
+                **({"srcaddr6": srcaddr6} if srcaddr6 else {}),
+                **({"dstaddr6": dstaddr6} if dstaddr6 else {}),
                 "service":   service,
                 "action":    action,
                 # Phase 1b: rule.schedule kommt aus rules_query COALESCE
@@ -2519,6 +3107,33 @@ class FortinetDriver(DeployDriver):
                         rule_id=rule_name, field="nat",
                         reason=f"policy-NAT: {_np} different SNAT pools match this "
                                "policy's source. Ambiguous, nat not auto-set (set manually)"))
+            # policy-NAT on a policy with an IPv6 side: 'nat enable' NATs both
+            # families and FortiOS insists on an IPv6 pool for the IPv6 one
+            # ("Should set poolname6 when dstaddr6 set", -651, cp2fgt of the
+            # phase-6 matrix), which this version does not write (phase 3: no
+            # vip6/ippool6). The IPv4 half keeps its NAT and the IPv6 side is
+            # left off, declared (an accept rule: narrower, D6); a policy of
+            # IPv6 alone keeps its addresses and loses the NAT flag instead.
+            if entry.get("nat") == "enable" and (srcaddr6 or dstaddr6):
+                if srcaddr and dstaddr:
+                    entry.pop("srcaddr6", None)
+                    entry.pop("dstaddr6", None)
+                    srcaddr6, dstaddr6 = [], []
+                    dropped.append(DroppedField(
+                        rule_id=rule_name, field="dstaddr6",
+                        reason="policy-NAT: 'nat enable' would translate the IPv6 side too, and "
+                               "FortiOS needs an IPv6 pool (poolname6) for that, which this "
+                               "version does not write (docs/IPV6_PLAN.md)",
+                        fallback="IPv6 left off this policy, the IPv4 side keeps its NAT"))
+                else:
+                    for _k in ("ippool", "poolname", "fixedport", "natoutbound"):
+                        entry.pop(_k, None)
+                    entry["nat"] = "disable"
+                    dropped.append(DroppedField(
+                        rule_id=rule_name, field="nat",
+                        reason="policy-NAT: an IPv6 policy needs an IPv6 pool (poolname6) for "
+                               "NAT, which this version does not write (docs/IPV6_PLAN.md)",
+                        fallback="nat left disabled on this policy"))
             # Per-rule negate flags - FortiOS expects "enable"/"disable" strings
             # (V0 lab-probe). Default disable; only flip when override-resolved
             # rule.negate_* is truthy.
@@ -2574,17 +3189,107 @@ class FortinetDriver(DeployDriver):
                 ("ssl_ssh_profile",   "ssl-ssh-profile"),
             ]
             utm_emitted = False
+            utm_values: dict[str, str] = {}
             for col, api_field in utm_fields:
                 val = (rule.get(col) or "").strip()
                 if not val:
                     continue
-                entry[api_field] = val
+                utm_values[api_field] = val
                 utm_emitted = True
-            if utm_emitted:
-                entry["utm-status"] = "enable"
+            if not policy_based:
+                entry.update(utm_values)
+                if utm_emitted:
+                    entry["utm-status"] = "enable"
+                rule_entries.append(entry)
+                continue
+
+            # ── NGFW policy-based mode: two layers from one rule ──
+            # The security policy carries the layer 7 decision (applications
+            # by FortiGuard id, the default-port rule, identities, UTM, action,
+            # log); the firewall policy mirrors the layer 3/4 match so the
+            # traffic reaches layer 7: accept when the rule allows or names
+            # applications, deny when it denies without applications
+            # (docs/FGT_POLICY_MODE_PLAN.md, D2 to D4, D6).
+            app_raw = str(rule.get("application") or "").strip()
+            app_names = [a.strip() for a in app_raw.replace(";", ",").split(",")
+                         if a.strip() and a.strip().lower() != "any"]
+            app_ids: list[dict] = []
+            app_groups: list[dict] = []
+            app_missing: list[str] = []
+            for nm in app_names:
+                hit = app_index.get(nm.lower())
+                if hit is None:
+                    app_missing.append(nm)
+                elif hit["bucket"] == "application-group":
+                    app_groups.append({"name": hit["name"]})
+                elif hit.get("id") is not None:
+                    app_ids.append({"id": int(hit["id"])})
+                else:
+                    app_missing.append(nm)
+            if app_missing:
+                dropped.append(DroppedField(
+                    rule_id=rule_id, field="application",
+                    reason="no application of this name in the target's catalog "
+                           "(applications are matched by name, never translated): "
+                           + ", ".join(app_missing),
+                    fallback=("remaining applications kept" if (app_ids or app_groups)
+                              else "application left any: pick one in the Applications pane"),
+                ))
+            has_apps = bool(app_ids or app_groups)
+            sec: dict = {
+                "policyid":  i + 1,
+                "name":      rule_name,
+                "srcintf":   srcintf,
+                "dstintf":   dstintf,
+                **({"srcaddr": srcaddr} if srcaddr else {}),
+                **({"dstaddr": dstaddr} if dstaddr else {}),
+                **({"srcaddr6": srcaddr6} if srcaddr6 else {}),
+                **({"dstaddr6": dstaddr6} if dstaddr6 else {}),
+                "action":    action,
+                "schedule":  entry["schedule"],
+                "logtraffic": rule_log_traffic,
+                "status":    entry["status"],
+                "comments":  comments,
+            }
+            # application-default: the application's own ports, FortiOS's
+            # enforce-default-app-port; an explicit service list keeps its
+            # ports and leaves the default-port rule off (D4).
+            svc_override = str(rule.get("service_override") or rule.get("service_mode") or "").strip().lower()
+            svc_names = [e["name"] for e in service]
+            if has_apps and (svc_override == "application-default"
+                             or svc_names in (["ALL"], ["all"]) and svc_override != "any"):
+                sec["service"] = [{"name": "ALL"}]
+                sec["enforce-default-app-port"] = "enable"
+            else:
+                sec["service"] = service
+                sec["enforce-default-app-port"] = "disable"
+            if app_ids:
+                sec["application"] = app_ids
+            if app_groups:
+                sec["app-group"] = app_groups
+            for k in ("srcaddr-negate", "dstaddr-negate", "service-negate"):
+                if entry.get(k) == "enable":
+                    sec[k] = "enable"
+            for k in ("users", "groups"):
+                if entry.get(k):
+                    sec[k] = entry.pop(k)
+            sec.update(utm_values)
+            if rule_log_traffic != "disable" and rule.get("log_start"):
+                sec["logtraffic-start"] = "enable"
+            security_entries.append(sec)
+            # the layer 3/4 mirror always accepts: in policy-based mode FortiOS
+            # keeps a firewall policy's action at accept (a deny sent over
+            # REST answers success and reads back accept, FGT 133, 7.6.7,
+            # 2026-10-11), the deny lives on the security policy, which runs
+            # first-match with an implicit deny
+            entry["action"] = "accept"
+            entry.pop("logtraffic-start", None)
+            entry.pop("capture-packet", None)
             rule_entries.append(entry)
         dropped.current = ""   # drops after the rules loop belong to no rule
         sections["Rules"] = json.dumps(rule_entries)
+        if policy_based:
+            sections["Security Policies"] = json.dumps(security_entries)
 
         # B-3 (Fund K): a synthesised VIP with no matching allow-policy is inert
         # on Forti (no DNAT happens) - surface it so the user wires it manually.
@@ -2597,9 +3302,14 @@ class FortinetDriver(DeployDriver):
                     # (matrix 0.9.4, +9 on every FortiOS leg).
                     dropped.append(DroppedField(
                         rule_id=_c["vip"], field="vip",
-                        reason="no allow-policy matches this dest-NAT, so no "
-                               "translation happens: set a policy dstaddr to "
-                               "the VIP manually",
+                        reason=("no allow-policy matches this dest-NAT: in central "
+                                "NAT mode the VIP translates on its own, but nothing "
+                                "allows the translated traffic (set a policy dstaddr "
+                                "to the mapped address manually)"
+                                if nat_mode == "central" else
+                                "no allow-policy matches this dest-NAT, so no "
+                                "translation happens: set a policy dstaddr to "
+                                "the VIP manually"),
                         fallback="pushed without a matching allow-policy",
                     ))
 
@@ -2648,13 +3358,19 @@ class FortinetDriver(DeployDriver):
         # deleted first; place NAT-objects below Rules so they're pushed
         # before the policies that reference them (VIP-ref in policy.dstaddr,
         # poolname-ref in policy.poolname).
+        # NGFW policy-based mode: the layer 7 security policies (deleted first,
+        # pushed last, after the firewall policies they sit above). Empty in
+        # profile-based mode, so the step never runs there.
+        _PushStep("Security Policies", "/firewall/security-policy", "Security Policies", "policyid", "policy", None),
         _PushStep("Central SNAT",    "/firewall/central-snat-map", "Central SNAT",  "policyid", "policy",  None),
         _PushStep("Rules",           "/firewall/policy",         "Rules",           "policyid", "policy",  None),
         _PushStep("Address Groups",  "/firewall/addrgrp",        "Address Groups",  "name",     "policy",  None),
+        _PushStep("Address Groups v6", "/firewall/addrgrp6",     "Address Groups v6", "name",   "policy",  None),
         _PushStep("Service Groups",  "/firewall.service/group",  "Service Groups",  "name",     "policy",  None),
         _PushStep("VIPs",            "/firewall/vip",            "VIPs",            "name",     "policy",  None),
         _PushStep("IP Pools",        "/firewall/ippool",         "IP Pools",        "name",     "policy",  None),
         _PushStep("Address Objects", "/firewall/address",        "Address Objects", "name",     "policy",  None),
+        _PushStep("Address Objects v6", "/firewall/address6",    "Address Objects v6", "name",  "policy",  None),
         _PushStep("Service Objects", "/firewall.service/custom", "Service Objects", "name",     "policy",  None),
         # Phase 1a: URL Filter tables - Custom URL Categories.
         # Push-bottom-up: pushed nach Service-Objects, vor anything die
@@ -2676,6 +3392,7 @@ class FortinetDriver(DeployDriver):
         _PushStep("Schedules Onetime",   "/firewall.schedule/onetime",   "Schedules Onetime",   "name", "policy", None),
         _PushStep("Zones",           "/system/zone",             "Zones",           "name",     "network", None),
         _PushStep("Static Routes",   "/router/static",           "Static Routes",   "seq-num",  "network", None),
+        _PushStep("Static Routes v6", "/router/static6",         "Static Routes v6", "seq-num", "network", None),
         # PBF (policy-routes) → router/policy, network strand (router-config,
         # not firewall-policy). Audit: Forti PBF push-strand is Network.
         _PushStep("Policy Routes",   "/router/policy",           "Policy Routes",   "seq-num",  "network", None),
@@ -2699,7 +3416,7 @@ class FortinetDriver(DeployDriver):
     _SECTION_LABELS: dict[str, list[tuple[str, str, list[str]]]] = {
         "policy": [
             ("address_objects", "Address Objects",
-                ["Address Objects", "Address Groups"]),
+                ["Address Objects", "Address Groups", "Address Objects v6", "Address Groups v6"]),
             ("services",        "Services",
                 ["Service Objects", "Service Groups"]),
             ("nat_objects",     "NAT Objects (VIPs + IP Pools)",
@@ -2708,6 +3425,7 @@ class FortinetDriver(DeployDriver):
             ("schedules",       "Schedules",
                 ["Schedules Recurring", "Schedules Onetime", "Schedules Group"]),
             ("rules",           "Rules (Security + NAT unified)", ["Rules"]),
+            ("security_policies", "Security Policies (layer 7, policy-based mode)", ["Security Policies"]),
             ("central_snat",    "Central SNAT",    ["Central SNAT"]),
         ],
         # V1: Network atomic.
@@ -2754,9 +3472,23 @@ class FortinetDriver(DeployDriver):
         skip_sections: set[str] | None = None,
         mgmt_override: bool = False,   # per-push opt-in (typed confirm), not persisted
         vpn_certs: dict | None = None,  # VPN identity certs - consumed in CR-3
+        push_options: dict | None = None,   # the push dialog's opt-ins (docs/PUSH_OPTIONS_PLAN.md)
     ) -> Iterator[StepResult]:
+        push_options = push_options or {}
         base = _cmdb_base(device)
-        token = device.get("api_key") or ""
+        # A box reached through FortiGate Cloud whose cloud record says
+        # management is off (no subscription): the cloud would answer
+        # every write with permission_deny, so stop before the wipe step.
+        # A managed device goes ahead through the same transport.
+        _read_only = _f.cloud_read_only(device)
+        if _read_only:
+            yield StepResult(step="transport", success=False, detail=_read_only)
+            return
+        try:
+            token = _f.token_for(device)
+        except RuntimeError as exc:
+            yield StepResult(step="auth", success=False, detail=str(exc))
+            return
         if not token:
             yield StepResult(step="auth", success=False, detail="No API key configured")
             return
@@ -2782,6 +3514,67 @@ class FortinetDriver(DeployDriver):
         # nat=enable → policy; neither → a pin, if set), probe the box and
         # refuse early on drift. Unreadable setting = fail-open like the
         # HA probe.
+        # ── NGFW-mode preflight (policy strand) ──
+        # The config was rendered for one NGFW mode: with a "Security
+        # Policies" section for a policy-based box (two rulebases), without
+        # one for a profile-based box. Pushing the wrong layout is not a
+        # partial result but a broken firewall (a policy-based box with only
+        # firewall policies denies everything at layer 7), so refuse on
+        # drift, like the NAT-mode preflight below. Unreadable = fail-open.
+        if strand == "policy":
+            _has_sec = bool(json.loads(config.get("Security Policies") or "[]"))
+            _live_ngfw = None
+            try:
+                _st = _list(base, token, "/system/settings", vdom, verify)
+                if isinstance(_st, list):
+                    _st = _st[0] if _st else {}
+                if isinstance(_st, dict) and _st.get("ngfw-mode"):
+                    _live_ngfw = str(_st["ngfw-mode"]).lower()
+            except Exception:
+                _live_ngfw = None
+            if _live_ngfw == "policy-based" and not _has_sec:
+                yield StepResult(
+                    step="NGFW-mode preflight", success=False,
+                    detail="the target runs NGFW policy-based mode, but this config was "
+                           "rendered profile-based (no security policies). Generate again "
+                           "with the target's mode read (or pin config.fortigate.ngfw_mode).")
+                return
+            if _live_ngfw == "profile-based" and _has_sec:
+                yield StepResult(
+                    step="NGFW-mode preflight", success=False,
+                    detail="this config carries security policies for NGFW policy-based mode, "
+                           "but the target runs profile-based mode. Generate again with the "
+                           "target's mode read (or pin config.fortigate.ngfw_mode).")
+                return
+
+        # ── Port-address preflight (network strand) ──
+        # A physical port this push does not address keeps its address, and
+        # FortiOS refuses a subnet that overlaps it (-54) halfway through the
+        # Interfaces step. Refuse up front and name the pair, unless the push
+        # option says to clear those ports first (docs/PUSH_OPTIONS_PLAN.md,
+        # D2 and D3). Unreadable interfaces = fail-open, the step itself tells.
+        if strand == "network" and not push_options.get("reset_untouched_ports"):
+            try:
+                _live_ifs = _list(base, token, "/system/interface", vdom, verify)
+            except Exception:
+                _live_ifs = []
+            _rendered_ifs = json.loads(config.get("Interfaces") or "[]")
+            _live_rows = [{"name": e.get("name"), "type": (e.get("type") or "physical"),
+                           "ip_addresses": [e.get("ip")] if e.get("ip") else []}
+                          for e in (_live_ifs or [])]
+            _hits = _f.port_subnet_overlaps(_rendered_ifs, _live_rows, {mgmt_iface})
+            if _hits:
+                _pairs = "; ".join(f"{h['port']} gets {h['subnet']}, which {h['holder']} still "
+                                   f"carries ({h['holder_subnet']})" for h in _hits[:4])
+                yield StepResult(
+                    step="Port-address preflight", success=False,
+                    detail=f"{len(_hits)} port(s) outside this push still carry a subnet it "
+                           f"assigns: {_pairs}. FortiOS would refuse the overlap (-54). Set "
+                           "\"Reset the data ports this push does not address\" in the push "
+                           "dialog to clear them first, or map the source interface onto "
+                           "that port.")
+                return
+
         if strand == "policy":
             _rendered = None
             try:
@@ -2992,6 +3785,7 @@ class FortinetDriver(DeployDriver):
                         target_aggregate_members[name] = members
 
             to_delete: list = []
+            kept_stock = 0
             for e in existing:
                 rid = e.get(s.id_field)
                 if rid is None or rid == "":
@@ -3001,6 +3795,13 @@ class FortinetDriver(DeployDriver):
                     if etype not in s.deletable_types:
                         continue
                 if s.label == "Interfaces" and str(rid) in protected_ifaces:
+                    continue
+                # The vendor's own catalog (ALL, HTTPS, login.microsoft.com,
+                # always, ...) is not the customer's policy: FortiOS protects
+                # only a few of these entries itself, the rest would go once
+                # no policy holds them. Keep them (backlog 9, 2026-10-11).
+                if _f.is_stock_entry(s.cmdb_path, rid, e):
+                    kept_stock += 1
                     continue
                 to_delete.append(rid)
 
@@ -3044,8 +3845,13 @@ class FortinetDriver(DeployDriver):
                             except Exception:
                                 pass
                         continue
+                    hint_del = error_hint(_FORTI_ERROR_HINTS, {
+                        "phase": "delete", "step": s.label,
+                        "errcode": exc.errcode, "status_code": exc.status_code,
+                        "entry_id": rid, "cli_error": exc.message,
+                    })
                     yield StepResult(step=step_name, success=False,
-                                     detail=f"DELETE {rid}: {exc}")
+                                     detail=f"DELETE {rid}: {exc}{hint_del}")
                     return
                 except Exception as exc:
                     yield StepResult(step=step_name, success=False,
@@ -3090,6 +3896,8 @@ class FortinetDriver(DeployDriver):
                         break
 
             detail = f"deleted {len(to_delete) - soft_failed}/{len(to_delete)}"
+            if kept_stock:
+                detail += f", kept {kept_stock} vendor-shipped"
             if derivative_cleared:
                 detail += f" (cleared {derivative_cleared} coupled addr)"
             if recovered_sweep:
@@ -3143,9 +3951,13 @@ class FortinetDriver(DeployDriver):
                     except Exception:
                         pass
                     _import_local_cert(device, token, vdom, verify, name, cpem, kpem)
-                    yield StepResult(step=f"Import VPN cert {name}", success=True)
+                    # "Push ..." like every other writing step (the naming
+                    # convention is platform-wide since 2026-10-12); FortiOS
+                    # has no rollback to arm, the name just stops saying that
+                    # this step writes nothing.
+                    yield StepResult(step=f"Push VPN cert {name}", success=True)
                 except Exception as e:
-                    yield StepResult(step=f"Import VPN cert {name}", success=False,
+                    yield StepResult(step=f"Push VPN cert {name}", success=False,
                                      detail=str(e))
                     return
 
@@ -3217,7 +4029,11 @@ class FortinetDriver(DeployDriver):
         for s in reversed(active):
             step_name = f"Push {s.label}"
             entries = self._section_entries(config, s.section_key)
-            if s.label == "Rules" and _known_identities is not None:
+            # In policy-based mode the UTM profile and identity refs live on
+            # the security policies: the same pruning applies there (the
+            # first policy-mode push stopped at a group the box did not
+            # have, 2026-10-11).
+            if s.label in ("Rules", "Security Policies") and _known_identities is not None:
                 _fixed = []
                 for e in entries:
                     for _pf, _known in _known_profiles.items():
@@ -3241,6 +4057,47 @@ class FortinetDriver(DeployDriver):
                                 k: v for k, v in e.items() if k != _idf}
                     _fixed.append(e)
                 entries = _fixed
+            # A zone may only name interfaces the box HAS. FortiOS answers a
+            # zone carrying an unknown member with errcode -3 ("entry not
+            # found in datasource", "value parse error before '<name>'") and
+            # refuses the whole zone, which stops the network push and every
+            # rule that names the zone. The renderer drops what it can see
+            # (a tunnel the VPN does not create, a member without a source
+            # row), but what the build believes and what the box has can
+            # differ, so the push asks the box itself (0.9.4 matrix,
+            # 2026-10-19, asa2fgt: zone gs-vpn with the member Tunnel1).
+            if s.label == "Zones":
+                try:
+                    _live_ifn = {str(x.get("name")) for x in
+                                 _list(base, token, "/system/interface", vdom, verify)}
+                    _live_ifn.discard("")
+                except Exception:
+                    _live_ifn = set()
+                if _live_ifn:
+                    _zone_pruned: list[str] = []
+                    _fixed_z = []
+                    for e in entries:
+                        mem = e.get("interface")
+                        if not isinstance(mem, list):
+                            _fixed_z.append(e)
+                            continue
+                        keep = [m for m in mem if str(m.get("interface-name") or "") in _live_ifn]
+                        if len(keep) != len(mem):
+                            _zone_pruned.extend(
+                                f"{e.get('name')}:{m.get('interface-name')}"
+                                for m in mem if m not in keep)
+                            e = {**e, "interface": keep} if keep else {
+                                k: v for k, v in e.items() if k != "interface"}
+                        _fixed_z.append(e)
+                    entries = _fixed_z
+                    if _zone_pruned:
+                        yield StepResult(
+                            step="Zones: members not on the target", success=True,
+                            detail=("pushed without " + ", ".join(_zone_pruned[:12])
+                                    + (f" and {len(_zone_pruned) - 12} more" if len(_zone_pruned) > 12 else "")
+                                    + ": the firewall has no interface of that name, and it "
+                                      "refuses a zone that names one. Create the interface or "
+                                      "take the member out of the zone, then push again."))
             if s.label == "Service Objects" and _svc_proto_enum:
                 entries = [
                     {**e, "protocol": _svc_proto_enum}
@@ -3248,6 +4105,48 @@ class FortinetDriver(DeployDriver):
                     else e
                     for e in entries
                 ]
+            if s.label == "Interfaces" and strand == "network":
+                # Physical ports keep their addresses until a PUT replaces
+                # them, and FortiOS checks every address against the box's
+                # current state (-54 "Subnets overlap"). Two-phase apply:
+                # clear every port this push rewrites first, so the order of
+                # the PUTs cannot collide; and, with the push option set,
+                # clear the data ports the configuration does not address
+                # (the operator's decision, docs/PUSH_OPTIONS_PLAN.md D1, D3).
+                # Protected ports (management, HA) stay untouched either way.
+                _rewrite = [str(e.get("name")) for e in entries
+                            if not e.get("type") and e.get("name")
+                            and str(e.get("name")) not in protected_ifaces]
+                _untouched: list[str] = []
+                if push_options.get("reset_untouched_ports"):
+                    # exactly the ports the dialog named: the data ports
+                    # outside this push whose subnet overlaps one it assigns
+                    # (not every port the push leaves alone)
+                    try:
+                        _live = _list(base, token, s.cmdb_path, vdom, verify)
+                    except Exception:
+                        _live = []
+                    _live_rows = [{"name": e.get("name"), "type": (e.get("type") or "physical"),
+                                   "ip_addresses": [e.get("ip")] if e.get("ip") else []}
+                                  for e in (_live or [])]
+                    _untouched = sorted({h["holder"] for h in _f.port_subnet_overlaps(
+                        entries, _live_rows, set(protected_ifaces) | {mgmt_iface})})
+                _cleared, _clear_failed = 0, []
+                for _pn in _rewrite + _untouched:
+                    try:
+                        _put(base, token, _id_path(s, _pn), vdom,
+                             {"mode": "static", "ip": "0.0.0.0 0.0.0.0"}, verify)
+                        _cleared += 1
+                    except Exception as exc:
+                        _clear_failed.append(f"{_pn}: {str(exc)[:80]}")
+                _rdetail = (f"cleared {_cleared} port address(es) before the apply"
+                            + (f" ({len(_rewrite)} rewritten by this push"
+                               + (f", {len(_untouched)} outside it: " + ", ".join(_untouched)
+                                  if _untouched else "") + ")"))
+                if _clear_failed:
+                    _rdetail += ". Not cleared: " + "; ".join(_clear_failed[:3])
+                yield StepResult(step="Reset Port Addresses", success=not _clear_failed,
+                                 detail=_rdetail)
             pushed = 0
             skipped = 0
             # Bucket skipped entry-IDs by cause so the step-detail surfaces
@@ -3376,7 +4275,7 @@ class FortinetDriver(DeployDriver):
                         f"not-on-target / read-only: {head}{more}"
                     )
                 detail += f" ({skipped} skipped - " + "; ".join(parts) + ")"
-            if s.label == "Rules" and _prof_pruned:
+            if s.label in ("Rules", "Security Policies") and _prof_pruned:
                 _up = sorted(set(_prof_pruned))
                 detail += (". Security-profile ref(s) not present on target, "
                            f"pruned: {', '.join(_up[:4])}"
@@ -3384,7 +4283,7 @@ class FortinetDriver(DeployDriver):
                            + ". Profiles are attach-only (never migrated). "
                              "Create them on the target and re-push to restore "
                              "the inspection")
-            if s.label == "Rules" and _iden_pruned:
+            if s.label in ("Rules", "Security Policies") and _iden_pruned:
                 _uniq = sorted(set(_iden_pruned))
                 _head = ", ".join(_uniq[:4])
                 _more = f" (+{len(_uniq)-4} more)" if len(_uniq) > 4 else ""
@@ -3440,7 +4339,7 @@ class FortinetDriver(DeployDriver):
     # ── Target discovery (Discover-as-Verarbeitung) ──────────────
 
     def list_target_interfaces(self, *, device: dict) -> list[dict]:
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         base_url = _f.base_url_for(device)
         vdom = _f.vdom_for(device)
         zone_payload = _f.api_get(base_url, token, "/api/v2/cmdb/system/zone", vdom)
@@ -3482,7 +4381,7 @@ class FortinetDriver(DeployDriver):
         string. Predefined / vendor-shipped objects are not filtered -
         the UI shows them as choices for cross-vendor mapping.
         """
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         base_url = _f.base_url_for(device)
         vdom = _f.vdom_for(device)
         try:
@@ -3517,7 +4416,7 @@ class FortinetDriver(DeployDriver):
         desired. Returns ``[{"name", "proto", "port"}]`` for the V1
         tcp/udp case; other protocols emit proto=None.
         """
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         base_url = _f.base_url_for(device)
         vdom = _f.vdom_for(device)
         try:
@@ -3544,7 +4443,7 @@ class FortinetDriver(DeployDriver):
 
         Returns [{"name", "interfaces", "properties": {forti_*}}].
         """
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         base_url = _f.base_url_for(device)
         vdom = _f.vdom_for(device)
         payload = _f.api_get(base_url, token, "/api/v2/cmdb/system/zone", vdom)
@@ -3569,7 +4468,7 @@ class FortinetDriver(DeployDriver):
         return out
 
     def list_target_routes(self, *, device: dict) -> list[dict]:
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         base_url = _f.base_url_for(device)
         vdom = _f.vdom_for(device)
         iface_payload = _f.api_get(base_url, token, "/api/v2/cmdb/system/interface", vdom)
@@ -3580,15 +4479,25 @@ class FortinetDriver(DeployDriver):
         _ivrf = {i["name"]: int(i["vr_name"][4:]) if str(i.get("vr_name") or "").startswith("vrf-") else 0
                  for i in ifaces}
         parsed = _f.parse_routes(route_payload, iface_names, _ivrf)
+        # the IPv6 statics live in router/static6 (docs/IPV6_PLAN.md, phase 3)
+        try:
+            route6_payload = _f.api_get(base_url, token, "/api/v2/cmdb/router/static6", vdom)
+        except Exception as exc:
+            print(f"[fortinet] router/static6 not read: {exc}", flush=True)
+            route6_payload = {"results": []}
+        parsed += _f.parse_routes6(route6_payload, iface_names, _ivrf)
         out: list[dict] = []
         for r in parsed:
-            out.append({
+            row = {
                 "prefix":         f"{r['prefix']}/{r['plen']}",
                 "interface_name": r.get("iface"),
                 "next_hop":       r.get("next_hop"),
                 "vr_name":        r.get("vr") or "default",
                 "is_connected":   False,  # Forti static routes are never connected
-            })
+            }
+            if r.get("route_type"):
+                row["route_type"] = r["route_type"]
+            out.append(row)
         return out
 
     def list_utm_profiles(self, *, device: dict) -> dict[str, list[dict]]:
@@ -3603,7 +4512,7 @@ class FortinetDriver(DeployDriver):
 
         Read-only; Gateshift does not manage UTM profile objects.
         """
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         if not token:
             raise RuntimeError("No API key configured for target")
         base_url = _f.base_url_for(device)
@@ -3641,10 +4550,75 @@ class FortinetDriver(DeployDriver):
             catalog[slot] = items
         return catalog
 
+    def list_applications(self, *, device: dict) -> dict[str, list[dict]]:
+        """The FortiGate's application catalog for per-policy applications
+        in NGFW policy-based mode (docs/FGT_POLICY_MODE_PLAN.md): the
+        FortiGuard signatures (`application/name`, about 2400 on 7.6 with id,
+        name, category id, technology, risk, vendor), the customer's custom
+        applications (`application/custom`) and application groups
+        (`application/group`). Same buckets as the PAN-OS catalog so the
+        Applications pane and the enrichment reuse one renderer; FortiGuard
+        signatures carry no default ports, so the port-based auto-assign has
+        nothing to work with here (name matching does). Each predefined entry
+        keeps its numeric `id`, the policy field in policy-based mode."""
+        token = _f.token_for(device)
+        if not token:
+            raise RuntimeError("No API key configured for target")
+        base_url = _f.base_url_for(device)
+        vdom = _f.vdom_for(device)
+        out: dict[str, list[dict]] = {"application": [], "application-group": [],
+                                      "application-filter": [], "application-predefined": []}
+        try:
+            # FortiOS pages at 2000 by default: ask for the whole table (the
+            # 7.6 catalog is about 2400, a generous cap keeps it one call)
+            payload = _f.api_get(base_url, token,
+                                 "/api/v2/cmdb/application/name?format=id|name|category|technology|risk|vendor&count=20000",
+                                 vdom)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            raise RuntimeError(f"could not reach target: {exc}") from exc
+        predef: list[dict] = []
+        for e in (payload.get("results") or []):
+            name = e.get("name") or ""
+            if not name:
+                continue
+            predef.append({"name": name, "predefined": True, "default_ports": [],
+                           "id": e.get("id"), "category": e.get("category"),
+                           "technology": e.get("technology") or "", "risk": e.get("risk"),
+                           "vendor": e.get("vendor") or ""})
+        predef.sort(key=lambda d: d["name"].lower())
+        out["application-predefined"] = predef
+        for bucket, path in (("application", "/api/v2/cmdb/application/custom"),
+                             ("application-group", "/api/v2/cmdb/application/group")):
+            try:
+                payload = _f.api_get(base_url, token, path, vdom)
+            except Exception:
+                continue          # blade or table unavailable: the bucket stays empty
+            items: list[dict] = []
+            for e in (payload.get("results") or []):
+                name = e.get("name") or ""
+                if not name:
+                    continue
+                item: dict = {"name": name, "predefined": False, "default_ports": []}
+                if bucket == "application":
+                    item["id"] = e.get("id")
+                    item["category"] = e.get("category")
+                else:
+                    item["members"] = [m.get("name") or m.get("id") for m in (e.get("application") or [])
+                                       if isinstance(m, dict)]
+                items.append(item)
+            items.sort(key=lambda d: d["name"].lower())
+            out[bucket] = items
+        return out
+
+    def canonical_port_apps(self) -> dict[tuple[str, int], list[str]]:
+        # FortiGuard signatures are detected, not port-bound: no curated
+        # port map, the name match is the auto-assign (plan D3).
+        return {}
+
     def list_target_vrfs(self, *, device: dict) -> list[dict]:
         """Forti VRF is an iface-property (0..31). Aggregate distinct
         non-zero VRFs from interfaces; 'default' (vrf=0) is implicit."""
-        token = device.get("api_key") or ""
+        token = _f.token_for(device)
         base_url = _f.base_url_for(device)
         vdom = _f.vdom_for(device)
         iface_payload = _f.api_get(base_url, token, "/api/v2/cmdb/system/interface", vdom)

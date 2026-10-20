@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS fw_rules_endpoint_pairs (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor       VARCHAR(64) NULL,
-  device_host  VARCHAR(255) NULL,
+  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  device_id  INT NULL,
   action       ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction    ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
   dst_ip       VARCHAR(128) NULL,         -- single destination (from accumulated)
@@ -25,9 +26,11 @@ CREATE TABLE IF NOT EXISTS fw_rules_endpoint_pairs (
   first_seen   DATETIME NULL,
   last_seen    DATETIME NULL,
   source_type  VARCHAR(16) NOT NULL DEFAULT 'syslog',
+  KEY idx_device_id (device_id),
   PRIMARY KEY (id),
   KEY idx_generated (generated_at),
-  KEY idx_ep_group (generated_at, vendor(32), device_host(64), action, direction, dst_ip(64))
+  KEY idx_ep_group (generated_at, vendor(32), device_id, action, direction, dst_ip(64)),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fw_rules_endpoint_pairs_sources (

@@ -146,6 +146,10 @@
               {{ ws_leaf('main-btn-interfaces', "wsNav('network', null, 'interfaces')", 'Interfaces', 3, _oc.get('interfaces')) }}
               {{ ws_leaf('main-btn-routing', "wsNav('network', null, 'routing')", 'Routing', 3, _oc.get('routes')) }}
               {{ ws_leaf('main-btn-policy-routing', "wsNav('network', null, 'policy-routing')", 'Policy Routing', 3, _oc.get('pbf'), tooltip='Policy-Based Forwarding (PA: PBF, Fortinet: Policy Routes)') }}
+              {# VPN tunnels are network configuration, not fields on existing
+                 rules (CE backlog 6, 2026-10-12). Target-gated like the
+                 Decryption leaf under Rules. #}
+              {% if not _right_locked and _tp in ('panw', 'fortigate', 'checkpoint') %}{{ ws_leaf('main-btn-vpn', "wsNav('network', null, 'vpn')", 'VPN', 3, _oc.get('vpn')) }}{% endif %}
             </ul>
           </li>
           <li class="l2 grp">
@@ -153,6 +157,13 @@
             <ul>
               {{ ws_leaf('main-btn-security', "wsNav('ruleset', null, 'security')", 'Firewall', 3, _oc.get('rules'), ruleset_locked) }}
               {{ ws_leaf('main-btn-nat', "wsNav('ruleset', null, 'nat')", 'NAT', 3, _oc.get('nat')) }}
+              {# Decryption and Threat Prevention are rulesets of their own, so
+                 they belong here and not under Target Settings (CE backlog 6,
+                 2026-10-12). They need a target like the Target Settings
+                 branch does: the platform condition carries that gate, and
+                 _right_locked keeps them away while no target is usable. #}
+              {% if not _right_locked and _tp in ('panw', 'checkpoint') %}{{ ws_leaf('main-btn-decryption', "wsNav('ruleset', null, 'decryption')", 'Decryption', 3, _oc.get('ssl')) }}{% endif %}
+              {% if not _right_locked and _tp == 'checkpoint' %}{{ ws_leaf('main-btn-tp', "wsNav('ruleset', null, 'tp')", 'Threat Prevention', 3, _oc.get('tp')) }}{% endif %}
             </ul>
           </li>
           <li class="l2 grp">
@@ -180,7 +191,9 @@
                 <ul>
                   {% if target_zone_native %}{{ ws_leaf('main-btn-zones-enrichment', "wsNav('enrichment', 'access', 'zones-enrichment')", ('Zone/Interface Mapping' if _tp == 'fortigate' else 'Zone Mapping'), 4) }}{% endif %}
                   {% if _tp == 'panw' %}{{ ws_leaf('main-btn-security-profiles', "wsNav('enrichment', 'access', 'security-profiles')", 'Security Profiles', 4) }}{% endif %}
-                  {% if _tp in ('panw', 'checkpoint') %}{{ ws_leaf('main-btn-applications', "wsNav('enrichment', 'access', 'applications')", 'Applications', 4) }}{% endif %}
+                  {# a FortiGate matches applications per policy only in NGFW policy-based
+                     mode (docs/FGT_POLICY_MODE_PLAN.md): the leaf follows the target's mode #}
+                  {% if _tp in ('panw', 'checkpoint') or (_tp == 'fortigate' and selected_target and selected_target.get('ngfw_mode') == 'policy-based') %}{{ ws_leaf('main-btn-applications', "wsNav('enrichment', 'access', 'applications')", 'Applications', 4) }}{% endif %}
                   {% if _tp == 'fortigate' %}{{ ws_leaf('main-btn-utm-profiles', "wsNav('enrichment', 'access', 'utm-profiles')", 'UTM Profiles', 4) }}{% endif %}
                   {{ ws_leaf('main-btn-logging', "wsNav('enrichment', 'access', 'logging')", 'Logging', 4) }}
                   {{ ws_leaf('main-btn-schedule-enrichment', "wsNav('enrichment', 'access', 'schedule-enrichment')", 'Schedule', 4) }}
@@ -194,9 +207,8 @@
                  under Network > Policy Routing, their target fields here - the pair
                  reads like Firewall and NAT. 'PBF' stays in the tooltip. #}
               {% if _tp == 'panw' %}{{ ws_leaf('enr-rb-btn-routing', "wsNav('enrichment', 'routing')", 'Policy Routing', 3, tooltip='Policy-Based Forwarding (PA): vendor L7-match fields for the policy routing rules') }}{% endif %}
-              {% if _tp == 'checkpoint' %}{{ ws_leaf('enr-rb-btn-tp', "wsNav('enrichment', 'tp')", 'Threat Prevention', 3) }}{% endif %}
-              {% if _tp in ('panw', 'checkpoint') %}{{ ws_leaf('enr-rb-btn-decryption', "wsNav('enrichment', 'decryption')", 'Decryption', 3) }}{% endif %}
-              {% if _tp in ('panw', 'fortigate', 'checkpoint') %}{{ ws_leaf('enr-rb-btn-vpn', "wsNav('enrichment', 'vpn')", 'VPN', 3) }}{% endif %}
+              {# Threat Prevention, Decryption and VPN moved out of this branch
+                 on 2026-10-12: they are under Rules and Network now. #}
               {% if _show_organization %}
               <li class="l3 grp">
                 {{ ws_group_head('enr-rb-btn-organization', "wsNav('enrichment', 'organization')", 'Organization', 3) }}

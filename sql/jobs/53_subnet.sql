@@ -27,7 +27,7 @@ TRUNCATE TABLE fw_rules_subnet_destinations;
 -- 1. Copy rules from accumulated (preserving dst-centric structure + src_rule_id)
 -- ============================================================
 INSERT INTO fw_rules_subnet (
-  generated_at, vendor, device_host, action, direction,
+  generated_at, vendor, device_id, action, direction,
   proto, dst_port,
   application, rule_name, security_profile, security_profile_group,
   hit_count, first_seen, last_seen,
@@ -36,7 +36,7 @@ INSERT INTO fw_rules_subnet (
   seq_num, schedule
 )
 SELECT
-  @run_ts, vendor, device_host, action, direction,
+  @run_ts, vendor, device_id, action, direction,
   proto, dst_port,
   application, rule_name, security_profile, security_profile_group,
   hit_count, first_seen, last_seen,
@@ -50,7 +50,7 @@ WHERE generated_at = @run_ts
 -- Fallback: consolidated_1 (when accumulate module is disabled)
 -- Groups dst-centrically to match the expected structure
 INSERT INTO fw_rules_subnet (
-  generated_at, vendor, device_host, action, direction,
+  generated_at, vendor, device_id, action, direction,
   proto, dst_port,
   application, rule_name, security_profile, security_profile_group,
   hit_count, first_seen, last_seen,
@@ -59,7 +59,7 @@ INSERT INTO fw_rules_subnet (
   seq_num, schedule
 )
 SELECT
-  @run_ts, vendor, device_host, action, direction,
+  @run_ts, vendor, device_id, action, direction,
   proto, dst_port,
   MIN(application), MIN(rule_name), MIN(security_profile), MIN(security_profile_group),
   SUM(hit_count), MIN(first_seen), MAX(last_seen),
@@ -75,7 +75,7 @@ SELECT
 FROM fw_rules_consolidated_1
 WHERE generated_at = @run_ts
   AND NOT EXISTS (SELECT 1 FROM fw_rules_accumulated WHERE generated_at = @run_ts LIMIT 1)
-GROUP BY vendor, device_host, action, direction, proto, dst_port,
+GROUP BY vendor, device_id, action, direction, proto, dst_port,
   CASE WHEN source_type = 'api_import' THEN rule_name ELSE NULL END,
   -- Negate-split per project_rule_negation_plan conflict-policy
   negate_source, negate_destination, negate_service;
@@ -102,7 +102,7 @@ FROM fw_rules_subnet r
 JOIN fw_rules_consolidated_1 c
   ON  c.generated_at  = @run_ts
   AND c.vendor        <=> r.vendor
-  AND c.device_host   <=> r.device_host
+  AND c.device_id     <=> r.device_id
   AND c.action         =  r.action
   AND c.direction      =  r.direction
   AND c.proto         <=> r.proto
@@ -132,7 +132,7 @@ FROM fw_rules_subnet r
 JOIN fw_rules_consolidated_1 c
   ON  c.generated_at  = @run_ts
   AND c.vendor        <=> r.vendor
-  AND c.device_host   <=> r.device_host
+  AND c.device_id     <=> r.device_id
   AND c.action         =  r.action
   AND c.direction      =  r.direction
   AND c.proto         <=> r.proto
@@ -155,13 +155,7 @@ SELECT
   CASE WHEN is_private THEN CONCAT(SUBSTRING_INDEX(src_ip, '.', 1), '.0.0.0/8') ELSE NULL END AS prefix_8
 FROM (
   SELECT rule_id, src_ip, src_zone, iface_in, hit_count,
-    INET_ATON(src_ip) IS NOT NULL AND (
-      INET_ATON(src_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-   OR INET_ATON(src_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-   OR INET_ATON(src_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-   OR INET_ATON(src_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-   OR INET_ATON(src_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-    ) AS is_private
+    INET_ATON(src_ip) IS NOT NULL AND gs_ip_is_private(INET6_ATON(src_ip)) AS is_private
   FROM tmp_src_pool
 ) base;
 
@@ -181,13 +175,7 @@ SELECT
 FROM (
   SELECT rule_id, dst_ip, dst_zone, dst_nat, hit_count,
     dst_ip IS NOT NULL AND dst_ip != 'internet_public'
-    AND INET_ATON(dst_ip) IS NOT NULL AND (
-      INET_ATON(dst_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-   OR INET_ATON(dst_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-   OR INET_ATON(dst_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-   OR INET_ATON(dst_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-   OR INET_ATON(dst_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-    ) AS is_private
+    AND INET_ATON(dst_ip) IS NOT NULL AND gs_ip_is_private(INET6_ATON(dst_ip)) AS is_private
   FROM tmp_dst_pool
 ) base;
 

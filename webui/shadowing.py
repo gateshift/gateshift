@@ -44,6 +44,11 @@ import re
 from sqlalchemy import text
 
 _INT_MAX = 0xFFFFFFFF
+# both families on one integer axis (docs/IPV6_PLAN.md, phase 4): IPv4 as is,
+# IPv6 offset past it; the whole of each family as a range
+_V6_OFFSET = 1 << 32
+_FULL4 = (0, _INT_MAX)
+_FULL6 = (_V6_OFFSET, _V6_OFFSET + (1 << 128) - 1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,8 +109,8 @@ class _AddrResolver:
         self.objects: dict[str, str] = {}
         self.groups: dict[str, list[str]] = {}
         try:
-            for name, value, obj_type in conn.execute(text(
-                    "SELECT name, value, obj_type FROM fw_address_objects "
+            for name, value, value6, obj_type in conn.execute(text(
+                    "SELECT name, value, value6, obj_type FROM fw_address_objects "
                     "WHERE device_id = :d"), {"d": device_id}):
                 if name and value:
                     # fqdn/dynamic object types are not comparable sets
@@ -113,7 +118,8 @@ class _AddrResolver:
                                                     "wildcard"):
                         self.objects[name] = "__unresolved__"
                     else:
-                        self.objects[name] = value
+                        # a dual-stack object carries both halves (docs/IPV6_PLAN.md, D1)
+                        self.objects[name] = f"{value}|{value6}" if value6 else value
         except Exception:
             pass
         try:
@@ -133,17 +139,31 @@ class _AddrResolver:
 
     @staticmethod
     def _literal(entry: str):
+        """A literal as integer ranges. Both families live on one axis: IPv4
+        as is, IPv6 offset by 2^32 (docs/IPV6_PLAN.md, phase 4), so a range
+        of one family never contains one of the other and the subset test
+        stays a range test. A dual-stack value ('v4|v6') is both."""
         entry = entry.strip()
-        m = re.fullmatch(r"(\d{1,3}(?:\.\d{1,3}){3})\s*-\s*(\d{1,3}(?:\.\d{1,3}){3})", entry)
+        if "|" in entry:
+            out: list = []
+            for part in entry.split("|"):
+                sub = _AddrResolver._literal(part)
+                if sub is None:
+                    return None
+                out.extend(sub)
+            return out
         try:
-            if m:
-                lo = int(ipaddress.IPv4Address(m.group(1)))
-                hi = int(ipaddress.IPv4Address(m.group(2)))
+            if "-" in entry and "/" not in entry:
+                a, _, b = entry.partition("-")
+                lo_a, hi_a = ipaddress.ip_address(a.strip()), ipaddress.ip_address(b.strip())
+                if lo_a.version != hi_a.version:
+                    return None
+                off = _V6_OFFSET if lo_a.version == 6 else 0
+                lo, hi = int(lo_a) + off, int(hi_a) + off
                 return [(min(lo, hi), max(lo, hi))]
             net = ipaddress.ip_network(entry, strict=False)
-            if net.version != 4:
-                return None
-            return [(int(net.network_address), int(net.broadcast_address))]
+            off = _V6_OFFSET if net.version == 6 else 0
+            return [(int(net.network_address) + off, int(net.broadcast_address) + off)]
         except ValueError:
             return None
 
@@ -151,6 +171,10 @@ class _AddrResolver:
         """One entry → list[(lo,hi)] | UNIVERSAL | None (unresolved)."""
         if not entry or entry.lower() in ("any", "all"):
             return UNIVERSAL
+        if entry == "any4":               # the D5 tokens: one family's whole range
+            return [_FULL4]
+        if entry == "any6":
+            return [_FULL6]
         if entry in _seen:            # group cycle - refuse
             return None
         cached = self._cache.get(entry)
@@ -183,7 +207,8 @@ class _AddrResolver:
             else:
                 result = self._literal(val)
         if result is not None and result is not UNIVERSAL:
-            if any(lo == 0 and hi == _INT_MAX for lo, hi in result):
+            # both families whole is universal; one family's whole range stays a range
+            if _FULL4 in result and _FULL6 in result:
                 result = UNIVERSAL
         self._cache[entry] = result
         return result
@@ -219,6 +244,31 @@ class _SvcResolver:
                     "WHERE device_id = :d"), {"d": device_id}):
                 if name:
                     self.objects[name] = ((proto or "").lower(), str(port or ""))
+        except Exception:
+            pass
+        # fw_service_objects is UNIQUE on (device_id, proto, port), so an
+        # imported service whose tuple a vendor default already holds never
+        # lands there under its own name - measured 2026-10-20 on a FortiGate
+        # source: factory IMAPS holds tcp/993, `gs-svc-imaps` is absent, and
+        # every rule using it lost its service dimension, which cost the
+        # analysis both its verdict and its right to shadow. The imported
+        # object carries the name, so read single services from there as well
+        # (groups already come from here). The table keeps precedence for the
+        # names it does have, so nothing that resolves today changes.
+        try:
+            for name, value in conn.execute(text(
+                    "SELECT name, value FROM fw_imported_objects "
+                    "WHERE device_id = :d AND obj_type = 'service'"),
+                    {"d": device_id}):
+                if not name or name in self.objects:
+                    continue
+                try:
+                    val = json.loads(value) or {}
+                except Exception:
+                    continue
+                proto, port = val.get("protocol"), val.get("port")
+                if proto and port not in (None, ""):
+                    self.objects[name] = (str(proto).lower(), str(port))
         except Exception:
             pass
         try:
@@ -372,7 +422,11 @@ def analyze(conn, device_id: int, rules: list[dict],
         {"shadowed": {rhash: {"kind": "duplicate"|"shadowed",
                               "by": rule_name, "by_hash": rhash}},
          "shadowers": {rhash: n},
-         "skipped": n_not_comparable}
+         "skipped": n_without_a_verdict}
+
+    ``skipped`` counts the ACTIVE rules the analysis has no opinion on
+    (negation, or an address or service that does not resolve) - the number
+    the UI shows so that silence is not read as "reachable".
     """
     addr = _AddrResolver(conn, device_id)
     svc = _SvcResolver(conn, device_id)
@@ -403,12 +457,14 @@ def analyze(conn, device_id: int, rules: list[dict],
     candidates: list[dict] = []
     for e in prepared:
         # Can this rule BE shadowed? (own narrowing extras are fine)
-        comparable_b = (not e["disabled"] and not e["negated"]
-                        and e["src"][0] != UNRESOLVED
-                        and e["dst"][0] != UNRESOLVED)
-        if not comparable_b:
-            skipped += 1
-        elif e["rhash"]:
+        # A dimension that does not resolve is NOT a disqualification: the
+        # conservatism contract above lets a UNIVERSAL covering side cover it,
+        # and _dim_covers/_svc_covers are the only place that decides. Until
+        # 2026-10-20 this gate rejected such a rule before any candidate was
+        # consulted, so the documented exception was unreachable - an any/any
+        # accept on top left every rule with an FQDN destination unreported.
+        comparable_b = not e["disabled"] and not e["negated"]
+        if comparable_b and e["rhash"]:
             for a in candidates:
                 if not (_dim_covers(a["src"], e["src"])
                         and _dim_covers(a["dst"], e["dst"])
@@ -433,6 +489,15 @@ def analyze(conn, device_id: int, rules: list[dict],
                 }
                 shadowers[a["rhash"]] = shadowers.get(a["rhash"], 0) + 1
                 break
+        # No verdict: an ACTIVE rule the analysis had nothing to say about, so
+        # that silence is never mistaken for a clean bill (the count reaches
+        # the Shadowed filter and the generate's note). A disabled rule is out
+        # by the operator's own choice and does not count here; a negated one
+        # or one whose address or service does not resolve does.
+        if (not e["disabled"] and e["rhash"] not in shadowed
+                and (e["negated"] or e["src"][0] == UNRESOLVED
+                     or e["dst"][0] == UNRESOLVED or e["svc"][0] == UNRESOLVED)):
+            skipped += 1
         # Can this rule SHADOW later ones? (must be always-active superset)
         if (not e["disabled"] and not e["negated"] and not e["apps"]
                 and not e["schedule"] and not e["idents"]
@@ -442,6 +507,40 @@ def analyze(conn, device_id: int, rules: list[dict],
             candidates.append(e)
 
     return {"shadowed": shadowed, "shadowers": shadowers, "skipped": skipped}
+
+
+def _app_default_entries(rule: dict, names: list) -> list | None:
+    """``application-default`` as literal (proto,port) entries, or None.
+
+    It names no service object: it means "the default ports of this rule's
+    applications", and the deploy loader resolves it through
+    ``deploy.app_defaults`` before rendering (synthesising app-<proto>-<port>
+    objects). The analysis has to read it the same way or it has no opinion on
+    such a rule at all - measured 2026-10-20 on a package where 436 of 722
+    rules came from application-default, which left the whole filter mute.
+
+    An application the table does not know, or one whose default is not a
+    tcp/udp port, returns None: the rule's real match space is then wider
+    than anything we can name, and guessing it is how a false positive is
+    born. The literal ``tcp/443`` form goes straight through the resolver's
+    own spec pattern, so nothing new has to understand it.
+    """
+    apps = rule.get("import_applications")
+    if isinstance(apps, str):
+        try:
+            apps = json.loads(apps)
+        except Exception:
+            apps = None
+    try:
+        from deploy.app_defaults import resolve_app_default
+        specs, unresolved = resolve_app_default([a for a in (apps or []) if a])
+    except Exception:
+        return None
+    if unresolved or not specs:
+        return None
+    out = [n for n in names if str(n).strip().lower() != "application-default"]
+    out.extend(f"{proto}/{port}" for proto, port in specs)
+    return out
 
 
 def _svc_side_for_rule(rule: dict, svc: "_SvcResolver"):
@@ -459,7 +558,12 @@ def _svc_side_for_rule(rule: dict, svc: "_SvcResolver"):
                 names = None
         if names is None:
             names = []
-        return svc.side([n for n in names if n])
+        names = [n for n in names if n]
+        if any(str(n).strip().lower() == "application-default" for n in names):
+            names = _app_default_entries(rule, names)
+            if names is None:
+                return (UNRESOLVED, ())
+        return svc.side(names)
     proto = (rule.get("proto") or rule.get("protocol") or "").lower()
     pf, pt = rule.get("port_from"), rule.get("port_to")
     if not proto and pf is None:

@@ -305,7 +305,12 @@ def _parse_network_object(children: list[str], name: str,
         if kw == "description":
             description = c[len("description"):].strip()
         elif kw == "host" and len(toks) >= 2:
-            value = {"type": "ip-netmask", "value": f"{toks[1]}/32"}
+            value = {"type": "ip-netmask",
+                     "value": f"{toks[1]}/{128 if _looks_like_ip6(toks[1]) else 32}"}
+        elif kw == "subnet" and len(toks) == 2 and _prefix6(toks[1]):
+            # the IPv6 prefix form: one token (docs/IPV6_PLAN.md, phase 4)
+            p6 = _prefix6(toks[1])
+            value = {"type": "ip-netmask", "value": f"{p6[0]}/{p6[1]}"}
         elif kw == "subnet" and len(toks) >= 3:
             prefix = _mask_to_prefix(toks[2])
             if prefix is None:
@@ -314,9 +319,14 @@ def _parse_network_object(children: list[str], name: str,
             value = {"type": "ip-netmask", "value": f"{toks[1]}/{prefix}"}
         elif kw == "range" and len(toks) >= 3:
             value = {"type": "ip-range", "value": f"{toks[1]}-{toks[2]}"}
-        elif kw == "fqdn":
-            drops.setdefault("fqdn_address_object", []).append(name)
-            return None
+        elif kw == "fqdn" and len(toks) >= 2:
+            # `fqdn [v4|v6] <name>`: an address object every target resolves
+            # itself (PAN-OS fqdn, FortiOS fqdn, Check Point domain). Left
+            # out, the rules naming it referenced nothing and the build
+            # blocked (matrix 0.9.4 rerun 2026-10-11, asa2fgt: 41 rules).
+            value = {"type": "fqdn", "value": toks[-1]}
+            if len(toks) >= 3 and toks[1].lower() == "v6":
+                description = (description + " (ASA: resolved to IPv6 only)").strip()
         # Other keywords (nat - handled in Slice 5) are ignored here.
     if value is None:
         return None
@@ -425,11 +435,21 @@ def _parse_network_group(children: list[str], name: str,
                 _add_inline(inlines, {
                     "obj_type": "address", "name": mname,
                     "value": {"type": "ip-netmask",
-                              "value": f"{toks[2]}/32",
+                              "value": f"{toks[2]}/{128 if _looks_like_ip6(toks[2]) else 32}",
                               "description": ""}})
                 members.append(mname)
             elif sub == "object" and len(toks) >= 3:
                 members.append(toks[2])
+            elif len(toks) == 2 and _prefix6(sub):
+                # `network-object <prefix>/<len>`, the IPv6 form (phase 4)
+                p6 = _prefix6(sub)
+                mname = _inline_net_name(p6[0], p6[1])
+                _add_inline(inlines, {
+                    "obj_type": "address", "name": mname,
+                    "value": {"type": "ip-netmask",
+                              "value": f"{p6[0]}/{p6[1]}",
+                              "description": ""}})
+                members.append(mname)
             elif len(toks) >= 3:
                 # `network-object A.B.C.D MASK` (literal subnet)
                 prefix = _mask_to_prefix(toks[2])
@@ -617,7 +637,8 @@ def parse_objects(text: str) -> dict:
                 description = " ".join(toks[di + 1:])
             named.append({
                 "obj_type": "address", "name": alias,
-                "value": {"type": "ip-netmask", "value": f"{ip}/32",
+                "value": {"type": "ip-netmask",
+                          "value": f"{ip}/{128 if _looks_like_ip6(ip) else 32}",
                           "description": description}})
 
     objects = list(inlines.values()) + named
@@ -651,6 +672,28 @@ def _looks_like_ip(tok: str) -> bool:
     return bool(_IP_OCTET_RE.match(tok))
 
 
+def _looks_like_ip6(tok: str) -> bool:
+    """A bare IPv6 address (docs/IPV6_PLAN.md, phase 4)."""
+    if ":" not in (tok or ""):
+        return False
+    try:
+        return ipaddress.ip_address(tok).version == 6
+    except ValueError:
+        return False
+
+
+def _prefix6(tok: str) -> tuple[str, int] | None:
+    """('2001:db8::', 64) for the one-token IPv6 prefix form ASA uses on
+    objects, groups, ACEs, interfaces and routes; None otherwise."""
+    if ":" not in (tok or "") or "/" not in tok:
+        return None
+    try:
+        net = ipaddress.ip_network(tok, strict=False)
+    except ValueError:
+        return None
+    return (str(net.network_address), net.prefixlen) if net.version == 6 else None
+
+
 def _inline_proto_any(proto: str, inlines: dict) -> str:
     mname = _inline_service_name(proto, "any")
     _add_inline(inlines, {
@@ -660,7 +703,8 @@ def _inline_proto_any(proto: str, inlines: dict) -> str:
 
 
 def _read_addr_spec(toks: list[str], pos: int, name_to_type: dict,
-                    inlines: dict, drops: dict, acl_name: str
+                    inlines: dict, drops: dict, acl_name: str,
+                    iface_ips: dict | None = None
                     ) -> tuple[list[str], int, list[str]]:
     """Consume a source-or-destination address spec.
 
@@ -669,28 +713,55 @@ def _read_addr_spec(toks: list[str], pos: int, name_to_type: dict,
     if pos >= len(toks):
         return [], pos, []
     t = toks[pos]
-    if t in ("any", "any4", "any6"):
+    if t == "any":
         return ["any"], pos + 1, []
+    if t in ("any4", "any6"):
+        # one family's catch-all (D5 of docs/IPV6_PLAN.md): ASA 9.x reads
+        # `any` as both families, `any4` and `any6` as one
+        return [t], pos + 1, []
     if t == "host" and pos + 1 < len(toks):
         ip_or_name = toks[pos + 1]
         # Pre-8.3 dialect: `host <NAME>` accepts a `name`-alias as the
         # host. If the token isn't an IP literal but matches a known
         # address object, pass it through by name; downstream resolves.
-        if not _looks_like_ip(ip_or_name) \
+        if not _looks_like_ip(ip_or_name) and not _looks_like_ip6(ip_or_name) \
                 and name_to_type.get(ip_or_name) == "address":
             return [ip_or_name], pos + 2, []
         mname = _inline_host_name(ip_or_name)
         _add_inline(inlines, {
             "obj_type": "address", "name": mname,
-            "value": {"type": "ip-netmask", "value": f"{ip_or_name}/32",
+            "value": {"type": "ip-netmask",
+                      "value": f"{ip_or_name}/{128 if _looks_like_ip6(ip_or_name) else 32}",
                       "description": ""}})
         return [mname], pos + 2, []
+    if _prefix6(t):
+        # the one-token IPv6 prefix of an ACE (phase 4)
+        p6 = _prefix6(t)
+        mname = _inline_net_name(p6[0], p6[1])
+        _add_inline(inlines, {
+            "obj_type": "address", "name": mname,
+            "value": {"type": "ip-netmask", "value": f"{p6[0]}/{p6[1]}",
+                      "description": ""}})
+        return [mname], pos + 1, []
     if t == "object" and pos + 1 < len(toks):
         return [toks[pos + 1]], pos + 2, []
     if t == "object-group" and pos + 1 < len(toks):
         return [toks[pos + 1]], pos + 2, []
     if t == "interface" and pos + 1 < len(toks):
-        return [f"iface:{toks[pos + 1]}"], pos + 2, ["iface_address_ref"]
+        # `interface <nameif>` matches the interface's OWN address: an
+        # inline host of that address (parse_rules hands the map in). A
+        # nameif without an address stays the declared `iface:` reference,
+        # which the build blocks (matrix 0.9.4 rerun 2026-10-11, asa2fgt).
+        nameif = toks[pos + 1]
+        ip = (iface_ips or {}).get(nameif)
+        if ip:
+            mname = _inline_host_name(ip)
+            _add_inline(inlines, {
+                "obj_type": "address", "name": mname,
+                "value": {"type": "ip-netmask", "value": f"{ip}/32",
+                          "description": f"ASA interface {nameif} address"}})
+            return [mname], pos + 2, []
+        return [f"iface:{nameif}"], pos + 2, ["iface_address_ref"]
     if (pos + 1 < len(toks)
             and _looks_like_ip(t) and _looks_like_ip(toks[pos + 1])):
         prefix = _mask_to_prefix(toks[pos + 1])
@@ -762,7 +833,8 @@ _ICMP_TYPE_TOKENS = {
 
 def _parse_ace_tokens(toks: list[str], acl_name: str, seq: int,
                       name_to_type: dict, protocol_groups: dict,
-                      inlines: dict, drops: dict
+                      inlines: dict, drops: dict,
+                      iface_ips: dict | None = None
                       ) -> dict | None:
     """Parse the tokens after `access-list ACL_NAME [line N]` into a rule.
 
@@ -816,7 +888,7 @@ def _parse_ace_tokens(toks: list[str], acl_name: str, seq: int,
     dropped_inputs: list[str] = []
 
     sources, pos, sd = _read_addr_spec(
-        toks, pos, name_to_type, inlines, drops, acl_name)
+        toks, pos, name_to_type, inlines, drops, acl_name, iface_ips)
     dropped_inputs.extend(sd)
 
     src_port: list[str] | None = None
@@ -826,7 +898,7 @@ def _parse_ace_tokens(toks: list[str], acl_name: str, seq: int,
         dropped_inputs.extend(pd)
 
     destinations, pos, dd = _read_addr_spec(
-        toks, pos, name_to_type, inlines, drops, acl_name)
+        toks, pos, name_to_type, inlines, drops, acl_name, iface_ips)
     dropped_inputs.extend(dd)
 
     services: list[str] = []
@@ -951,6 +1023,15 @@ def parse_rules(text: str, name_to_type: dict,
     drops: dict[str, list[str]] = {}
     acls: dict[str, list[dict]] = {}
     pending_remarks: dict[str, list[str]] = {}
+    # nameif -> the interface's first address, for `interface <nameif>` ACE
+    # members (ASA matches the interface's own address there)
+    iface_ips: dict[str, str] = {}
+    try:
+        for _i in (parse_interfaces(text).get("interfaces") or []):
+            if _i.get("zone") and _i.get("ips"):
+                iface_ips[str(_i["zone"])] = str(_i["ips"][0]).split("/")[0]
+    except Exception:
+        iface_ips = {}
 
     # Pass 1: collect ACEs per ACL
     for header, _children in _iter_blocks(text):
@@ -987,7 +1068,7 @@ def parse_rules(text: str, name_to_type: dict,
             continue
 
         rule = _parse_ace_tokens(rest, acl_name, seq, name_to_type,
-                                 protocol_groups, inlines, drops)
+                                 protocol_groups, inlines, drops, iface_ips)
         if rule is None:
             continue
         pending = pending_remarks.pop(acl_name, [])
@@ -1119,6 +1200,17 @@ def parse_interfaces(text: str) -> dict:
                     if prefix is not None:
                         ips.append(f"{ip}/{prefix}")
 
+        # `ipv6 address <prefix>/<len> [eui-64]` (docs/IPV6_PLAN.md, phase 4);
+        # `ipv6 enable`, link-local and autoconfig carry no address to migrate
+        for c in children:
+            ctoks = c.split()
+            if (len(ctoks) >= 3 and ctoks[0] == "ipv6" and ctoks[1] == "address"
+                    and ctoks[2].lower() not in ("autoconfig", "dhcp")
+                    and "link-local" not in ctoks and _prefix6(ctoks[2])):
+                try:
+                    ips.append(str(ipaddress.ip_interface(ctoks[2])))
+                except ValueError:
+                    pass
         iface_type = _classify_asa_iface(ifname)
         if iface_type == "vlan" and "." in ifname:
             parent_of[ifname] = ifname.rsplit(".", 1)[0]
@@ -1181,8 +1273,23 @@ def parse_routes(text: str) -> dict:
             routes.append({
                 "prefix":   str(net),
                 "plen":     net.prefixlen,
-                "ip_from":  int(net.network_address),
-                "ip_to":    int(net.broadcast_address),
+                "iface":    iface,
+                "next_hop": next_hop,
+                "vr":       "default",
+            })
+        elif toks[0] == "ipv6" and len(toks) >= 5 and toks[1] == "route" and _prefix6(toks[3]):
+            # `ipv6 route <iface> <prefix>/<len> <next hop> [metric]` (phase 4)
+            iface, next_hop = toks[2], toks[4]
+            net = ipaddress.ip_network(toks[3], strict=False)
+            key = (str(net), "default")
+            if key in seen:
+                drops.setdefault("duplicate_route", []).append(
+                    f"{net} via {next_hop} on {iface}")
+                continue
+            seen.add(key)
+            routes.append({
+                "prefix":   str(net),
+                "plen":     net.prefixlen,
                 "iface":    iface,
                 "next_hop": next_hop,
                 "vr":       "default",

@@ -32,13 +32,14 @@
 <div id="nat-section-fragment-{{ mode }}"
      data-mode="{{ mode }}"
      data-source-device-id="{{ source_device_id or '' }}"
+     data-source-device-key="{{ source_device_key or '' }}"
      data-source-device-host="{{ source_device_host or '' }}"
      data-target-id="{{ target_id or '' }}"
      data-target-platform="{{ target_platform or '' }}">
 
   {% if _is_enrichment and not nat_rules %}
   <div class="empty" style="padding:16px;border:1px solid var(--line);border-radius:0;text-align:left;font-style:italic;">
-    No NAT rules for this device. Add them in Ruleset &gt; NAT or re-import from the source.
+    No NAT rules for this device. Add them in Rules &gt; NAT or re-import from the source.
   </div>
   {% else %}
 

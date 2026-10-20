@@ -2,55 +2,13 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 import os
-from pathlib import Path
-from time import sleep
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy import text
 
-
-def ensure_database_and_load_schema(server_url: str, db_name: str) -> tuple[str, URL]:
-    schema_path = (Path(__file__).resolve().parent / "../../sql/fw_flows.sql").resolve()
-    sql = schema_path.read_text(encoding="utf-8")
-
-    url_server = make_url(server_url).set(database=None)
-    engine_server = create_engine(url_server, pool_pre_ping=True, isolation_level="AUTOCOMMIT")
-
-    last = None
-    exists = None
-    for _ in range(60):
-        try:
-            with engine_server.connect() as conn:
-                exists = conn.execute(
-                    text("SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = :db LIMIT 1"),
-                    {"db": db_name},
-                ).first()
-
-                if not exists:
-                    conn.execute(
-                        text(
-                            f"CREATE DATABASE `{db_name}` "
-                            f"CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-                        )
-                    )
-                break
-        except Exception as e:
-            last = e
-            sleep(1)
-    else:
-        raise last
-
-    url_db = make_url(server_url).set(database=db_name)
-    engine_db = create_engine(url_db, pool_pre_ping=True)
-
-    if not exists:
-        with engine_db.begin() as conn:
-            for stmt in sql.split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    conn.exec_driver_sql(stmt)
-
-    return db_name, url_db
+# The schema comes from /sql/init, baked into this image (docker-compose.yml,
+# docs/DEVICE_IDENTITY_PLAN.md D7). A second loader that read a
+# sql/fw_flows.sql file which did not exist on disk was removed in phase 4;
+# it had no caller.
 
 
 def _read_sql(path: str) -> str:

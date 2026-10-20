@@ -216,10 +216,16 @@ def _literal_name(value: str) -> str:
 
 
 def _addr_kind(value: str) -> str:
-    """Classify an alias entry the way the shared object model names it."""
+    """Classify an alias entry the way the shared object model names it
+    (either family, docs/IPV6_PLAN.md phase 4)."""
     v = (value or "").strip()
     if "-" in v and not v.startswith("-"):
         return "ip-range"
+    try:
+        ipaddress.ip_network(v, strict=False)
+        return "ip-netmask"
+    except ValueError:
+        pass
     if "/" in v or v.replace(".", "").isdigit():
         return "ip-netmask"
     return "fqdn"
@@ -350,8 +356,15 @@ def parse_interfaces(root) -> dict:
                 drops.setdefault("unparsable_address", []).append(
                     f"{name}={addr}/{plen}")
         v6, v6len = _text(el, "ipaddrv6"), _text(el, "subnetv6")
-        if v6 and v6.lower() not in ("dhcp6", "track6", "slaac") and v6len:
-            drops.setdefault("ipv6_address", []).append(f"{name}={v6}/{v6len}")
+        if v6 and v6.lower() in ("dhcp6", "track6", "slaac"):
+            # a dynamic IPv6 address is not a fact to migrate
+            drops.setdefault("ipv6_dynamic", []).append(f"{name}={v6}")
+        elif v6 and v6len:
+            try:
+                ips.append(str(ipaddress.ip_interface(f"{v6}/{v6len}")))
+            except ValueError:
+                drops.setdefault("unparsable_address", []).append(
+                    f"{name}={v6}/{v6len}")
 
         interfaces.append({
             "name":         name,
@@ -437,15 +450,10 @@ def parse_routes(root) -> dict:
         except ValueError:
             drops.setdefault("unparsable_route", []).append(net)
             continue
-        if prefix.version == 6:
-            drops.setdefault("ipv6_route", []).append(net)
-            continue
         gw = gateways.get(gwname, {})
         routes.append({
             "prefix":   str(prefix),
             "plen":     prefix.prefixlen,
-            "ip_from":  int(prefix.network_address),
-            "ip_to":    int(prefix.broadcast_address),
             "iface":    gw.get("iface") or None,
             "next_hop": gw.get("ip") or gwname or None,
             "vr":       "default",
@@ -518,9 +526,11 @@ def parse_rules(root, port_aliases: dict | None = None,
             # equivalent on any target we push to.
             drops.setdefault("action_match", []).append(name)
             continue
-        if _text(el, "ipprotocol") == "inet6":
-            drops.setdefault("ipv6_rule", []).append(name)
-            continue
+        # the rule's family (D5 of docs/IPV6_PLAN.md): a pf rule is of one
+        # family, so an unqualified side is that family's catch-all; the
+        # legacy `inet46` is both
+        _fam = (_text(el, "ipprotocol") or "inet").strip().lower()
+        _any_tok = {"inet": "any4", "inet6": "any6"}.get(_fam, "any")
         if is_legacy and not _flag(el, "quick"):
             # Without `quick` pf keeps looking and the LAST match wins.
             # Every target we push to is first-match, so re-ordering these
@@ -533,6 +543,9 @@ def parse_rules(root, port_aliases: dict | None = None,
                                     iface_networks)
         dests, d_drop = _endpoint(el, "destination", port_aliases, proto,
                                   iface_networks)
+        if _any_tok != "any":
+            sources = sources or [_any_tok]
+            dests = dests or [_any_tok]
         services = []
         for proto, port in (s_drop.pop("services", [])
                             + d_drop.pop("services", [])):

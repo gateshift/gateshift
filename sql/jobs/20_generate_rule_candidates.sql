@@ -26,7 +26,7 @@ DELETE FROM fw_rule_candidates WHERE generated_at < @run_ts;
 INSERT INTO fw_rule_candidates (
   generated_at,
   vendor,
-  device_host,
+  device_id,
   action,
   direction,
   iface_in,
@@ -63,7 +63,7 @@ INSERT INTO fw_rule_candidates (
 SELECT
   @run_ts AS generated_at,
   vendor,
-  device_host,
+  device_id,
   action,
   direction,
   iface_in,

@@ -115,7 +115,7 @@
     {% set _csv_t = (target if (target is defined and target) else (selected_target.id if (selected_target is defined and selected_target) else '')) %}
     {% set _csv_p = (project_id if (project_id is defined and project_id) else (selected_project.id if (selected_project is defined and selected_project) else '')) %}
     <a id="csv-export-btn"
-       href="/export.csv{% if device %}?device={{ device | urlencode }}{% if _csv_t %}&target={{ _csv_t }}{% endif %}{% if _csv_p %}&project={{ _csv_p }}{% endif %}{% endif %}"
+       href="/export.csv{% if device_id %}?device={{ device_id }}{% if _csv_t %}&target={{ _csv_t }}{% endif %}{% if _csv_p %}&project={{ _csv_p }}{% endif %}{% endif %}"
        class="btn" style="text-decoration:none;">
       <svg style="width:12px;height:12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
@@ -131,7 +131,7 @@
        and bulk-delete are disabled while it's on. #}
     {% if module == 'endpoint_pairs' %}
     <span class="tag warn" style="font-size:var(--fs-small);padding:3px 9px;font-style:italic;"
-          title="The Endpoint-pairs aggregation collapses many imported rules into one display row, so a single rule-hash per row isn't available. Disable `Endpoint pairs` in the Consolidation panel (Ruleset &gt; Security) to select rows.">
+          title="The Endpoint-pairs aggregation collapses many imported rules into one display row, so a single rule-hash per row isn't available. Disable `Endpoint pairs` in the Consolidation panel (Rules &gt; Firewall) to select rows.">
       Bulk-select disabled in Endpoint-pairs mode
     </span>
     {% else %}

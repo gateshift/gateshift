@@ -502,11 +502,13 @@ class OPNsenseDriver(DeployDriver):
         active_routes: list[dict] = (),    # CP-only; ignored here
         nat_mode: str = "central",         # Forti-only; ignored here
         routing_mode: str = "legacy",      # PA-only; ignored here
+        ngfw_mode: str = "profile-based",  # Forti-only; ignored here
+        app_catalog: dict | None = None,   # Forti-only; ignored here
     ) -> tuple[dict[str, str], list[dict]]:
         del (tp_configs, imported_tp, nat_vips, nat_ippools, tags,
              url_categories, ssl_rules, vpn_tunnels, ike_crypto_profiles,
              ipsec_crypto_profiles, active_routes, nat_mode, routing_mode,
-             vrfs)
+             ngfw_mode, app_catalog, vrfs)
 
         prefix = settings.get("rule_prefix", "Gateshift-")
         do_log = settings.get("log_rules", "yes") == "yes"
@@ -987,6 +989,7 @@ class OPNsenseDriver(DeployDriver):
         skip_sections: set[str] | None = None,
         mgmt_override: bool = False,
         vpn_certs: dict | None = None,
+        push_options: dict | None = None,   # FortiGate-only opt-ins; ignored here
     ) -> Iterator[StepResult]:
         del mgmt_override, vpn_certs
 

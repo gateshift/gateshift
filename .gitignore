@@ -215,4 +215,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-
+# mount point the dev compose creates for webui/VERSION inside the collector tree
+pyapp/gateshift/VERSION

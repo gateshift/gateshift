@@ -30,6 +30,8 @@ import json
 
 import requests
 
+from .base import management_host
+
 # Mirrors _CONNECT_TIMEOUT in _forti_common.py / checkpoint.py / panw.py.
 _CONNECT_TIMEOUT = 5
 
@@ -39,7 +41,7 @@ _API_ROOT = "/api/fdm/latest"
 # ── REST API ─────────────────────────────────────────────────────
 
 def base_url_for(device: dict) -> str:
-    host = device.get("mgmt_ip") or device.get("host_name")
+    host = management_host(device.get("mgmt_ip") or device.get("host_name"), "FDM")
     port = device.get("mgmt_port") or 443
     return f"https://{host}:{port}"
 
@@ -132,14 +134,18 @@ def ref_names(items) -> list[str]:
 
 
 def any_net_names(items) -> list[str]:
-    """ref_names + any-normalization for network refs: an empty list or a
-    list containing an any-object collapses to ['any']."""
+    """ref_names + any-normalization for network refs: an empty list is
+    ['any'], any-ipv4 and any-ipv6 together are ['any'], one of them alone
+    is that family's token (D5 of docs/IPV6_PLAN.md, phase 4) beside the
+    other names."""
     names = ref_names(items)
     if not names:
         return ["any"]
-    if any(n in _ANY_NETWORKS for n in names):
+    has4, has6 = "any-ipv4" in names, "any-ipv6" in names
+    if has4 and has6:
         return ["any"]
-    return names
+    rest = [n for n in names if n not in _ANY_NETWORKS]
+    return (["any4"] if has4 else []) + (["any6"] if has6 else []) + rest
 
 
 def _ref_name(item) -> str | None:
@@ -155,8 +161,8 @@ def parse_networks(items: list[dict]) -> tuple[list[dict], dict[str, list[str]]]
     """FDM /object/networks → address objects.
 
     subType HOST/NETWORK → ip-netmask, RANGE → ip-range, FQDN → fqdn.
-    IPv6 values are dropped (platform-wide V1 limit); the any-objects are
-    skipped silently (mapped to 'any' at the rule refs).
+    Both families import as written (docs/IPV6_PLAN.md, phase 4); the
+    any-objects are skipped (mapped to the D5 tokens at the rule refs).
     """
     objects: list[dict] = []
     drops: dict[str, list[str]] = {}
@@ -166,9 +172,6 @@ def parse_networks(items: list[dict]) -> tuple[list[dict], dict[str, list[str]]]
             continue
         value = (e.get("value") or "").strip()
         sub = (e.get("subType") or "").upper()
-        if ":" in value:
-            drops.setdefault("address_ipv6", []).append(name)
-            continue
         desc = e.get("description") or ""
         if sub in ("HOST", "NETWORK"):
             val = {"type": "ip-netmask", "value": value, "description": desc}
@@ -484,6 +487,29 @@ def _iface_ipv4_cidr(e: dict) -> tuple[str | None, bool]:
     return (f"{ip}/{prefix}", False) if prefix is not None else (None, False)
 
 
+def _iface_ipv6_cidrs(e: dict) -> list[str]:
+    """The static IPv6 addresses of an FDM interface entry's ipv6 block
+    (docs/IPV6_PLAN.md, phase 4): `ipv6Addresses` entries with an address
+    and a prefix length (either as `prefix` beside the address or in the
+    address itself); autoconfig and DHCPv6 carry no fact to migrate."""
+    v6 = e.get("ipv6") or {}
+    out: list[str] = []
+    for a in (v6.get("ipv6Addresses") or []):
+        if not isinstance(a, dict):
+            continue
+        ip = str(a.get("ipAddress") or "").strip()
+        if not ip:
+            continue
+        if "/" not in ip:
+            plen = a.get("prefix") or a.get("prefixLength") or a.get("netmask")
+            ip = f"{ip}/{plen}" if plen not in (None, "") else f"{ip}/128"
+        try:
+            out.append(str(ipaddress.ip_interface(ip)))
+        except ValueError:
+            continue
+    return out
+
+
 def parse_interfaces(items: list[dict],
                      subs_by_parent: dict[str, list[dict]],
                      zone_map: dict[str, str]) -> tuple[list[dict], dict[str, list[str]]]:
@@ -507,6 +533,7 @@ def parse_interfaces(items: list[dict],
             drops.setdefault("interface_system", []).append(name)
             return
         ip_cidr, dhcp_on = _iface_ipv4_cidr(e)
+        ips6 = _iface_ipv6_cidrs(e)
         desc = (e.get("description") or "").strip()
         if hw and hw != name:
             desc = f"{desc} [{hw}]".strip()
@@ -514,7 +541,7 @@ def parse_interfaces(items: list[dict],
             "name":         name,
             "zone":         zone_map.get(name),
             "description":  desc or None,
-            "ips":          [ip_cidr] if ip_cidr else [],
+            "ips":          ([ip_cidr] if ip_cidr else []) + ips6,
             "type":         "vlan" if parent_name else "physical",
             "vr_name":      "default",   # per-VR membership resolved by the collector
             "role":         None,
@@ -576,9 +603,6 @@ def parse_static_routes(items: list[dict], vr_name: str,
     routes: list[dict] = []
     drops: dict[str, list[str]] = {}
     for e in items or []:
-        if (e.get("ipType") or "IPv4").upper() != "IPV4":
-            drops.setdefault("route_ipv6", []).append(e.get("name") or "?")
-            continue
         gw_ref = _ref_name(e.get("gateway"))
         next_hop = None
         if gw_ref:
@@ -590,7 +614,7 @@ def parse_static_routes(items: list[dict], vr_name: str,
         for net_ref in ref_names(e.get("networks")) or []:
             val = networks_by_name.get(net_ref, net_ref)
             try:
-                net = ipaddress.IPv4Network(val, strict=False)
+                net = ipaddress.ip_network(val, strict=False)     # either family (phase 4)
             except Exception:
                 drops.setdefault("route_unresolved", []).append(
                     f"{e.get('name') or '?'}→{net_ref}")
@@ -598,8 +622,6 @@ def parse_static_routes(items: list[dict], vr_name: str,
             routes.append({
                 "prefix":   str(net.network_address),
                 "plen":     net.prefixlen,
-                "ip_from":  int(net.network_address),
-                "ip_to":    int(net.broadcast_address),
                 "iface":    iface_name,
                 "next_hop": next_hop,
                 "vr":       vr_name,

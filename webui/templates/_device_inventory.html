@@ -6,30 +6,6 @@
    manager_ui, has_logs, tenant_id and the flash values form_error /
    discovered / uploaded / no_data / discover_empty. #}
 
-{# ── Discover-from-logs empty state: not an error - the syslog receiver
-     has nothing (nolog) or nothing identifiable (nodev) yet. Shown in the
-     standard hint dialog (base.html), auto-opened on page load. ── #}
-{% if discover_empty %}
-<div id="discover-hint-content" style="display:none;">
-  <div>Discovery registers devices from the syslog stream. The firewall has to send its traffic logs here first:</div>
-  <div style="margin-top:6px;padding-left:14px;">1. On the firewall, configure remote logging to this Gateshift host, UDP port 514.</div>
-  <div style="padding-left:14px;">2. Make sure the rules whose traffic should count have logging enabled.</div>
-  <div style="padding-left:14px;">3. Let traffic flow for a few minutes, then discover again.</div>
-  <div style="margin-top:6px;">Details per vendor: docs/vendor-prerequisites.md in the repository.</div>
-  <form method="post" action="/devices/discover" style="margin:10px 0 0;display:flex;justify-content:flex-end;gap:8px;"
-        onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
-    <button type="button" onclick="closeHintModal()" class="btn">Close</button>
-    <button type="submit" class="btn">Discover Again</button>
-  </form>
-</div>
-<script>
-  document.addEventListener('DOMContentLoaded', function() {
-    openHintModal('{{ "No logs received yet" if discover_empty == "nolog" else "Logs received, but no supported firewall identified" }}',
-                  'discover-hint-content');
-  });
-</script>
-{% endif %}
-
 {# ── Flash messages from the device endpoints - shown as toasts, the params
      stripped from the URL after the first render (GET handlers stay
      read-only; a reload must not replay a stale banner). ── #}
@@ -38,11 +14,12 @@
     {% if form_error %}showToast({{ form_error | tojson }}, 'error', 12000);{% endif %}
     {% if discovered %}showToast('Discovered: ' + {{ discovered | tojson }}, 'success', 8000);{% endif %}
     {% if uploaded %}showToast('Uploaded: ' + {{ uploaded | tojson }}, 'success', 8000);{% endif %}
+    {% if scanned != '' %}showToast('Scan: ' + {{ scanned | tojson }} + ' sender(s) heard, ' + {{ scan_unattributed | tojson }} + ' not attributed to a Device', 'info', 9000);{% endif %}
     {% if no_data %}showToast({{ no_data | tojson }} + ' has nothing imported yet: import config or logs first.', 'info', 9000);{% endif %}
     try {
       var u = new URL(window.location.href);
       var had = false;
-      ['form_error', 'discovered', 'uploaded', 'no_data', 'discover_empty', 'picked'].forEach(function (p) {
+      ['form_error', 'discovered', 'uploaded', 'no_data', 'discover_empty', 'picked', 'scanned', 'unattributed'].forEach(function (p) {
         if (u.searchParams.has(p)) { u.searchParams.delete(p); had = true; }
       });
       if (had) {
@@ -59,10 +36,20 @@
     <span class="n" id="pf-dev-count">{{ devices | length }}</span>
     <span class="lbl">device{{ '' if devices|length == 1 else 's' }}</span>
   </div>
-  <div style="margin-left:auto;">
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+    <a href="/devices/senders" class="btn" title="The senders the syslog receiver heard, each attached to the Device it is">+Add Log Sender</a>
     <button type="button" onclick="openAddModal({next: '/projects'})" class="btn" title="Register a device in this tenant">+Add Device</button>
   </div>
 </div>
+{# ── What the syslog receiver hears and no Device is mapped to: a sender string
+     never registers a Device by itself (docs/DEVICE_IDENTITY_PLAN.md, phase 4),
+     so the count is shown here, as a count, with the way in. ── #}
+{% if unattributed_senders %}
+<div class="mut" style="margin:-8px 0 12px;font-size:var(--fs-small);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+  <a href="/devices/senders" title="The senders the receiver heard, with the Device each points at">{{ unattributed_senders }} log sender{{ '' if unattributed_senders == 1 else 's' }} not attributed to a Device</a>
+  <span>&middot; +Add Device, then a platform's "from the log stream" entry</span>
+</div>
+{% endif %}
 
 {% if devices %}
 <div class="twrap">
@@ -90,6 +77,11 @@
           <div class="pl-sub" style="white-space:normal;">
             {{ _pl_label }}{% if d.mgmt_ip %} &middot; {{ d.mgmt_ip }}{% if d.mgmt_port and d.mgmt_port != 443 %}:{{ d.mgmt_port }}{% endif %}{% endif %}
             {# role and note are not shown in the list (user decision 2026-10-04) - both stay in Details #}
+            {% if d.cloud_hint %}
+            {# a FortiGate reached through FortiGate Cloud: the address is the cloud's report, every call goes through the proxy #}
+            <span class="tag" style="margin-left:4px;font-size:var(--fs-caption);cursor:help;"
+                  title="Reached through FortiGate Cloud ({{ d.cloud_hint.region }} region), serial {{ d.cloud_hint.serial }}. Nothing connects to the address shown, every call goes through the cloud's per-device proxy. A push through the cloud needs the device's FortiGate Cloud subscription, without one the cloud answers writes with permission_deny.">via FortiGate Cloud</span>
+            {% endif %}
             {% if d.managed_hint %}
             {% set _mh = d.managed_hint %}
             <span class="tag warn" style="margin-left:4px;font-size:var(--fs-caption);cursor:help;"
@@ -114,6 +106,10 @@
                     onsubmit="return confirmReimport(this, {{ d.id }}, 'Importing config from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
                 <button type="submit" class="{{ _import_classes }}" title="Read the configuration through the API">{{ _import_label }}</button>
               </form>
+            {% elif d.platform == 'panw' %}
+              {# without a key the row fell through to the log-ingest button and
+                 read like a log source (found 2026-10-18): it is a firewall without credentials #}
+              <span class="dash" style="font-style:italic;" title="No management API key configured">no API key</span>
             {% elif d.has_api and d.platform == 'checkpoint' %}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
                     onsubmit="return confirmReimport(this, {{ d.id }}, '{{ 'Discovering scopes' if d.device_kind == 'manager-source' else 'Importing config' }} from {{ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
@@ -140,6 +136,15 @@
               </form>
             {% elif d.platform == 'firepower' %}
               <span class="dash" style="font-style:italic;" title="No FDM password configured">no credentials</span>
+            {% elif d.platform in cloud_platforms and (d.has_api or d.cloud_has_bundle) %}
+              {# A cloud account (EE): read through the provider's API, or re-parse the uploaded bundle. #}
+              <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
+                    onsubmit="return confirmReimport(this, {{ d.id }}, '{{ 'Reading ' ~ d.host_name ~ ' from ' ~ platform_labels.get(d.platform, d.platform) if d.has_api else 'Re-parsing the stored bundle for ' ~ d.host_name }}…', {{ 'true' if has_data else 'false' }});">
+                <button type="submit" class="{{ _import_classes }}"
+                        title="{{ 'Read the account through the ' ~ platform_labels.get(d.platform, d.platform) ~ ' API' if d.has_api else 'Re-parse the uploaded bundle, upload a fresh export to pick up changes' }}">{{ _import_label }}</button>
+              </form>
+            {% elif d.platform in cloud_platforms %}
+              <span class="dash" style="font-style:italic;" title="No credentials and no uploaded bundle">no credentials</span>
             {% elif d.platform == 'opnsense' and (d.opn_has_stored_config or d.has_api) %}
               {# An uploaded configuration is read in preference to the box. #}
               <form method="post" action="/devices/{{ d.id }}/import" style="display:contents;"
@@ -148,7 +153,7 @@
                         title="{{ 'Re-parse the uploaded configuration - upload a fresh export to pick up changes made on the firewall' if d.opn_has_stored_config else 'Read the configuration through the OPNsense API' }}">{{ _import_label }}</button>
               </form>
             {% else %}
-              <button type="button" onclick="startRun('ingest', '{{ d.host_name }}')" class="run-btn {{ _import_classes }}" title="Read this sender's traffic logs">{{ 're-import logs' if has_data else 'import logs' }}</button>
+              <button type="button" onclick="startRun('ingest', '{{ d.id }}')" class="run-btn {{ _import_classes }}" title="Read this sender's traffic logs">{{ 're-import logs' if has_data else 'import logs' }}</button>
             {% endif %}
             {% if d.backup_ok %}
             <button type="button" onclick="deviceBackup({{ d.id }}, '{{ d.host_name }}')" class="btn"
@@ -195,8 +200,13 @@
       <input type="hidden" name="next" value="">
       {% set _cp_pinned = d.platform == 'checkpoint' and not d.cp_is_legacy %}
       {# ASA devices have no IP / API key / Gaia creds - the config file is
-         the whole source of truth. #}
+         the whole source of truth. A cloud account has no address either,
+         but its ids and secret are editable (cloud_edit_fields.html): the
+         address block is skipped for it, the credential fields are not
+         (found 2026-10-18: the whole block was skipped and a cloud account
+         could not be edited after it was added). #}
       {% if d.platform != 'asa' %}
+      {% if d.platform not in cloud_platforms %}
       <div class="field" style="min-width:160px;flex:1 1 160px;">
         <label>{% if _cp_pinned %}Gateway IP <span class="dash">(identity, re-add to change)</span>{% else %}Management IP{% endif %}</label>
         <input type="text" name="mgmt_ip" value="{{ d.mgmt_ip or '' }}" {% if _cp_pinned %}readonly{% endif %}
@@ -225,8 +235,10 @@
         <input type="text" name="ftd_username" value="{{ d.ftd_username or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
       </div>
       {% endif %}
+      {% endif %}
+      {% if d.platform in cloud_platforms %}{% include 'cloud_edit_fields.html' %}{% endif %}
       <div class="field" style="min-width:140px;flex:1 1 140px;">
-        <label>{{ 'FDM Password' if d.platform == 'firepower' else ('API Secret' if d.platform == 'opnsense' else 'API Key') }} <span class="dash">(Blank = keep)</span></label>
+        <label>{{ 'FDM Password' if d.platform == 'firepower' else ('API Secret' if d.platform == 'opnsense' else (cloud_secret_labels.get(d.platform, 'Client secret') if d.platform in cloud_platforms else 'API Key')) }} <span class="dash">(Blank = keep)</span></label>
         <input type="password" name="api_key" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="new-password">
       </div>
       {% if d.platform == 'checkpoint' %}

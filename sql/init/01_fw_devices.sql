@@ -15,9 +15,9 @@ USE gateshift;
 CREATE TABLE IF NOT EXISTS fw_devices (
     id               INT AUTO_INCREMENT PRIMARY KEY,
     tenant_id        INT NOT NULL DEFAULT 1 COMMENT 'fw_tenants.id; constraint added in 72_fw_tenants_projects.sql',
-    host_name        VARCHAR(255) NOT NULL UNIQUE COMMENT 'Matches device_host in logs',
+    host_name        VARCHAR(255) NOT NULL COMMENT 'The name the operator gave the Device, the pipeline keys on its id',
     display_name     VARCHAR(255),
-    platform         ENUM('panw','opnsense','fortigate','checkpoint','firepower','asa') NULL,
+    platform         ENUM('panw','opnsense','fortigate','checkpoint','firepower','asa','azure','aws','gcp') NULL,
     role             ENUM('source','target','both') NOT NULL DEFAULT 'both',
     mgmt_ip          VARCHAR(255),
     mgmt_port        SMALLINT UNSIGNED DEFAULT 443,

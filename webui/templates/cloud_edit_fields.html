@@ -1,0 +1,56 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# Edit form of a cloud account row: the ids beside the secret field. #}
+{% if d.platform == 'aws' %}
+{% set _c = d.cloud_cfg or {} %}
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Access key ID</label>
+  <input type="text" name="cloud_access_key_id" value="{{ _c.access_key_id or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Regions</label>
+  <input type="text" name="cloud_regions" value="{{ _c.regions or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>VPC IDs <span class="dash">(optional)</span></label>
+  <input type="text" name="cloud_vpc_ids" value="{{ _c.vpc_ids or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+{% elif d.platform == 'gcp' %}
+{% set _c = d.cloud_cfg or {} %}
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Project ID</label>
+  <input type="text" name="cloud_project_id" value="{{ _c.project_id or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Service account</label>
+  <input type="text" name="cloud_client_email" value="{{ _c.client_email or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Networks <span class="dash">(optional)</span></label>
+  <input type="text" name="cloud_networks" value="{{ _c.networks or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:200px;flex:1 1 200px;">
+  {# a new key as the file Google Cloud hands out (like the add dialog): read in
+     the browser into this form's secret field, blank keeps the stored key #}
+  <label>New key file <span class="dash">(blank = keep)</span></label>
+  <input type="file" accept=".json,application/json" class="inp" style="font-size:var(--fs-body);padding:6px 10px;"
+         onchange="(function(inp){var f=inp.files&&inp.files[0];if(!f)return;var r=new FileReader();r.onload=function(){var s=inp.form&&inp.form.querySelector('[name=api_key]');if(s)s.value=String(r.result||'').trim();};r.readAsText(f);})(this)">
+</div>
+{% elif d.platform == 'azure' %}
+{% set _c = d.cloud_cfg or {} %}
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Tenant ID</label>
+  <input type="text" name="cloud_tenant_id" value="{{ _c.tenant_id or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Client ID</label>
+  <input type="text" name="cloud_client_id" value="{{ _c.client_id or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Subscription ID</label>
+  <input type="text" name="cloud_subscription_id" value="{{ _c.subscription_id or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+<div class="field" style="min-width:160px;flex:1 1 160px;">
+  <label>Resource groups <span class="dash">(optional)</span></label>
+  <input type="text" name="cloud_resource_groups" value="{{ _c.resource_groups or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;" autocomplete="off">
+</div>
+{% endif %}

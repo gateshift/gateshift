@@ -26,6 +26,8 @@ import xml.etree.ElementTree as ET
 import requests
 import urllib3
 
+from .base import management_host
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Firewall management interfaces ship self-signed certificates; see
@@ -66,6 +68,7 @@ def base_url(device: dict) -> str:
     port = device.get("mgmt_port") or 443
     if "://" in host:
         host = urllib.parse.urlparse(host).netloc or host
+    host = management_host(host, "OPNsense")
     return f"https://{host}:{port}" if str(port) != "443" else f"https://{host}"
 
 

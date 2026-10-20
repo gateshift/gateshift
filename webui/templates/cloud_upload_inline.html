@@ -1,0 +1,38 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# Cloud account from an exported bundle: its own form, no credentials. #}
+<div id="cloud-upload-inline" style="display:none;">
+  <form method="post" action="/devices/add/cloud/upload" enctype="multipart/form-data"
+        style="display:flex;flex-direction:column;gap:12px;">
+    <input type="hidden" name="platform" id="cloud-upload-platform" value="">
+    <input type="hidden" name="next" class="gs-add-next" value="">
+    <div class="field">
+      <label>Name</label>
+      <input type="text" name="cloud_name" class="inp" autocomplete="off" required>
+    </div>
+    <div class="field">
+      <label>Bundle <span class="dash">(JSON: the provider's list output per resource type)</span></label>
+      <input type="file" name="bundle" accept=".json,application/json" class="inp" required>
+    </div>
+    <div class="dash" style="font-size:var(--fs-small);">
+      The <a id="cloud-collector-link" href="#" style="text-decoration:underline;">collector script</a> for the
+      chosen platform reads these lists and writes the bundle. Run it where the provider's command line is
+      signed in, the provider's Cloud Shell is the easiest place, with read access only.
+    </div>
+    <div class="dash" style="font-size:var(--fs-small);">
+      AWS: one JSON object with the keys Vpcs, Subnets, RouteTables, SecurityGroups,
+      NetworkAcls and NetworkInterfaces (optionally PrefixLists and PrefixListEntries),
+      each holding the list the matching describe command of the AWS CLI prints.
+      Azure: one JSON object with the keys virtualNetworks, networkSecurityGroups,
+      applicationSecurityGroups, networkInterfaces and routeTables, each holding the
+      list the ARM API returns for the subscription.
+      Google Cloud: one JSON object with the keys networks, subnetworks, firewalls,
+      networkFirewallPolicies, instances and routes (optionally firewallPolicies,
+      addressGroups and instanceTags), each holding the list the matching gcloud
+      list command prints as JSON.
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button type="submit" class="btn">Upload &amp; Register</button>
+      <button type="button" class="btn" onclick="closeAddModal()">Cancel</button>
+    </div>
+  </form>
+</div>

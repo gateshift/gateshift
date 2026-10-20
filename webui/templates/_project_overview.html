@@ -3,8 +3,8 @@
 {# ── Overview tab (projects-first UI, U8/U9): the project at a glance.
    Head: the project's name (pencil = rename). Two boxes: the SOURCE and the
    TARGET device with what Gateshift holds of each - the imported kinds on
-   the source and on a target that was imported itself, the live fetch as a
-   line; a device nothing was read from yet offers its import right there;
+   the source and on a target that was imported itself; a device nothing
+   was read from yet offers its import right there;
    an optimization shows one box, "Optimize", across the full width. Below, side by side: the project's
    snapshots and its log (one row per job of this project; a click opens
    the complete record). The names the project decided (model A) follow
@@ -26,6 +26,8 @@
   .ov-box-hd { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .ov-box-hd .host { font-size:var(--fs-title); font-weight:600; color:var(--tx); }
   .ov-box-hd .meta { margin-left:auto; font-size:var(--fs-small); color:var(--tx3); }
+  /* the stamp and its re-import stay together on the right, whatever the box wraps to */
+  .ov-box-hd .ov-reimport { align-self:center; margin:0; }
   .ov-cnts { display:grid; grid-template-columns:repeat(auto-fill, minmax(118px, 1fr)); gap:10px 14px; }
   .ov-cnt b { display:block; font-size:var(--fs-title); font-weight:600; color:var(--tx); font-variant-numeric:tabular-nums; line-height:1.2; }
   .ov-cnt span { font-size:var(--fs-small); color:var(--tx2); }
@@ -67,15 +69,23 @@
     {% endif %}
   </div>
 {%- endmacro %}
-{# The target's live fetch: what the push will see on the box. Only once
-   there was one - no hint otherwise (user decision 2026-10-03). #}
-{% macro live_fetch() -%}
-  {% if ov_tgt_fetch_ts %}
-  <div class="mut" style="font-size:var(--fs-small);" title="{{ ov_tgt_fetch_ts }}">
-    live fetch {{ ov_tgt_fetch_ts | rel_time }}: {% for c in ov_tgt_counters %}{{ c.n }} {{ c.label }}{% if not loop.last %} &middot; {% endif %}{% endfor %}
-  </div>
+{# A device that WAS read from: the same import, offered next to the stamp
+   that says when it last ran (user decision 2026-10-20). One endpoint, the
+   inventory's, and the shared dialog that lists what a re-import keeps and
+   what it resets. A log source reads on the Projects page, so the header
+   leaves it to the inventory rather than linking away from here. #}
+{% macro reimport(dev, next_url) -%}
+  {% if dev.imported_ts and dev.kind == 'form' %}
+  <form method="post" action="/devices/{{ dev.id }}/import" class="ov-reimport"
+        onsubmit='return confirmReimport(this, {{ dev.id }}, {{ dev.busy | tojson }}, true);'>
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <button type="submit" class="btn" title="{{ dev.title }}">Re-import</button>
+  </form>
   {% endif %}
 {%- endmacro %}
+{# The target's live fetch is NOT summarized here (user decision 2026-10-18,
+   it used to be a "live fetch N h ago: ..." line under the target box):
+   what the push will see on the box is the Target Settings' business. #}
 <div class="ov">
 
   {# ── head: the name with its pencil (no status here - user decision 2026-10-03) ── #}
@@ -96,6 +106,7 @@
           <span class="host">{{ p.source_name }}</span>
           <span class="mut" style="font-size:var(--fs-small);">{{ p.source_platform | plat }}{% if _src and _src.mgmt_ip %} &middot; {{ _src.mgmt_ip }}{% endif %}</span>
           <span class="meta" title="{{ ov_src_import.imported_ts or '' }}">{% if ov_src_import.imported_ts %}Imported {{ ov_src_import.imported_ts | rel_time }}{% else %}Not imported yet{% endif %}</span>
+          {{ reimport(ov_src_import, p.url) }}
         </div>
         {% if ov_src_import.imported_ts %}
         <div class="ov-cnts">
@@ -106,7 +117,6 @@
         {% else %}
         {{ not_imported(ov_src_import, p.url) }}
         {% endif %}
-        {% if _same %}{{ live_fetch() }}{% endif %}
       </div>
     </div>
     {% if not _same %}
@@ -117,6 +127,7 @@
           <span class="host">{{ p.target_name }}</span>
           <span class="mut" style="font-size:var(--fs-small);">{{ p.target_platform | plat }}{% if _tgt and _tgt.mgmt_ip %} &middot; {{ _tgt.mgmt_ip }}{% endif %}</span>
           <span class="meta" title="{{ ov_tgt_import.imported_ts or '' }}">{% if ov_tgt_import.imported_ts %}Imported {{ ov_tgt_import.imported_ts | rel_time }}{% else %}Not imported yet{% endif %}</span>
+          {{ reimport(ov_tgt_import, p.url) }}
         </div>
         {% if ov_tgt_import.imported_ts %}
         <div class="ov-cnts">
@@ -127,7 +138,6 @@
         {% else %}
         {{ not_imported(ov_tgt_import, p.url) }}
         {% endif %}
-        {{ live_fetch() }}
       </div>
     </div>
     {% endif %}

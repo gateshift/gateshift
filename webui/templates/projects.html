@@ -99,7 +99,7 @@
         </thead>
         <tbody>
           {% for p in projects %}
-          <tr data-project-id="{{ p.id }}" data-source-host="{{ p.source_host }}" data-target-host="{{ p.target_host }}" data-target-ip="{{ p.target_ip or '' }}"
+          <tr data-project-id="{{ p.id }}" data-source-id="{{ p.source_ref_id }}" data-source-host="{{ p.source_host }}" data-target-host="{{ p.target_host }}" data-target-ip="{{ p.target_ip or '' }}"
               data-mode="{{ p.mode }}" data-name="{{ p.name }}" data-text="{{ (p.name ~ ' ' ~ p.source_name ~ ' ' ~ p.target_name ~ ' ' ~ p.status) | lower }}">
             <td style="max-width:280px;white-space:normal;overflow-wrap:anywhere;">
               {# the name is the row's link, dotted like a device name; "open" below does the same #}

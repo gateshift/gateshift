@@ -4,6 +4,190 @@ All notable changes to Gateshift, newest first. This file covers the current
 major version. It ships with every release and is the source of the release
 notes.
 
+## 0.9.4 (2026-10-20)
+
+**New**
+
+- **New platforms**: Amazon Web Services, Microsoft Azure, Google Cloud,
+  Smart-1 Cloud and FortiGate Cloud.
+- **FortiGate in NGFW policy-based mode**, as a target and as a source.
+- **Enterprise Edition**: FortiManager Cloud and Strata Cloud Manager support.
+
+**Fixed**
+
+- **Two Devices with one name no longer share a ruleset**, keep their own
+  curation and push their own rule order.
+- **IPv6 values are declared per rule**, and a deny or drop rule that loses
+  one blocks the push, because the migrated rule would let through what the
+  source denied.
+- **IPv6 on the targets**: Check Point gateways take IPv6 interface addresses
+  and static routes, PAN-OS targets IPv6 addresses, static routes and
+  policy-routing next hops, FortiOS targets IPv6 objects and policies of both
+  families.
+- **IPv6 NAT is declared on every target**, as is a rule whose two sides are
+  of different families, which is not pushed.
+- **IPv6 from the sources**: a FortiGate brings its IPv6 objects, groups,
+  VIPs, pools and routes, and the Cisco ASA, OPNsense, FDM and cloud readers
+  import the IPv6 they left out before.
+- **A rule side of one family carries its family**, so a dual-stack target
+  gets a catch-all object of that family instead of a widened rule.
+- **IPv6 in the VPN strand**: a tunnel's peer may be an IPv6 address and its
+  selectors IPv6 pairs on all three vendors.
+- **Dual-stack address objects**: one object holds both families, and a rule's
+  literal of either family resolves to the object that covers it.
+- **The zone derivation takes IPv6**, matching addresses against IPv6 routes
+  and folding public IPv6 destinations into the internet placeholder.
+- **A Check Point management on an IPv6 address no longer fails open**, where
+  the push could reach a host that was not the management and log in there
+  with the operator's API key.
+- **An IPv6 static route no longer fails a network collect**, and the routes
+  stored before the fix are repaired at the first start.
+- **A single imported IPv6 host** no longer stops address objects from
+  resolving for IPv4 networks.
+- **PAN-OS object names from IPv6 addresses** kept only the digits, so such a
+  name stays readable now and a collision of two of them is declared.
+- **Palo Alto target**: a failed push in additive-merge mode left an imported
+  VPN certificate on the firewall.
+- **Palo Alto target**: a push that breaks off mid-way no longer discards an
+  uncommitted network push, because Gateshift saves a rescue point before it
+  writes.
+- **Palo Alto target**: a group tag the firewall did not keep no longer fails
+  the whole push, and the report names the rules that went out without it.
+- **PAN-OS routes**: a static route whose interface belongs to another virtual
+  router no longer fails the whole router step.
+- **PAN-OS catalogs**: the security profile and application catalogs listed a
+  profile's own rules and a custom application's signatures as profiles and
+  applications of their own.
+- **Routing**: a static route whose gateway lies in no interface subnet is
+  marked "no egress", and all three targets say the same about it.
+- **FortiGate target**: a push removed the firewall's vendor-shipped services,
+  groups, addresses and schedules whenever no policy held them.
+- **FortiGate target**: a rule whose destination is a VIP the push creates
+  itself was refused as an unresolved reference.
+- **FortiGate target**: a zone names only interfaces the firewall has, where
+  one it does not made FortiOS refuse the whole zone and stopped the network
+  push.
+- **FortiGate target**: a deny rule that logs UTM traffic no longer stops the
+  rule push, because FortiOS takes no UTM logging on a policy that inspects
+  nothing.
+- **FortiGate target in central NAT mode**: a policy for a destination NAT
+  matches the mapped address instead of the VIP, which FortiOS rejects there.
+- **FortiGate source in central NAT mode**: a VIP yielded no destination-NAT
+  rule, and a rule matching a VIP's translated address now gets the VIP as a
+  destination where the target matches before translation.
+- **FortiGate target in NGFW policy-based mode**: a security policy naming a
+  user, group or profile the box does not have stopped the push instead of
+  having the reference pruned and reported.
+- **Check Point target**: a physical interface the gateway does not have is a
+  blocker in the Review and stops the Gaia push before it writes anything.
+- **Check Point target**: a Gaia task the gateway does not report yet no
+  longer ends the push.
+- **Check Point target**: the source's own applications vanished without a
+  word and are declared per rule now.
+- **Check Point target**: FQDN address objects are pushed as domain objects, a
+  wildcard FQDN with its subdomains.
+- **Check Point import**: a layer with sections came back with every rule
+  repeated about fifty times.
+- **Check Point import**: a security zone in a rule's source or destination
+  becomes the rule's zone instead of an address nothing defined.
+- **Check Point import**: domain objects are imported as FQDN objects, a
+  subdomain-matching one as a wildcard FQDN.
+- **Cisco ASA source**: FQDN network objects were left out and an access-list
+  member naming an interface stayed unresolvable, so every rule naming either
+  lost its destination.
+- **Google Cloud source**: the auto-mode default network's regional subnets
+  became zones and interfaces even where nothing lived in them.
+- **Cloud accounts could not be changed after they were added**, as the edit
+  dialog offered only the notes field.
+- **An import that failed said nothing on the page**, so the page names the
+  reason now and an AWS account is refused without a region.
+- **An incomplete add dialog no longer returns in silence**: a missing name,
+  management address, platform, cloud id or secret keeps it open and names the
+  field.
+- **The Community Edition showed Enterprise manager entries** in the add
+  dialog.
+- **A Palo Alto firewall added without an API key** read like a log source in
+  the Device list.
+- **Network tab**: the add-route form's Save and Cancel buttons sat in a
+  hidden column, so only Enter in one of its fields saved a route.
+- **Review**: the service objects built for a rule with `application-default`
+  on a target without App-ID counted as an unexplained surplus.
+- **Review & Deploy**: the per-rule edits of the SSL decryption rules were
+  lost when a Device was renamed.
+- **Log sources**: two firewalls sending the same hostname were one Device,
+  and a sender is told apart by its hostname, address and serial now.
+- **Log sources**: FortiOS and Check Point syslog was discarded without a
+  word, and the ingest reports per file what parsed and what did not.
+- **Log sources**: a line the collector could not store was dropped without a
+  word, and a re-ingest of the same files writes nothing twice.
+- **Log sources**: ingesting the same files twice doubled every hit count in
+  the traffic evidence.
+- **Devices**: a reset wiped every Device of the same vendor when the Device
+  was named after its platform, and left imported objects behind.
+- **VPN**: a push whose tunnels reference a pre-shared key the device holds
+  under another tunnel went out with a placeholder and a tunnel that never
+  came up.
+- **Enterprise Edition**: re-importing a manager replaced every scope with a new
+  Device, orphaning the per-rule edits, tags, settings and keys of each scope.
+
+**Changed**
+
+- **Renaming a Device keeps its curation**, and two Devices with one name keep
+  theirs apart.
+- **A bookmark that names a Device** opens the project list instead of that
+  Device's rules.
+- **Devices**: a display name two Devices share is refused, with both Devices
+  named.
+- **Review & Deploy**: a rule referencing an address or service object the
+  build does not create is a blocker instead of a side that goes out as any.
+- **Review & Deploy**: a target configuration built by an older Gateshift
+  version counts as outdated and is built again.
+- **Navigation**: Decryption and Threat Prevention sit under Rules and VPN
+  under Network, and a saved view takes you to its new place.
+- **The add dialog's platform list** is grouped into Firewalls and Clusters,
+  Cloud Platforms, Manager and Log Sources, with no platform preselected.
+- **Manager discovery**: the add dialog connects a Panorama, a FortiManager, a
+  Check Point management or a Strata Cloud Manager tenant and shows its scopes
+  and managed firewalls, storing nothing.
+- **A cloud account** takes either its credentials or a collector bundle
+  through one entry with a switch.
+- **A Google Cloud account's key** is picked as the JSON file the provider
+  created, and pasting the file's content still works.
+- **The push dialog says what it takes to apply the push**, per vendor, where
+  it claimed a manual commit on every target before.
+- **Push options**: the first push dialog carries the decisions that reach
+  beyond the estate, remembered per project and target.
+- **PAN-OS push**: the push stops before writing when the firewall refuses to
+  save a rescue point, and the dialog offers to go ahead without a rollback.
+- **FortiGate push**: the box's NGFW mode is read, never switched, and a push
+  built for the other mode is refused up front.
+- **Updating**: the webapp refuses a run from a collector of another version,
+  so both halves are updated together.
+- **VPN**: pre-shared keys and identity certificates survive a re-import, and
+  existing keys are carried over on update.
+- **Log sources**: a sender no longer registers a Device by itself, and a
+  Device is created from the sender or senders that are that firewall.
+- **Devices**: deleting or resetting a Device no longer deletes the log lines
+  its senders sent, which stay with the sender.
+
+**Updating from 0.9.3**
+
+- Dump your database before updating, and see the README's Updating section
+  for the standing guidance, including when a fresh install is the shorter
+  path.
+- The syslog receiver writes the sender's address into the file name now, so
+  a firewall that keeps sending appears once more as a new sender carrying
+  its address and is attached to the same Device.
+- The first start after the update takes a while, gives every stored log line
+  its sender and moves the stored curation onto the Devices themselves.
+- While that runs the collector does not start and every push is refused, and
+  the webapp log says when it is done.
+- Afterwards every target configuration is built again when its project is
+  opened, and the Review tab's rule changelog lists every rule once, as
+  changed, on that first build.
+- A bookmark that names a Device stops working, so reach the Device from the
+  Devices page.
+
 ## 0.9.3 (2026-10-07)
 
 Feature and fix release.
@@ -58,10 +242,7 @@ Feature and fix release.
 Note: 0.9.1 was a development build and was never released; 0.9.2 is the
 first release after 0.9.0.
 
-Feature and fix release, validated with a full 12-leg cross-vendor migration
-matrix (Palo Alto Networks, FortiGate, Check Point and Cisco ASA sources
-against Palo Alto Networks, FortiGate and Check Point targets) on a
-production-sized estate.
+Feature and fix release.
 
 **New**
 

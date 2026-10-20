@@ -8,6 +8,31 @@ Gateshift reads a firewall configuration, translates it into a vendor-neutral fo
 
 Website: [gateshift.org](https://gateshift.org)
 
+## Supported vendors
+
+| Platform | Form | Read | Push | Edition |
+|---|---|---|---|---|
+| **Firewalls and Clusters** | | | | |
+| Palo Alto Networks (PAN-OS) | standalone, HA pair | yes | yes | CE |
+| FortiGate (FortiOS) | standalone, FGCP cluster, direct or through FortiGate Cloud | yes | yes | CE |
+| Check Point | one gateway or ClusterXL cluster at a time, through SmartCenter or Smart-1 Cloud | yes | yes | CE |
+| Cisco Firepower (FTD, FDM-managed) | standalone | yes | - | CE |
+| Cisco ASA | configuration file | yes | - | CE |
+| OPNsense | configuration file | yes | - | CE |
+| **Cloud Platforms** | | | | |
+| Amazon Web Services | account, over the provider's API or from an exported bundle | yes | - | CE |
+| Microsoft Azure | account, over the provider's API or from an exported bundle | yes | - | CE |
+| Google Cloud | account, over the provider's API or from an exported bundle | yes | - | CE |
+| **Manager** | | | | |
+| Panorama | manager, its device groups and template stacks as scopes | yes | yes | EE, discovery in CE |
+| FortiManager, FortiManager Cloud | manager, its ADOMs and policy packages as scopes, the cloud one through a FortiCloud IAM API user | yes | yes | EE, discovery in CE |
+| Check Point management | SmartCenter, Smart-1 Cloud or Multi-Domain, every domain and gateway as scopes | yes | yes | EE, discovery in CE |
+| Strata Cloud Manager | cloud manager, its folders and snippets as scopes | yes | yes | EE, discovery in CE |
+| **Log Sources** | | | | |
+| OPNsense | traffic logs over syslog, a ruleset generated from what they show | yes | - | CE |
+
+CE is this repository, the Community Edition. EE is the Enterprise Edition, commercial. "Discovery in CE" means the Community Edition connects the manager and shows its scopes with their counts, while importing, curating and pushing them is the Enterprise Edition.
+
 ## See it in action
 
 Complete migrations, start to finish, on YouTube:
@@ -22,16 +47,17 @@ More on the [Gateshift channel](https://www.youtube.com/@Gateshifter).
 ## What it can do
 
 - Migrate firewall configurations between different vendors and deployment models: standalones, clusters, unmanaged and managed devices, on hardware, virtual and cloud alike.
-- Carry firewall rules, NAT, address and service objects, interfaces, static routes, policy routing, IPsec VPN, schedules, URL categories and tags across to the target.
+- Carry firewall rules, NAT, address and service objects, interfaces, zones, virtual routers, static routes, policy routing, IPsec VPN, decryption rules, Check Point threat prevention, schedules, URL categories and tags across to the target.
+- Carry IPv6 alongside IPv4: dual-stack address objects, IPv6 rule sides, static routes and tunnel peers. What a target cannot express in IPv6 is declared per rule instead of going out silently.
 - Attach what the target itself offers instead of copying the source: security profiles, applications, user identity and log settings.
-- Find rules an earlier, broader rule already shadows, and disable them in bulk.
+- Find rules an earlier, broader rule already covers completely, and disable them in bulk.
 - Generate new rulesets from traffic logs.
 - Optimize and clean up firewall configurations, directly on a firewall or during migrations.
 - Keep every migration as a project with snapshots to save working states.
 - Hold several tenants in one installation, so projects and devices stay sorted by tenant.
-- Operate fully offline: no telemetry, no phone-home, no licence callbacks, no cloud uploads, no LLM calls.
+- Operate fully offline: no telemetry, no phone-home, no licence callbacks, no cloud uploads, no LLM calls. Reading a cloud account over its provider's API needs outbound HTTPS to that provider, the bundle upload needs none.
 
-Migrating to and from central managers (Panorama, FortiManager, Check Point MDS) is part of the Enterprise Edition. See Editions below.
+Cloud accounts (Microsoft Azure, AWS, Google Cloud) are read as migration sources, over the provider's API or from an exported bundle. Central managers (Panorama, FortiManager and FortiManager Cloud, Check Point management, Strata Cloud Manager) are discovered here and migrated in the Enterprise Edition. The table under Supported vendors marks the edition of every entry.
 
 ## What it can't do
 
@@ -73,11 +99,41 @@ The UI listens on every address of the host. Reach it over a management network 
 
 Air-gapped installs: the image build downloads the Tailwind CLI from GitHub. Install with internet access first. The connection can be cut afterwards.
 
+## Updating
+
+```
+git pull
+docker compose up -d --build
+```
+
+`--build` is not optional: the Python code lives in the images, the SQL jobs
+are read from the checkout, so `docker compose up -d` alone starts the old
+images against the new jobs.
+
+Before 1.0 there is no guaranteed database migration path between releases.
+Dump your database before every update. Each release in CHANGELOG.md lists
+what its first start migrates.
+
+**A fresh install is the shorter path while nothing in the installation is
+yours.** Everything Gateshift read from a device it can read again, so as long
+as you hold no projects, renames, per-rule edits, snapshots or traffic
+evidence you want to keep:
+
+```
+docker compose down -v
+./install.sh
+```
+
+That drops the database and starts empty, keeping your `.env` and your
+certificate. Received syslog files stay in `syslog-ng/logs` and are read again
+when you ingest them. Once the installation carries work you want to keep,
+dump the database and update in place instead.
+
 ## Workflow
 
 Every step is explicit and under the operator's control:
 
-- Add devices via API, configuration file, or traffic logs.
+- Add devices via API, configuration file, cloud account, or traffic logs.
 - Create a project: a source and a target for a migration, or the same device as both for an in-place optimization.
 - Re-map and rename interfaces, physical to virtual and vice versa.
 - Filter and consolidate the rules.
@@ -90,22 +146,11 @@ Every step is explicit and under the operator's control:
 
 Sources come from an API connection, a configuration-file upload, or traffic logs. Migrations run intra-vendor and cross-vendor, appliance to manager and manager to appliance (the manager tier is the Enterprise Edition). With the same device as source and target, the identical pipeline performs in-place optimization and cleanup. Traffic logs can be turned into rule candidates instead of importing a policy.
 
-## Supported vendors
-
-| Vendor | Read from | Push to |
-|---|---|---|
-| Palo Alto Networks (PAN-OS) | yes | yes |
-| FortiGate (FortiOS) | yes | yes |
-| Check Point (Management API + Gaia) | yes | yes |
-| Cisco FTD (FDM-managed) | yes | - |
-| Cisco ASA (config file) | yes | - |
-| OPNsense (config file or traffic logs) | yes | - |
-
 ## Editions
 
 This repository is the **Community Edition**, and it is complete for what it covers: single firewalls and HA clusters, no rule-count caps, no time limit, no feature nagging. Service providers may use it in client projects free of charge.
 
-The **Enterprise Edition** adds the manager tier (Panorama, FortiManager, Check Point MDS), with vendor cloud managers on the roadmap. It is commercial and not part of this repository. It is named here because a paid edition appearing later without warning would be a bait-and-switch.
+The **Enterprise Edition** adds the manager tier: Panorama, FortiManager and FortiManager Cloud, Check Point management (SmartCenter, Smart-1 Cloud or Multi-Domain) and Strata Cloud Manager. The Community Edition discovers every one of them (the add dialog's "Manager (Discovery)" entries show the scopes with their counts and store nothing), importing and pushing them needs the Enterprise Edition. It is commercial and not part of this repository. It is named here because a paid edition appearing later without warning would be a bait-and-switch.
 
 ## Verification, liability and intended use
 
@@ -160,14 +205,6 @@ A bug is when Gateshift does not do what the documentation says. What it does no
 - **Pull requests** are not accepted as a rule. Single-copyright ownership is what makes the license model and the Enterprise Edition possible. Substantial contributions are possible case by case, under a contributor agreement.
 
 Security: report vulnerabilities privately, not in a public issue. Only the latest release is supported. Security fixes ship in the next release.
-
-## Roadmap
-
-Direction, not commitment. These entries carry no dates, and feature requests feed the list without filling it:
-
-- **1.0**: stability round incorporating first feedback.
-- Vendor cloud managers: Strata Cloud Manager, Smart-1 Cloud, FortiManager Cloud (Enterprise).
-- Additional vendor and device support.
 
 ## Status
 

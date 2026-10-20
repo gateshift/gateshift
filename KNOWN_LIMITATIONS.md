@@ -28,8 +28,22 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
 - **Outdated means edits Gateshift saw.** The state follows the edits,
   imports and push settings made through Gateshift. A change made on the
   source appliance itself is not an edit: re-import to pick it up.
-- **Shadowing follows the target's match semantics** and skips rules it
-  cannot compare (listed as "not analysed").
+- **Shadowing reports full coverage only**, where an earlier, always-active
+  rule covers a later rule's whole match space, and follows the selected
+  target's match semantics (Check Point access layers are zoneless). A
+  partial overlap is legal on every platform and is not reported, which is
+  where a Check Point target's own verification goes further.
+- **What the analysis cannot judge it counts instead of clearing.** A rule
+  whose addresses or services do not resolve, or that carries a negation,
+  gets no verdict, and their number is named next to the filter so silence
+  is not read as a clean bill.
+- **A rule that names applications cannot cover another rule**, because the
+  application narrows what it matches. On a target with no application
+  concept of its own the pushed rule matches everything on its ports and
+  does cover what follows, so that target's verification can report a
+  conflict the filter stays silent about. For the same reason a source
+  whose rules all take their service from the application's default port
+  yields no findings at all.
 
 ## Network / routing
 
@@ -38,8 +52,39 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   A source with multiple virtual routers is **hard-blocked** by validation
   (`cp_multi_vr`) instead of silently collapsing the VRs.
   *Workaround:* migrate one VR at a time.
-- **IPv6 is not migrated.** IPv6 objects, rules and routes are dropped with a
-  warning at import.
+- **IPv6 is carried in the model and declared where a target does not
+  write it.** Dual-stack support is in this version.
+  What is in place: an address object holds both
+  families (a Check Point dual-stack host, network or range arrives
+  whole), the rules view and the zone derivation take IPv6 addresses, and
+  an IPv6 literal in a rule becomes an address object like an IPv4 one.
+  Check Point targets write IPv6 and dual-stack objects as the management
+  holds them, PAN-OS targets write IPv6 objects natively and a dual-stack
+  object as its two halves under a group of the source's name, and
+  FortiOS targets write IPv6 objects and groups into their own namespaces
+  (`address6`, `addrgrp6`) with one policy carrying both families. All
+  three targets write IPv6 interface addresses and IPv6 static routes
+  (Check Point through the gateway's command line, because its REST API
+  has no IPv6 route command, and only while IPv6 is enabled on the
+  gateway). What is not written is declared on the build: IPv6 NAT
+  (NAT66, NPTv6, FortiOS `vip6` and `ippool6`), an IPv6 blackhole route on
+  Check Point, a rule whose sources and destinations are of different
+  families (no packet matches it on any vendor), and the IPv6 side of a
+  FortiOS policy that carries per-policy NAT (FortiOS needs an IPv6 pool
+  for that: the IPv4 side keeps its NAT and the IPv6 side is left off, a
+  policy of IPv6 alone keeps its addresses and loses the NAT flag). A rule of one family
+  (a FortiOS or OPNsense rule, an ASA `any4`, a cloud rule with
+  `0.0.0.0/0` alone) keeps that family: PAN-OS and Check Point targets get
+  a catch-all object of the family (`any-ipv4`, `All_Internet`,
+  `any-ipv6`), declared on the build. VPN tunnels take an IPv6 peer and
+  IPv6 selectors on all three vendors (a FortiGate or PAN-OS tunnel
+  negotiates over one family, a Check Point peer object carries both
+  addresses). The traffic-log aggregation stays IPv4. Where a declaration
+  says so, configure the IPv6 part on the target yourself.
+- **An IPv6 management address is refused.** Devices are reached over IPv4
+  or by host name in this version. A management address that is an IPv6
+  literal is refused with a sentence before anything is sent, on every
+  vendor, instead of being parsed into a wrong host.
 - **Dynamic routing (BGP/OSPF) is not migrated.** Static routes and PA
   logical-router (ARE) configs are. Routing-protocol config is not.
 - **Bond modes / m:1 bonds, bridge/L2 interfaces, ECMP**: not migrated.
@@ -48,10 +93,13 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   subnet of the pushed interfaces (Gaia statics via a VPN peer address,
   for example) cannot be resolved by PAN-OS (the candidate fails
   validation) or FortiOS (`device` is mandatory). Both targets omit the
-  route with a declared drop. Check Point targets take it as a Gaia
-  static unchanged.
-  *Workaround:* bind the route's egress interface in Network > Routing.
-  It then renders on every target.
+  route with a declared drop. A Check Point target takes it as a Gaia
+  static and declares it too: Gaia accepts the route and leaves it
+  inactive until the gateway becomes reachable, for example once the VPN
+  tunnel of the same migration is up.
+  *Workaround:* Network > Routing marks such a route with "no egress" and
+  names the gateway. Bind an egress interface there and it renders on
+  every target.
 
 ## Migration scope
 
@@ -79,6 +127,81 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   imported live via the on-box FDM REST API (admin credentials). There is no
   FTD push target. FMC-managed estates cannot be read this way: registering
   an FTD to an FMC permanently disables its FDM API.
+- **Managers are discovered, not migrated, in the Community Edition.**
+  Panorama, FortiManager and FortiManager Cloud, a Check Point Multi-Domain
+  server and Strata Cloud Manager connect through the add dialog's "Manager
+  (discovery)" entries, which show the scopes with their counts and store
+  nothing. Importing, curating and pushing those scopes is the Enterprise
+  Edition. A SmartCenter is migrated one gateway at a time through the
+  Check Point gateway entry, the discovery shows the management as a whole.
+- **Cloud accounts are source-only: Microsoft Azure, AWS and
+  Google Cloud.** An account is read as a firewall would be, with these
+  translations and limits. Subnets are the zones and become interfaces
+  without an address (the target's interface addressing is the operator's).
+  Containers (security groups, application security groups, prefix lists,
+  tags, service accounts, address groups) become address groups whose
+  members are the private addresses found at import time: a snapshot,
+  re-import to refresh it. Every address a rule names directly (a CIDR, a
+  host) becomes an address object named after it, and every service a
+  rule names as protocol and port becomes a service object, so the
+  ruleset reads as objects and groups like any other source. Each route table (Google: each VPC network) is
+  a virtual router, only routes with an IP next hop migrate. IPv6
+  prefixes, routes and rule sides are read like IPv4 ones, and a
+  dual-stack subnet's IPv6 block places IPv6 rule sides in its zone.
+  - *Azure*: network security groups become the ruleset, one rule per NSG
+    rule, the attached subnets as the rule's zone, plus the six default
+    rules of every NSG marked as defaults. Service tags with an address
+    form resolve (VirtualNetwork, AzureLoadBalancer, Internet), any other
+    tag leaves its rule imported but disabled with the reason. Azure
+    Firewall policies (and the rule collections of a firewall without a
+    policy) are read in front of the NSG rules in Azure's order: DNAT,
+    network, application, parent policy before child. DNAT rules become
+    destination NAT rules plus the allow Azure adds for the translated
+    traffic. Application rules keep their FQDN targets as FQDN objects
+    (wildcards declared) and Http, Https and Mssql as TCP ports, while
+    FQDN tags, web categories, target URLs and TLS termination are
+    declared, a rule with nothing else is imported disabled. The
+    firewall's implicit deny is imported disabled, because only traffic
+    routed through the firewall is subject to it. IP groups become
+    address groups. A firewall in a Virtual WAN hub is read through its
+    policy the same way and its rules are marked with the hub firewall's
+    name. A firewall whose policy lies outside the read subscription is
+    declared, its rules are not read.
+  - *AWS*: security-group rules become the ruleset (allow only, closed by
+    one implicit deny marked as a default). Network ACLs are stateless and
+    only a necessary condition beside the groups, so their explicit deny
+    entries are imported as active rules at the top of the ruleset while
+    their allow entries, including the ephemeral return-traffic ranges,
+    are imported disabled with the reason. A group or prefix list a rule
+    references but the read did not contain (another account, a peered
+    VPC, an unread region) becomes an empty address group. Routes to an
+    internet, NAT, transit or peering gateway are declared, not migrated.
+    AWS Network Firewall is read in front of the network ACLs, per
+    firewall: its policy's stateless rules by priority (pass allows, drop
+    denies, forward_to_sfe decides nothing and imports disabled), then the
+    stateful rule groups in the policy's order (strict order as listed, the
+    default action order sorted pass, drop and reject, alert): 5-tuple
+    rules with pass and drop, reject as a deny declared, alert imported
+    disabled, application-layer protocols declared, IP set variables and
+    reference sets as address groups, domain lists as FQDN objects (the
+    allow list's drop of every other host imported disabled), Suricata
+    rule strings as one disabled placeholder per group with the count. The
+    stateless and stateful default actions are marked default rules.
+  - *Google Cloud*: VPC firewall rules and network firewall policies
+    (hierarchical as the network sees them, global, regional) become one
+    ruleset in the network's enforcement order. The implied allow-egress
+    is expressed as "from the subnets to anything outside them" with a
+    negated destination, because inside the VPC the destination's ingress
+    rules still decide, and the implied deny-ingress closes the ruleset. A
+    rule that applies a security profile group is imported as an allow
+    with the inspection declared, goto_next rules and rules matching only
+    on region codes or threat intelligence are imported disabled. Secure
+    tags resolve through the instances' effective tags when the service
+    account may read them. Cloud NGFW features beyond that are not read.
+    An auto-mode network (a project's `default` network) carries a subnet
+    in every region. Only the regional subnets with an instance in them
+    are read, the empty ones are counted, and an auto-mode network left
+    without subnets is counted with its rules.
 
 ## Vendor-specific behavior
 
@@ -86,6 +209,15 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   device-local config layer (PA) or risk push conflicts with the manager
   (FortiGate). Gateshift detects this and warns (amber "managed" chip). Register
   the manager for the full picture.
+- **A Panorama scope renamed on the Panorama itself is a new device to
+  Gateshift.** PAN-OS gives a device group, a template or a template stack
+  no id of its own, so a Panorama scope is matched across imports by its
+  name: after a rename made in the Panorama UI, the next import removes the
+  old scope with its edits and creates a new one. FortiManager, Check Point
+  and Strata Cloud Manager scopes carry the manager's id and keep their
+  device across a rename.
+  *Workaround:* rename a Panorama scope from its manager page in Gateshift,
+  which renames it on the Panorama and keeps the device.
 - **FortiGate policy-held objects survive network wipes by design**: Gateshift
   never auto-deletes user firewall policies. Push the policy strand first, then
   the network strand (the push error hints say exactly this when it applies).
@@ -128,8 +260,8 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   interface. A PAN-OS IKE gateway and a FortiOS phase1-interface both
   need one, and an empty local-address fails the whole PAN-OS candidate.
   Such tunnels are omitted with a declared drop (`local_interface`).
-  *Workaround:* pick the interface per tunnel in the VPN tab ("set local
-  IF") and regenerate.
+  *Workaround:* pick the interface per tunnel under Network > VPN ("set
+  local IF") and regenerate.
 - **Check Point cluster targets keep their existing VPN domain.** The
   Check Point Management API silently ignores VPN-domain changes on an
   existing cluster object (the set call reports success but changes
@@ -148,7 +280,7 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   never had. Predefined content is shown, not hard-filtered (you decide
   what migrates).
   *Workaround:* review the decryption rules on the target before
-  committing and soft-delete rules you do not want (Target Settings >
+  committing and soft-delete rules you do not want (Rules >
   Decryption). Forward-proxy also needs a target-side trust certificate
   anyway (see Palo Alto prerequisites), so a decryption review is expected.
 - **Check Point Threat Prevention** pushes as a separate rulebase with CP's own
@@ -163,7 +295,6 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   before the firewall rules.
   *Workaround:* deselect the **NAT Rules** section in the push dialog and
   build the NAT policy on the target. The firewall rules then push cleanly.
-
 ## Ruleset installation
 
 - **Check Point refuses to install conflicting rules ("Rule X conflicts
@@ -175,7 +306,7 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   ACLs into one flat ruleset (each ACL's broad permits and deny-all tails
   then shadow the following ACL blocks), and shadowed entries are faithful
   imports. They were equally dead on the source.
-  *Mitigation (built in):* the Configure > Rules > Firewall tab has a "Shadowed"
+  *Mitigation (built in):* the Rules > Firewall tab has a "Shadowed"
   filter that finds rules made unreachable by an earlier, broader rule
   (following the selected target's semantics: Check Point is zoneless),
   shows who shadows whom, and lets you disable or delete the selection
@@ -218,10 +349,9 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
 - **A device's tenant is fixed at registration.** There is no move:
   delete the device and register it in the other tenant. Its projects
   (which must be deleted first) and imported data stay with the tenant
-  they were made in. Log sources the receiver registers on its own land
-  in the default tenant.
-  *Workaround:* with several tenants, discover new log senders from the
-  right tenant's page (+Add Device, log source) before the receiver does.
+  they were made in. A device created from the log stream joins the
+  tenant of the page it was created from. The log senders themselves
+  belong to no tenant.
 - **Repairs of the imported data are the device's, not the project's.**
   Resolving two objects that arrived under the same name, and sanitizing a
   group whose members do not exist, fix the import itself: every project of
@@ -241,13 +371,6 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   deletions an optimization project applies to the box itself (which have
   their own backup step). A snapshot saved before 0.9.3 carries no names: a
   restore of it keeps the project's current names and says so.
-- **Host names are unique per installation, across tenants.** A device
-  registered in one tenant cannot be registered again in another.
-  *Workaround:* move the device (Devices > edit > Tenant). Its projects
-  move with it.
-- **Log discovery registers devices into the default tenant.** The syslog
-  stream is installation-wide and carries no tenant.
-  *Workaround:* move discovered devices to their tenant (Devices > edit).
 - **A project follows its source's tenant.** Moving a source to another
   tenant takes its projects along. A project whose target stays behind has
   no target on offer until the target is moved too.
@@ -269,3 +392,22 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   the logs.
   *Workaround:* curate the addressing before generating, or clear a rule's
   zone (Target Settings > Zone Mapping) to have the project derive it again.
+
+## Verification status
+
+What the project could not run against a live system is said here, so a
+failure there is a bug report, not a surprise:
+
+- **Strata Cloud Manager and FortiManager Cloud** were built against the
+  vendors' API documentation (the OpenAPI specifications Palo Alto Networks
+  publishes, Fortinet's FortiManager Cloud API user documentation). No
+  tenant of either was available to the project, so their first live runs
+  are those of their users, in the Enterprise Edition and in the discovery
+  of the Community Edition. The import log and the discovery panel name
+  every call that answers differently from the documentation.
+- **FortiOS and Check Point traffic logs** parse on recorded lines in the
+  vendors' syslog formats. The end-to-end round from a live log stream to
+  a generated ruleset ran with OPNsense, so the add dialog offers only
+  OPNsense as a log-stream source in this version. The receiver still
+  records FortiGate and Check Point senders and Devices > Log senders
+  shows them.

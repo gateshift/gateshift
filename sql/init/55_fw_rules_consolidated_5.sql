@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS fw_rules_consolidated_5 (
   c4_rule_id   BIGINT UNSIGNED NOT NULL,
   generated_at TIMESTAMP NOT NULL,
   vendor       VARCHAR(64) NULL,
-  device_host  VARCHAR(255) NULL,
+  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  device_id  INT NULL,
   action       ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction    ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
   iface_out    VARCHAR(64) NULL,
@@ -21,10 +22,13 @@ CREATE TABLE IF NOT EXISTS fw_rules_consolidated_5 (
   first_seen   DATETIME NULL,
   last_seen    DATETIME NULL,
 
+  KEY idx_device_id (device_id),
+
   PRIMARY KEY (id),
   KEY idx_c4_rule   (c4_rule_id),
   KEY idx_generated (generated_at),
-  KEY idx_proto     (proto, port_from, port_to)
+  KEY idx_proto     (proto, port_from, port_to),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fw_rules_consolidated_5_sources (

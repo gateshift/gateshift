@@ -20,6 +20,8 @@ import json
 
 import requests
 
+from .base import management_host, split_selectors_by_family, mixed_selector_drop, peer_address6_drop
+
 
 # Cap the TCP-connect phase so an unreachable/blackholed device fails in
 # seconds instead of blocking the full read-timeout per call. This is the
@@ -30,10 +32,159 @@ _CONNECT_TIMEOUT = 5
 
 # ── REST API ─────────────────────────────────────────────────────
 
+# ── FortiGate Cloud as the transport ─────────────────────────────
+# A FortiGate reached through FortiGate Cloud (docs/CLOUD_SOURCES_PLAN.md,
+# C1) is the same FortiOS REST API, proxied per serial number under the
+# account's regional host, with an IAM API user's token instead of the
+# box's own API key. The device row keeps its config under
+# config.fortigate.cloud = {region, serial, api_id}; the IAM API user's
+# password sits in api_key like any other secret. Everything below the
+# base URL and the token is unchanged, so the collectors and the deploy
+# driver never know which way they reached the box.
+CLOUD_REGION_HOSTS = {
+    "global": "api.fortigate.forticloud.com",
+    "us":     "usapi.fortigate.forticloud.com",
+    "eu":     "euapi.fortigate.forticloud.com",
+    "jp":     "jpapi.fortigate.forticloud.com",
+}
+CLOUD_AUTH_URL = "https://customerapiauth.fortinet.com/api/v1/oauth/token/"
+CLOUD_CLIENT_ID = "fortigatecloud"
+_CLOUD_TOKENS: dict[tuple[str, str], tuple[str, float]] = {}   # (client_id, api_id) -> (token, expires_at)
+_CLOUD_TOKEN_MARGIN = 120.0                                      # renew this long before expiry
+
+
+def cloud_settings(device: dict) -> dict | None:
+    """config.fortigate.cloud when the device is reached through FortiGate
+    Cloud: {region, serial, api_id}; None for a box reached directly."""
+    try:
+        cfg = device.get("config") or {}
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg or "{}")
+        cloud = (cfg.get("fortigate") or {}).get("cloud") or {}
+    except Exception:
+        return None
+    if not isinstance(cloud, dict) or not cloud.get("serial"):
+        return None
+    return {"region": str(cloud.get("region") or "global").lower(), "serial": str(cloud["serial"]).strip(),
+            "api_id": str(cloud.get("api_id") or "").strip()}
+
+
+def cloud_host(region: str) -> str:
+    return CLOUD_REGION_HOSTS.get((region or "global").lower(), CLOUD_REGION_HOSTS["global"])
+
+
+def cloud_token(api_id: str, password: str, *, fresh: bool = False,
+                client_id: str = CLOUD_CLIENT_ID) -> str:
+    """The IAM API user's access token for a FortiCloud service, cached per
+    service and user until shortly before it expires. The client id names
+    the service the token is for: `fortigatecloud` (about an hour) here,
+    `FortiManager` (four hours) for FortiManager Cloud in the EE module."""
+    import time
+    if not api_id or not password:
+        raise RuntimeError("FortiCloud needs the IAM API user's id and password")
+    cached = _CLOUD_TOKENS.get((client_id, api_id))
+    if cached and not fresh and cached[1] > time.time():
+        return cached[0]
+    resp = requests.post(CLOUD_AUTH_URL, json={"username": api_id, "password": password,
+                                               "client_id": client_id, "grant_type": "password"},
+                         timeout=(_CONNECT_TIMEOUT, 30))
+    try:
+        body = resp.json() or {}
+    except ValueError:
+        body = {}
+    token = body.get("access_token") if resp.status_code == 200 else None
+    if not token:
+        msg = body.get("error_description") or body.get("message") or body.get("error") or f"HTTP {resp.status_code}"
+        raise RuntimeError(f"FortiCloud login refused ({client_id}): {msg}")
+    ttl = float(body.get("expires_in") or 3600)
+    _CLOUD_TOKENS[(client_id, api_id)] = (token, time.time() + max(60.0, ttl - _CLOUD_TOKEN_MARGIN))
+    return token
+
+
 def base_url_for(device: dict) -> str:
-    host = device.get("mgmt_ip") or device.get("host_name")
+    """https://<host>:<port> of the box, or the FortiGate Cloud proxy base
+    (https://<regional host>/forticloudapi/v1/fgt/<serial>) in front of
+    which the FortiOS paths read exactly as on the box."""
+    cloud = cloud_settings(device)
+    if cloud:
+        return f"https://{cloud_host(cloud['region'])}/forticloudapi/v1/fgt/{cloud['serial']}"
+    host = management_host(device.get("mgmt_ip") or device.get("host_name"), "FortiOS")
     port = device.get("mgmt_port") or 443
     return f"https://{host}:{port}"
+
+
+def token_for(device: dict, *, fresh: bool = False) -> str:
+    """The bearer value a request to this device carries: the box's API key,
+    or the IAM token when the box is reached through FortiGate Cloud."""
+    cloud = cloud_settings(device)
+    if cloud:
+        return cloud_token(cloud["api_id"], device.get("api_key") or "", fresh=fresh)
+    return device.get("api_key") or ""
+
+
+CLOUD_NOT_MANAGED = ("FortiGate Cloud reports that management is not enabled for this "
+                     "device ({state}). In that state the cloud proxies read calls and "
+                     "answers every write with permission_deny. Enable Management for the "
+                     "device in FortiGate Cloud (it needs a FortiGate Cloud subscription) "
+                     "or register the box with its management address and an API token.")
+
+
+def cloud_device_record(device: dict) -> dict | None:
+    """The device's record in the FortiGate Cloud account (the device list
+    entry for its serial), or None when the box is reached directly or the
+    record cannot be read."""
+    cloud = cloud_settings(device)
+    if not cloud:
+        return None
+    try:
+        token = cloud_token(cloud["api_id"], device.get("api_key") or "")
+        resp = requests.get(f"https://{cloud_host(cloud['region'])}/forticloudapi/v1/devices",
+                            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                            timeout=(_CONNECT_TIMEOUT, 30))
+        if resp.status_code != 200:
+            return None
+        for d in resp.json() or []:
+            if isinstance(d, dict) and d.get("sn") == cloud["serial"]:
+                return d
+    except Exception:
+        return None
+    return None
+
+
+def cloud_read_only(device: dict) -> str | None:
+    """Why a push to this device cannot run, or None. A directly reached box
+    is never refused. A cloud-reached box is refused when its FortiGate
+    Cloud record says management is off (`management` false): without the
+    subscription's management feature the cloud answers every write with
+    permission_deny (measured 2026-10-10 on a free-tier device), so the
+    push stops before its wipe step. An unreadable record fails open, the
+    permission_deny hint then explains a refused write."""
+    if not cloud_settings(device):
+        return None
+    rec = cloud_device_record(device)
+    if not rec or rec.get("management") is not False:
+        return None
+    state = (f"licence {rec.get('licenseType') or '?'}, subscription "
+             f"{'active' if rec.get('subscriptionActive') else 'none'}")
+    return CLOUD_NOT_MANAGED.format(state=state)
+
+
+def list_cloud_devices(region: str, api_id: str, password: str) -> list[dict]:
+    """The FortiGate Cloud account's devices in the region: [{serial, name,
+    ip, firmware, tunnel}], what the add form offers to pick from."""
+    token = cloud_token(api_id, password)
+    resp = requests.get(f"https://{cloud_host(region)}/forticloudapi/v1/devices",
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                        timeout=(_CONNECT_TIMEOUT, 30))
+    if resp.status_code != 200:
+        raise RuntimeError(f"FortiGate Cloud device list refused (HTTP {resp.status_code})")
+    out = []
+    for d in resp.json() or []:
+        if not isinstance(d, dict) or not d.get("sn"):
+            continue
+        out.append({"serial": d["sn"], "name": d.get("name") or "", "ip": d.get("ip") or "",
+                    "firmware": d.get("firmwareVersion") or "", "tunnel": bool(d.get("tunnelAlive"))})
+    return out
 
 
 def vdom_for(device: dict) -> str:
@@ -154,7 +305,350 @@ def any_names(items) -> list[str]:
     return names
 
 
+def family_names(items4, items6) -> list[str]:
+    """One rule side from its two FortiOS lists (srcaddr and srcaddr6, dst
+    likewise): the union of the names, each family's `all` as the D5 token
+    of that family (docs/IPV6_PLAN.md, phase 4). `all` on both lists is
+    `any`, `all` with the other list empty is `any4` or `any6`, `all` beside
+    names of the other family is that family's token beside them; a name
+    on both lists (a dual-stack object) appears once. Two empty lists are
+    `any` (a policy FortiOS would not hold)."""
+    n4, n6 = ref_names(items4), ref_names(items6)
+    all4, all6 = "all" in n4, "all" in n6
+    names4 = [n for n in n4 if n != "all"]
+    names6 = [n for n in n6 if n != "all"]
+    if all4 and all6:
+        return ["any"]
+    out: list[str] = []
+    for n in (["any4"] if all4 else names4) + (["any6"] if all6 else names6):
+        if n not in out:
+            out.append(n)
+    return out or ["any"]
+
+
+def family_lists(e: dict, key4: str, key6: str) -> tuple[list[str], list[str]]:
+    """The two name lists of one rule side without their catch-alls, for
+    the import's dual-stack scope check."""
+    return ([n for n in ref_names(e.get(key4)) if n != "all"],
+            [n for n in ref_names(e.get(key6)) if n != "all"])
+
+
 # ── Parsers (used by collector + driver list_target_*) ───────────
+
+def _policy_identities(e: dict) -> list[dict] | None:
+    """Phase 2 (User/Groups) Option C: Forti splits identity refs into two
+    policy fields - users[] and groups[] - so kind is trivially exact. Map
+    to agnostic source_identities [{name, kind}]. Shared by the firewall
+    policy and the security policy parsers."""
+    identities: list[dict] = []
+    for u in (ref_names(e.get("users")) or []):
+        if u:
+            identities.append({"name": u, "kind": "user"})
+    for g in (ref_names(e.get("groups")) or []):
+        if g:
+            identities.append({"name": g, "kind": "group"})
+    return identities or None
+
+
+def _policy_schedule(e: dict, raw_extras: dict) -> str | None:
+    """Phase 1b: the Forti schedule ref on the rule moves into its own
+    column. Forti's "always" is the semantic default and NULL means the
+    same - store NULL for "always" so rules_query COALESCE matches NULL =
+    "always". raw_extras["schedule"] stays in addition for the Phase-B
+    promoter (lifting old imports)."""
+    schedule = (e.get("schedule") or "").strip()
+    if schedule and schedule.lower() != "always":
+        raw_extras["schedule"] = schedule
+        return schedule
+    return None
+
+
+def _policy_utm_and_log(e: dict, raw_extras: dict, dropped: list[str]) -> None:
+    """UTM profile slots and log settings of a policy entry into the
+    raw_extras keys the round-trip promoter (enrichment_import/fortigate)
+    lifts: the same keys for a firewall policy (profile-based mode) and a
+    security policy (policy-based mode, where they live)."""
+    apps = ref_names(e.get("application-list"))
+    if apps:
+        raw_extras["application_ctrl"] = apps
+        dropped.append("security_profile_individual")
+    for prof_field in ("av-profile", "webfilter-profile", "ips-sensor",
+                       "dnsfilter-profile", "ssl-ssh-profile"):
+        v = (e.get(prof_field) or "").strip()
+        if v:
+            raw_extras.setdefault("security_profile_individual", {})[prof_field] = v
+            if "security_profile_individual" not in dropped:
+                dropped.append("security_profile_individual")
+
+    logtraffic = (e.get("logtraffic") or "").strip().lower()
+    if logtraffic and logtraffic != "disable":
+        raw_extras["log_setting"] = logtraffic
+        dropped.append("log_setting")
+
+    # Phase-B roundtrip slots - FortiOS reports these as "enable"/"disable"
+    # strings. Stored separately from log_setting so the promoter can map
+    # them 1:1 onto fw_rule_log_overrides.{log_start, capture_packet}.
+    logtraffic_start = (e.get("logtraffic-start") or "").strip().lower()
+    if logtraffic_start == "enable":
+        raw_extras["logtraffic_start"] = True
+        if "log_setting" not in dropped:
+            dropped.append("log_setting")
+    capture_packet = (e.get("capture-packet") or "").strip().lower()
+    if capture_packet == "enable":
+        raw_extras["capture_packet"] = True
+        if "log_setting" not in dropped:
+            dropped.append("log_setting")
+
+
+def _policy_negates(e: dict) -> tuple[int, int, int]:
+    """FortiOS exposes srcaddr-negate / dstaddr-negate / service-negate as
+    "enable"/"disable" strings (V0 lab-probe). First-class on the rule-dict
+    so fw_imported_rules.negate_* columns capture them; downstream
+    COALESCEs against fw_rule_negate_overrides per project_rule_negation_plan."""
+    flags = tuple(1 if (e.get(f) or "").strip().lower() == "enable" else 0
+                  for f in ("srcaddr-negate", "dstaddr-negate", "service-negate"))
+    return flags[0], flags[1], flags[2]
+
+
+def parse_security_policies(payload: dict, app_names: dict | None = None) -> list[dict]:
+    """FortiOS firewall/security-policy entries (NGFW policy-based mode)
+    into agnostic rule dicts: the ruleset of a policy-based box
+    (docs/FGT_POLICY_MODE_PLAN.md, D8). Applications come by FortiGuard id
+    and read as names through `app_names` (id -> name, from
+    application/name); an id the catalog does not carry is declared.
+    Application groups ride as names. `enforce-default-app-port enable`
+    with service ALL reads as `application-default` (the reverse of the
+    renderer's D4). Application categories and URL categories on the
+    policy are declared, never translated. UTM slots, log settings,
+    identities, schedule and negates use the firewall policy's keys."""
+    app_names = app_names or {}
+    rules: list[dict] = []
+    for i, e in enumerate(payload.get("results") or []):
+        raw_extras: dict = {"fgt_layer": "security-policy"}
+        dropped: list[str] = []
+        identities = _policy_identities(e)
+        schedule = _policy_schedule(e, raw_extras)
+        _policy_utm_and_log(e, raw_extras, dropped)
+
+        apps: list[str] = []
+        unknown_ids: list[str] = []
+        for a in (e.get("application") or []):
+            if not isinstance(a, dict):
+                continue
+            aid = a.get("id")
+            try:
+                nm = app_names.get(int(aid))
+            except (TypeError, ValueError):
+                nm = None
+            if nm:
+                if nm not in apps:
+                    apps.append(nm)
+            else:
+                unknown_ids.append(str(aid))
+        for g in ref_names(e.get("app-group")):
+            if g not in apps:
+                apps.append(g)
+        if unknown_ids:
+            raw_extras["application_unknown_ids"] = unknown_ids
+            dropped.append("application_unknown_id")
+        cats = [str(c.get("name") or c.get("id")) for c in (e.get("app-category") or [])
+                if isinstance(c, dict) and (c.get("name") or c.get("id") is not None)]
+        if cats:
+            raw_extras["app_category"] = cats
+            dropped.append("app_category")
+        urlc = [str(c.get("name") or c.get("id")) for c in (e.get("url-category") or [])
+                if isinstance(c, dict) and (c.get("name") or c.get("id") is not None)]
+        if urlc:
+            raw_extras["url_category"] = urlc
+            dropped.append("url_category")
+
+        services = any_names(e.get("service"))
+        enforce = (e.get("enforce-default-app-port") or "").strip().lower() == "enable"
+        if apps and enforce and (not services or services == ["any"]):
+            services = ["application-default"]
+        neg_src, neg_dst, neg_svc = _policy_negates(e)
+        rules.append({
+            "rule_name":      e.get("name") or f"security-policy-{e.get('policyid', i)}",
+            "seq_num":        i,
+            "action":         (e.get("action") or "deny").strip().lower(),
+            "src_zones":      ref_names(e.get("srcintf")) or ["any"],
+            "dst_zones":      ref_names(e.get("dstintf")) or ["any"],
+            "sources":        family_names(e.get("srcaddr"), e.get("srcaddr6")),
+            "destinations":   family_names(e.get("dstaddr"), e.get("dstaddr6")),
+            "services":       services,
+            "applications":   apps,
+            "description":    e.get("comments") or "",
+            "disabled":       1 if (e.get("status") or "").lower() == "disable" else 0,
+            "tags":           [],
+            "negate_source":      neg_src,
+            "negate_destination": neg_dst,
+            "negate_service":     neg_svc,
+            "schedule":       schedule,
+            "source_identities": identities,
+            "raw_extras":     raw_extras,
+            "dropped_inputs": dropped,
+        })
+    return rules
+
+
+def synth_central_vip_dnat_rules(objects: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Central NAT mode: a static-nat VIP translates on its own, before the
+    policy lookup, no policy references it (docs/FGT_POLICY_MODE_PLAN.md,
+    D11). Each VIP object becomes one dest-NAT rule (external address and
+    port to mapped address and port), marked synthesized with the VIP
+    reference so a FortiGate target renders the VIP itself and PAN-OS or
+    Check Point render the NAT rule. A port-forward VIP needs a service
+    the rule can name: one is synthesized per protocol and port.
+    Returns (nat_rules, service_objects)."""
+    nat_rules: list[dict] = []
+    services: list[dict] = []
+    seen_svc: set[str] = set()
+    for o in objects:
+        if o.get("obj_type") != "nat_vip":
+            continue
+        v = o.get("value") or {}
+        name = o.get("name") or ""
+        ext_ip = v.get("ext_ip")
+        mapped = v.get("mapped_ips") or []
+        if not name or not ext_ip or not mapped:
+            continue
+        orig_service = ["any"]
+        trans_port = None
+        if v.get("portforward") and v.get("protocol") in ("tcp", "udp") and v.get("ext_port"):
+            svc_name = f"vip-{v['protocol']}-{v['ext_port']}"
+            if svc_name not in seen_svc:
+                seen_svc.add(svc_name)
+                services.append({"obj_type": "service", "name": svc_name,
+                                 "value": {"protocol": v["protocol"], "port": str(v["ext_port"]),
+                                           "description": f"external port of VIP {name}"}})
+            orig_service = [svc_name]
+            trans_port = v.get("mapped_port") or None
+        ext_intf = (v.get("ext_intf") or "").strip()
+        named_intf = ext_intf if ext_intf and ext_intf.lower() != "any" else None
+        nat_rules.append({
+            "position":        0,  # numbered by the caller
+            "name":            f"vip-dnat-{name}",
+            "nat_type":        "dnat",
+            "disabled":        0,
+            "src_zones":       [named_intf] if named_intf else ["any"],
+            "dst_zones":       ["any"],
+            "interface_name":  named_intf,
+            "orig_src":        ["any"],
+            "orig_dst":        [ext_ip],
+            "orig_service":    orig_service,
+            "trans_src":       None,
+            "trans_src_type":  "none",
+            "trans_dst":       mapped[0],
+            "trans_dst_port":  trans_port,
+            "description":     (v.get("description") or f"central NAT: VIP {name}")[:255],
+            "properties":      {"synthesized": True, "vip_ref": name, "central_nat": True},
+        })
+    return nat_rules, services
+
+
+def declare_post_nat_destinations(rules: list[dict], objects: list[dict]) -> int:
+    """Central NAT mode matches the translated destination, PAN-OS and
+    Check Point match the original one (docs/FGT_POLICY_MODE_PLAN.md, D12):
+    every rule whose destination is a VIP's mapped address gets the import
+    drop `dnat_post_nat_dst` and the VIPs on raw_extras, so the Review
+    names the rules and the operator adds the external address on such
+    targets. Returns the number of rules declared."""
+    mapped_to_vip: dict[str, list[tuple[str, str]]] = {}
+    for o in objects:
+        if o.get("obj_type") != "nat_vip":
+            continue
+        v = o.get("value") or {}
+        for ip in (v.get("mapped_ips") or []):
+            if ip and v.get("ext_ip"):
+                mapped_to_vip.setdefault(str(ip).strip(), []).append((o.get("name") or "", v["ext_ip"]))
+    if not mapped_to_vip:
+        return 0
+    addr_ip: dict[str, str] = {}
+    for o in objects:
+        if o.get("obj_type") != "address":
+            continue
+        v = o.get("value") or {}
+        if not isinstance(v, dict) or (v.get("type") or "") not in ("ip-netmask", "ipmask"):
+            continue
+        ip, _, mask = str(v.get("value") or "").partition("/")
+        if ip and mask.strip() in ("", "32"):
+            addr_ip[o.get("name") or ""] = ip.strip()
+    n = 0
+    for r in rules:
+        hits: list[dict] = []
+        for d in (r.get("destinations") or []):
+            ip = addr_ip.get(d) or (d if d in mapped_to_vip else None)
+            for vip_name, ext_ip in mapped_to_vip.get(ip or "", []):
+                hits.append({"vip": vip_name, "ext_ip": ext_ip, "mapped_ip": ip, "destination": d})
+        if hits:
+            n += 1
+            extras = r.get("raw_extras") or {}
+            extras["dnat_post_nat"] = hits
+            r["raw_extras"] = extras
+            r.setdefault("dropped_inputs", []).append("dnat_post_nat_dst")
+    return n
+
+
+def _subnet_of(ip_field) -> ipaddress.IPv4Network | None:
+    """FortiOS 'addr mask' (or the parser's CIDR) as a network, None for
+    unset (0.0.0.0) or unparseable."""
+    s = str(ip_field or "").strip()
+    if not s:
+        return None
+    try:
+        if "/" in s:
+            net = ipaddress.IPv4Network(s, strict=False)
+        else:
+            parts = s.split()
+            if len(parts) != 2:
+                return None
+            net = ipaddress.IPv4Network(f"{parts[0]}/{parts[1]}", strict=False)
+    except Exception:
+        return None
+    if net.network_address == ipaddress.IPv4Address("0.0.0.0"):
+        return None
+    return net
+
+
+def port_subnet_overlaps(rendered: list[dict], live: list[dict],
+                         protected: set[str] | None = None) -> list[dict]:
+    """The -54 case the push cannot talk its way out of: a physical port the
+    configuration does not address still carries a subnet that overlaps one
+    the configuration assigns (docs/PUSH_OPTIONS_PLAN.md, D2). `rendered`
+    are the Interfaces entries of the build (physical ports carry no
+    `type`), `live` the target's interfaces as list_target_interfaces
+    returns them. Protected ports (management, HA) are never reported:
+    they stay as they are by design. Returns one dict per overlap:
+    {port, subnet, holder, holder_subnet}."""
+    protected = protected or set()
+    rendered_phys = {}
+    for e in rendered or ():
+        if e.get("type"):
+            continue
+        nm = str(e.get("name") or "").strip()
+        net = _subnet_of(e.get("ip"))
+        if nm and net:
+            rendered_phys[nm] = net
+    rendered_names = {str(e.get("name") or "").strip() for e in rendered or ()}
+    untouched = {}
+    for i in live or ():
+        nm = str(i.get("name") or "").strip()
+        if not nm or nm in rendered_names or nm in protected:
+            continue
+        if (i.get("type") or "physical") != "physical":
+            continue
+        ips = i.get("ip_addresses") or ([i["ip"]] if i.get("ip") else [])
+        net = _subnet_of(ips[0]) if ips else None
+        if net:
+            untouched[nm] = net
+    out: list[dict] = []
+    for port, net in rendered_phys.items():
+        for holder, hnet in untouched.items():
+            if net.overlaps(hnet):
+                out.append({"port": port, "subnet": str(net), "holder": holder,
+                            "holder_subnet": str(hnet)})
+    return out
+
 
 def parse_rules(payload: dict) -> list[dict]:
     """Parse FortiOS firewall policy entries into agnostic rule dicts."""
@@ -162,60 +656,9 @@ def parse_rules(payload: dict) -> list[dict]:
     for i, e in enumerate(payload.get("results") or []):
         raw_extras: dict = {}
         dropped: list[str] = []
-
-        # Phase 2 (User/Groups) Option C: Forti splits identity refs into
-        # two policy fields - users[] and groups[] - so kind is trivially
-        # exact. Map to agnostic source_identities [{name, kind}].
-        identities: list[dict] = []
-        for u in (ref_names(e.get("users")) or []):
-            if u:
-                identities.append({"name": u, "kind": "user"})
-        for g in (ref_names(e.get("groups")) or []):
-            if g:
-                identities.append({"name": g, "kind": "group"})
-        rule_dict_identities = identities or None
-
-        # Phase 1b: the Forti schedule ref on the rule moves into its own
-        # column. Forti's "always" is the semantic default and NULL means
-        # the same - store NULL for "always" so rules_query COALESCE
-        # matches NULL = "always". raw_extras["schedule"] stays in
-        # addition for the Phase-B promoter (lifting old imports).
-        schedule = (e.get("schedule") or "").strip()
-        forti_rule_schedule = None
-        if schedule and schedule.lower() != "always":
-            raw_extras["schedule"] = schedule
-            forti_rule_schedule = schedule
-
-        apps = ref_names(e.get("application-list"))
-        if apps:
-            raw_extras["application_ctrl"] = apps
-            dropped.append("security_profile_individual")
-        for prof_field in ("av-profile", "webfilter-profile", "ips-sensor",
-                           "dnsfilter-profile", "ssl-ssh-profile"):
-            v = (e.get(prof_field) or "").strip()
-            if v:
-                raw_extras.setdefault("security_profile_individual", {})[prof_field] = v
-                if "security_profile_individual" not in dropped:
-                    dropped.append("security_profile_individual")
-
-        logtraffic = (e.get("logtraffic") or "").strip().lower()
-        if logtraffic and logtraffic != "disable":
-            raw_extras["log_setting"] = logtraffic
-            dropped.append("log_setting")
-
-        # Phase-B roundtrip slots - FortiOS reports these as "enable"/"disable"
-        # strings. Stored separately from log_setting so the promoter can map
-        # them 1:1 onto fw_rule_log_overrides.{log_start, capture_packet}.
-        logtraffic_start = (e.get("logtraffic-start") or "").strip().lower()
-        if logtraffic_start == "enable":
-            raw_extras["logtraffic_start"] = True
-            if "log_setting" not in dropped:
-                dropped.append("log_setting")
-        capture_packet = (e.get("capture-packet") or "").strip().lower()
-        if capture_packet == "enable":
-            raw_extras["capture_packet"] = True
-            if "log_setting" not in dropped:
-                dropped.append("log_setting")
+        rule_dict_identities = _policy_identities(e)
+        forti_rule_schedule = _policy_schedule(e, raw_extras)
+        _policy_utm_and_log(e, raw_extras, dropped)
 
         if (e.get("nat") or "").strip().lower() == "enable":
             raw_extras["policy_nat"] = True
@@ -225,7 +668,7 @@ def parse_rules(payload: dict) -> list[dict]:
             # iface IP - consumed by the Phase-B promoter to choose
             # trans_src_type=interface-address vs dynamic-ip-and-port.
             if (e.get("ippool") or "").strip().lower() == "enable":
-                pool_refs = ref_names(e.get("poolname"))
+                pool_refs = ref_names(e.get("poolname")) + ref_names(e.get("poolname6"))
                 if pool_refs:
                     raw_extras["policy_nat_ippool"] = pool_refs
             # Phase-E policy-NAT flags - pass through to the synth-SNAT
@@ -242,13 +685,7 @@ def parse_rules(payload: dict) -> list[dict]:
             dropped.append("vpn_action")
             action_raw = "deny"
 
-        # FortiOS exposes srcaddr-negate / dstaddr-negate / service-negate as
-        # "enable"/"disable" strings (V0 lab-probe). First-class on the rule-dict
-        # so fw_imported_rules.negate_* columns capture them; downstream
-        # COALESCEs against fw_rule_negate_overrides per project_rule_negation_plan.
-        negate_src_flag = 1 if (e.get("srcaddr-negate") or "").strip().lower() == "enable" else 0
-        negate_dst_flag = 1 if (e.get("dstaddr-negate") or "").strip().lower() == "enable" else 0
-        negate_svc_flag = 1 if (e.get("service-negate") or "").strip().lower() == "enable" else 0
+        negate_src_flag, negate_dst_flag, negate_svc_flag = _policy_negates(e)
 
         rules.append({
             "rule_name":      e.get("name") or f"policy-{e.get('policyid', i)}",
@@ -256,8 +693,10 @@ def parse_rules(payload: dict) -> list[dict]:
             "action":         action_raw,
             "src_zones":      ref_names(e.get("srcintf")) or ["any"],
             "dst_zones":      ref_names(e.get("dstintf")) or ["any"],
-            "sources":        any_names(e.get("srcaddr")),
-            "destinations":   any_names(e.get("dstaddr")),
+            "_family_lists":  {"sources": family_lists(e, "srcaddr", "srcaddr6"),
+                               "destinations": family_lists(e, "dstaddr", "dstaddr6")},
+            "sources":        family_names(e.get("srcaddr"), e.get("srcaddr6")),
+            "destinations":   family_names(e.get("dstaddr"), e.get("dstaddr6")),
             "services":       any_names(e.get("service")),
             "applications":   [],
             "description":    e.get("comments") or "",
@@ -482,6 +921,122 @@ def parse_addresses(payload: dict) -> tuple[list[dict], dict]:
     return objects, {"address_unsupported": drops} if drops else {}
 
 
+def parse_addresses6(payload: dict) -> tuple[list[dict], dict]:
+    """Parse FortiOS firewall/address6 entries → address objects of the IPv6
+    family (docs/IPV6_PLAN.md, phase 4): ipprefix → ip-netmask, iprange →
+    ip-range, fqdn → fqdn. Others → drops['address_unsupported']. The merge
+    with a same-named IPv4 object happens in merge_dual_stack_objects."""
+    objects: list[dict] = []
+    drops: list[str] = []
+    for e in payload.get("results") or []:
+        name = e.get("name") or ""
+        if not name:
+            continue
+        atype = (e.get("type") or "ipprefix").lower()
+        desc = e.get("comment") or ""
+        if atype == "ipprefix":
+            raw = (e.get("ip6") or "").strip()
+            try:
+                cidr = str(ipaddress.ip_network(raw, strict=False)) if raw else ""
+            except ValueError:
+                cidr = ""
+            if not cidr:
+                drops.append(name)
+                continue
+            val = {"type": "ip-netmask", "value": cidr, "description": desc}
+        elif atype == "iprange":
+            start = (e.get("start-ip") or "").strip()
+            end = (e.get("end-ip") or "").strip()
+            if not start or not end:
+                drops.append(name)
+                continue
+            val = {"type": "ip-range", "value": f"{start}-{end}", "description": desc}
+        elif atype == "fqdn":
+            fqdn = (e.get("fqdn") or "").strip()
+            if not fqdn:
+                drops.append(name)
+                continue
+            val = {"type": "fqdn", "value": fqdn, "description": desc}
+        else:
+            drops.append(name)
+            continue
+        objects.append({"obj_type": "address", "name": name, "value": val})
+    return objects, {"address_unsupported": drops} if drops else {}
+
+
+def _value_family(val: dict) -> int | None:
+    """4 or 6 for an ip-netmask or ip-range value, None for the rest."""
+    raw = str((val or {}).get("value") or "").strip()
+    if (val or {}).get("type") not in ("ip-netmask", "ip-range") or not raw:
+        return None
+    return 6 if ":" in raw else 4
+
+
+def merge_dual_stack_objects(objects: list[dict], drops: dict | None = None) -> list[dict]:
+    """A name that exists in both FortiOS namespaces is one dual-stack object
+    (D1 of docs/IPV6_PLAN.md): the IPv4 object keeps `value`, the IPv6 one
+    becomes its `value6`; a group of both namespaces keeps the union of its
+    members. Two objects of one family with one name (which FortiOS cannot
+    hold) keep the first. Returns the new list; the merged names go to
+    drops['dual_stack_merged'] so the import's flash line counts them."""
+    out: list[dict] = []
+    by_key: dict[tuple[str, str], dict] = {}
+    merged: list[str] = []
+    for o in objects:
+        key = (o.get("obj_type") or "", o.get("name") or "")
+        prev = by_key.get(key)
+        if prev is None or key[0] not in ("address", "address_group"):
+            if prev is None:
+                by_key[key] = o
+            out.append(o)
+            continue
+        pv, nv = prev.get("value") or {}, o.get("value") or {}
+        if key[0] == "address_group":
+            pm = list(pv.get("members") or [])
+            pm += [m for m in (nv.get("members") or []) if m not in pm]
+            pv["members"] = pm
+            if not pv.get("description") and nv.get("description"):
+                pv["description"] = nv["description"]
+            merged.append(key[1])
+            continue
+        f_prev, f_new = _value_family(pv), _value_family(nv)
+        if f_prev == 4 and f_new == 6 and pv.get("type") == nv.get("type"):
+            pv["value6"] = nv["value"]
+        elif f_prev == 6 and f_new == 4 and pv.get("type") == nv.get("type"):
+            pv["value6"] = pv["value"]
+            pv["value"] = nv["value"]
+        else:
+            continue                      # the same family twice, or an fqdn: the first stays
+        if not pv.get("description") and nv.get("description"):
+            pv["description"] = nv["description"]
+        merged.append(key[1])
+    if merged and drops is not None:
+        drops.setdefault("dual_stack_merged", []).extend(merged)
+    return out
+
+
+def declare_family_scope(rules: list[dict], objects: list[dict]) -> None:
+    """A rule that names a dual-stack object on one family's list only (an
+    IPv4 reference to a name that also exists in address6, or the mirror)
+    cannot say so in the model, where a reference has no family: it is
+    declared on the rule (dropped_inputs 'ipv6_scope', raw_extras lists the
+    names) instead of silently widened. Pops the parser's family lists."""
+    dual = {o["name"] for o in objects
+            if o.get("obj_type") == "address" and (o.get("value") or {}).get("value6")}
+    for r in rules:
+        fam = r.pop("_family_lists", None) or {}
+        scoped: list[str] = []
+        for side, (n4, n6) in fam.items():
+            for n in dual:
+                if (n in n4) != (n in n6):
+                    scoped.append(f"{side}:{n}:ipv{4 if n in n4 else 6}")
+        if scoped:
+            r.setdefault("dropped_inputs", []).append("ipv6_scope")
+            extras = r.get("raw_extras") or {}
+            extras["ipv6_scope"] = scoped
+            r["raw_extras"] = extras
+
+
 def parse_address_groups(payload: dict) -> list[dict]:
     """Parse FortiOS firewall/addrgrp → fw_imported_objects (address_group).
     All members retained verbatim (renderer-side normalization rule)."""
@@ -514,6 +1069,85 @@ _FORTI_FACTORY_ADDR_NAMES = frozenset({
     "swscan.apple.com", "firmware.apple.com", "autoupdate.opera.com",
     "google-play", "Gotomeeting", "adobe", "Adobe Login",
 })
+
+# FortiOS factory service objects and service groups, captured from pristine
+# 7.2 and 7.6 boxes (optimize._FORTI_PREDEFINED unions it with the address
+# names). A rule may reference them without the push creating them, so the
+# renderer accepts these names; any other unknown service name is an
+# unresolved reference and blocks the push. Over-listing only protects more
+# (FortiOS reserves these names, a user object cannot collide). Refresh per
+# major FortiOS version by capturing another pristine box's service list.
+FORTI_STOCK_SERVICE_GROUP_NAMES = frozenset({
+    "Email Access", "Exchange Server", "Web Access", "Windows AD",
+})
+FORTI_STOCK_SERVICE_NAMES = frozenset({
+    "ALL", "ALL_TCP", "ALL_UDP", "ALL_ICMP", "ALL_ICMP6", "NONE", "AFS3", "AH", "AOL",
+    "BGP", "CVSPSERVER", "DCE-RPC", "DHCP", "DHCP6", "DNS", "ESP", "FINGER", "FTP",
+    "FTP_GET", "FTP_PUT", "GOPHER", "GRE", "GTP", "H323", "HTTP", "HTTPS", "IKE", "IMAP",
+    "IMAPS", "INFO_ADDRESS", "INFO_REQUEST", "Internet-Locator-Service", "IRC", "KERBEROS",
+    "L2TP", "LDAP", "LDAP_UDP", "MGCP", "MMS", "MS-SQL", "MYSQL", "NetMeeting", "NFS",
+    "NNTP", "NTP", "ONC-RPC", "OSPF", "PC-Anywhere", "PING", "PING6", "POP3", "POP3S",
+    "PPTP", "QUAKE", "RADIUS", "RADIUS-OLD", "RAUDIO", "RDP", "REXEC", "RIP", "RLOGIN",
+    "RSH", "RTSP", "SAMBA", "SCCP", "SIP", "SIP-MSNmessenger", "SMB", "SMTP", "SMTPS",
+    "SNMP", "SOCKS", "SQUID", "SSH", "SYSLOG", "TALK", "TELNET", "TFTP", "TIMESTAMP",
+    "TRACEROUTE", "UUCP", "VDOLIVE", "VNC", "WAIS", "WINFRAME", "WINS", "X-WINDOWS",
+    "webproxy",
+    # older or other builds (over-listing only protects more)
+    "KERBEROS_UDP", "KERBEROS_TCP", "NAT-T", "BFD", "ICMP_ANY",
+})
+FORTI_FACTORY_SERVICE_NAMES = FORTI_STOCK_SERVICE_NAMES | FORTI_STOCK_SERVICE_GROUP_NAMES
+
+# The rest of the vendor-shipped catalog a fresh FortiOS carries (7.6.7
+# measured 2026-10-11, older builds add nothing the push would meet).
+# Different question from `is_factory_address` below: that one says what the
+# IMPORT leaves out because other vendors cannot hold it (wildcard FQDNs,
+# the any sentinels), this one says what the PUSH must never delete on the
+# target, which is every vendor entry, including the plain FQDN objects a
+# customer rule may reference (login.microsoft.com migrates like any FQDN).
+# The lab wipe tool reads the same sets so a wiped box equals a fresh one.
+FORTI_STOCK_ADDRESS_NAMES = frozenset({
+    "all", "none", "EMS_ALL_UNKNOWN_CLIENTS", "EMS_ALL_UNMANAGEABLE_CLIENTS",
+    "FABRIC_DEVICE", "FIREWALL_AUTH_PORTAL_ADDRESS", "LocalMachine_Loopback",
+    "SSLVPN_TUNNEL_ADDR1", "SSLVPN_TUNNEL_IPv6_ADDR1", "metadata-server",
+    "login.microsoft.com", "login.microsoftonline.com", "login.windows.net",
+    "gmail.com", "wildcard.google.com", "wildcard.dropbox.com",
+})
+FORTI_STOCK_ADDRGRP_NAMES = frozenset({"G Suite", "Microsoft Office 365"})
+# the IPv6 namespaces (firewall/address6, firewall/addrgrp6) ship their own
+# catch-alls and the SSL-VPN pool (docs/IPV6_PLAN.md, phase 3)
+FORTI_STOCK_ADDRESS6_NAMES = frozenset({"all", "none", "SSLVPN_TUNNEL_IPv6_ADDR1"})
+FORTI_STOCK_ADDRGRP6_NAMES: frozenset = frozenset()
+FORTI_STOCK_SCHEDULE_NAMES = frozenset({"always", "none", "default-darrp-optimize"})
+
+_STOCK_BY_PATH = {
+    "firewall/address": FORTI_STOCK_ADDRESS_NAMES,
+    "firewall/addrgrp": FORTI_STOCK_ADDRGRP_NAMES,
+    "firewall/address6": FORTI_STOCK_ADDRESS6_NAMES,
+    "firewall/addrgrp6": FORTI_STOCK_ADDRGRP6_NAMES,
+    "firewall.service/custom": FORTI_STOCK_SERVICE_NAMES,
+    "firewall.service/group": FORTI_STOCK_SERVICE_GROUP_NAMES,
+    "firewall.schedule/recurring": FORTI_STOCK_SCHEDULE_NAMES,
+    "firewall.schedule/onetime": FORTI_STOCK_SCHEDULE_NAMES,
+    "firewall.schedule/group": FORTI_STOCK_SCHEDULE_NAMES,
+}
+
+
+def is_stock_entry(cmdb_path: str, name, entry: dict | None = None) -> bool:
+    """True for a vendor-shipped entry of a FortiOS object section: the push's
+    delete phase keeps it, the lab wipe leaves it. By name per section, and
+    for addresses also by value (a wildcard FQDN is FortiGuard's), the same
+    rule the import filter applies."""
+    path = (cmdb_path or "").strip("/").replace("/firewall/", "firewall/")
+    names = _STOCK_BY_PATH.get(path)
+    if names is None:
+        return False
+    n = str(name or "").strip()
+    if n in names:
+        return True
+    if path == "firewall/address" and isinstance(entry, dict):
+        if (entry.get("type") or "").lower() == "fqdn" and "*" in str(entry.get("fqdn") or ""):
+            return True
+    return False
 
 
 def is_factory_address(name: str, value: dict | None) -> bool:
@@ -748,7 +1382,9 @@ def parse_central_snat_rules(payload: dict) -> list[dict]:
         # we still capture them so the user sees source intent - they're
         # marked disabled instead of dropped.
         nat_state = (e.get("nat") or "").strip().lower()
-        pool_refs = ref_names(e.get("nat-ippool"))
+        # an entry of type ipv6 keeps its addresses and pool in the v6 fields
+        # (docs/IPV6_PLAN.md, phase 4)
+        pool_refs = ref_names(e.get("nat-ippool")) + ref_names(e.get("nat-ippool6"))
         if pool_refs:
             trans_src = pool_refs[0]
             trans_type = "dynamic-ip-and-port"
@@ -765,8 +1401,8 @@ def parse_central_snat_rules(payload: dict) -> list[dict]:
             "src_zones":       ref_names(e.get("srcintf")) or ["any"],
             "dst_zones":       ref_names(e.get("dstintf")) or ["any"],
             "interface_name":  None,
-            "orig_src":        any_names(e.get("orig-addr")),
-            "orig_dst":        any_names(e.get("dst-addr")),
+            "orig_src":        family_names(e.get("orig-addr"), e.get("orig-addr6")),
+            "orig_dst":        family_names(e.get("dst-addr"), e.get("dst-addr6")),
             "orig_service":    ["any"],  # central-snat doesn't carry service refs
             "trans_src":       trans_src,
             "trans_src_type":  trans_type,
@@ -849,8 +1485,11 @@ def parse_policy_routes(payload: dict) -> list[dict]:
             if objs:
                 return objs
             inline = []
-            for m in (e.get(inline_key) or []):
-                sub = m.get("subnet") if isinstance(m, dict) else None
+            raw = e.get(inline_key) or []
+            if isinstance(raw, str):          # router/policy6 carries a prefix string
+                raw = [{"subnet": raw}] if raw.strip() and raw.strip() != "::/0" else []
+            for m in raw:
+                sub = (m.get("subnet") or m.get("subnet6")) if isinstance(m, dict) else None
                 if sub:
                     inline.append(_forti_subnet_to_cidr(sub))
             return inline or ["any"]
@@ -876,7 +1515,7 @@ def parse_policy_routes(payload: dict) -> list[dict]:
             action = "forward"
             egress = (e.get("output-device") or "").strip() or None
             gw = (e.get("gateway") or "").strip() or None
-            if gw in ("0.0.0.0", ""):
+            if gw in ("0.0.0.0", "::", ""):
                 gw = None
 
         raw_extras: dict = {}
@@ -1190,6 +1829,21 @@ def parse_interfaces(payload: dict, zone_map: dict[str, str]) -> tuple[list[dict
             cidr = iface_ip_to_cidr(sec.get("ip"))
             if cidr:
                 ips.append(cidr)
+        # the interface's ipv6 block: ip6-address (::/0 when unset) and
+        # the extras (docs/IPV6_PLAN.md, phase 3)
+        v6 = e.get("ipv6") or {}
+        if isinstance(v6, dict):
+            for raw6 in [v6.get("ip6-address")] + [x.get("prefix") for x in (v6.get("ip6-extra-addr") or [])
+                                                   if isinstance(x, dict)]:
+                raw6 = (raw6 or "").strip()
+                if not raw6 or raw6 == "::/0":
+                    continue
+                try:
+                    ipaddress.ip_interface(raw6)
+                except ValueError:
+                    continue
+                if raw6 not in ips:
+                    ips.append(raw6)
 
         members: list[str] = []
         if mapped == "bond":
@@ -1274,8 +1928,6 @@ def parse_routes(payload: dict, iface_names: set[str],
                 net = ipaddress.IPv4Network(dst_raw, strict=False)
         except Exception:
             continue
-        ip_from = int(net.network_address)
-        ip_to = int(net.broadcast_address)
 
         iface_name = (e.get("device") or "").strip() or None
         if iface_name and iface_names and iface_name not in iface_names:
@@ -1301,12 +1953,54 @@ def parse_routes(payload: dict, iface_names: set[str],
         routes.append({
             "prefix":   str(net.network_address),
             "plen":     net.prefixlen,
-            "ip_from":  ip_from,
-            "ip_to":    ip_to,
             "iface":    iface_name,
             "next_hop": next_hop,
             "vr":       vr_name,
         })
+    return routes
+
+
+def parse_routes6(payload: dict, iface_names: set[str],
+                  iface_vrf: dict[str, int] | None = None) -> list[dict]:
+    """Parse router/static6 entries the way parse_routes parses router/static:
+    the dst is a prefix, the gateway '::' means none, a blackhole carries
+    route_type (docs/IPV6_PLAN.md, phase 3)."""
+    routes: list[dict] = []
+    for e in payload.get("results") or []:
+        status = (e.get("status") or "enable").lower()
+        if status != "enable":
+            continue
+        dst_raw = (e.get("dst") or "").strip()
+        if not dst_raw:
+            continue
+        try:
+            net = ipaddress.IPv6Network(dst_raw, strict=False)
+        except Exception:
+            continue
+        iface_name = (e.get("device") or "").strip() or None
+        if iface_name and iface_names and iface_name not in iface_names:
+            iface_name = None
+        next_hop = (e.get("gateway") or "").strip() or None
+        if next_hop in ("::", ""):
+            next_hop = None
+        vrf_id = 0
+        try:
+            vrf_id = int(e.get("vrf") or 0)
+        except (TypeError, ValueError):
+            pass
+        if vrf_id == 0 and iface_vrf and iface_name:
+            vrf_id = int(iface_vrf.get(iface_name) or 0)
+        vr_name = "default" if vrf_id == 0 else f"vrf-{vrf_id}"
+        row = {
+            "prefix":   str(net.network_address),
+            "plen":     net.prefixlen,
+            "iface":    iface_name,
+            "next_hop": next_hop,
+            "vr":       vr_name,
+        }
+        if (e.get("blackhole") or "").lower() == "enable":
+            row["route_type"] = "blackhole"
+        routes.append(row)
     return routes
 
 
@@ -1416,6 +2110,31 @@ def tunnel_iface_names(vpn_tunnels: list) -> dict[str, str]:
     return out
 
 
+def _forti_p2_sides(sel: dict) -> dict:
+    """The phase2 fields of one selector pair in its family's form
+    (docs/IPV6_PLAN.md, phase 5): a prefix as subnet/subnet6, a first-last
+    range as range/range6 with its start and end addresses."""
+    out: dict = {}
+    for side, key in (("src", "local"), ("dst", "remote")):
+        raw = str(sel.get(key) or "").strip()
+        v6 = ":" in raw
+        if "-" in raw and "/" not in raw:
+            a, _, b = raw.partition("-")
+            out[f"{side}-addr-type"] = "range6" if v6 else "range"
+            out[f"{side}-start-ip{'6' if v6 else ''}"] = a.strip()
+            out[f"{side}-end-ip{'6' if v6 else ''}"] = b.strip()
+        elif v6:
+            try:
+                net = str(ipaddress.ip_network(raw, strict=False))
+            except ValueError:
+                net = "::/0"
+            out[f"{side}-addr-type"] = "subnet6"
+            out[f"{side}-subnet6"] = net
+        else:
+            out[f"{side}-subnet"] = _cidr_to_forti_subnet(raw) or "0.0.0.0 0.0.0.0"
+    return out
+
+
 def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
                dropped) -> tuple[list[dict], list[dict]]:
     """Agnostic vpn tunnels → FortiOS (phase1-interface, phase2-interface) entry
@@ -1474,7 +2193,16 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
             p1["type"] = "dynamic"
         else:
             p1["type"] = "static"
-            p1["remote-gw"] = peer
+            # a phase1 is bound to one family: an IPv6 peer takes ip-version 6
+            # and remote-gw6 (measured 7.6.7, docs/IPV6_PLAN.md phase 5)
+            if ":" in peer:
+                p1["ip-version"] = "6"
+                p1["remote-gw6"] = peer
+            else:
+                p1["remote-gw"] = peer
+        _peer6 = ((v.get("raw_extras") or {}).get("peer_address6") if isinstance(v.get("raw_extras"), dict) else None)
+        if _peer6 and ":" not in peer:
+            dropped.append(peer_address6_drop(name, _peer6, "FortiOS"))
         if (v.get("auth_type") or "psk") == "cert":
             cert_name = v.get("cert_name")
             # cert-auth needs an uploaded identity cert (CR-3) - its name is the
@@ -1524,23 +2252,24 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
         # (src/dst subnet) linked to the same phase1. Route-based (no
         # selectors) → the single 0.0.0.0/0 phase2 (the prior behaviour).
         sels = v.get("traffic_selectors") or []
-        pairs = [(_cidr_to_forti_subnet(s.get("local")),
-                  _cidr_to_forti_subnet(s.get("remote"))) for s in sels]
+        _s4, _s6, _mixed = split_selectors_by_family(sels)
+        for _m in _mixed:
+            dropped.append(mixed_selector_drop(name, _m))
+        pairs = [_forti_p2_sides(s) for s in _s4 + _s6]
         if not pairs:
-            pairs = [("0.0.0.0 0.0.0.0", "0.0.0.0 0.0.0.0")]
+            pairs = [{"src-subnet": "0.0.0.0 0.0.0.0", "dst-subnet": "0.0.0.0 0.0.0.0"}]
         if any(s.get("protocol") for s in sels):
             dropped.append(DroppedField(
                 rule_id=name, field="proxy-id-protocol",
                 reason="phase2 selectors carry subnets only, "
                        "protocol/port narrowing dropped"))
-        for idx, (src, dst) in enumerate(pairs):
+        for idx, sides in enumerate(pairs):
             p2name = (f"{p1name}-p2-{idx + 1}" if len(pairs) > 1
                       else f"{p1name}-p2")[:35]
             p2: dict = {
                 "name": p2name,
                 "phase1name": p1name,
-                "src-subnet": src or "0.0.0.0 0.0.0.0",
-                "dst-subnet": dst or "0.0.0.0 0.0.0.0",
+                **sides,
             }
             if prop2:
                 p2["proposal"] = prop2
@@ -1550,3 +2279,116 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
                 p2["keylifeseconds"] = kl2
             p2_entries.append(p2)
     return p1_entries, p2_entries
+
+
+# ── FortiManager transport (on-prem token, FortiManager Cloud session) ────
+# Shared by the Community Edition's manager discovery (managerdiscovery.py)
+# and the Enterprise FortiManager driver, which imports it from here
+# (docs/MANAGER_DISCOVERY_PLAN.md, M2). FortiManager Cloud is the same
+# JSON-RPC behind https://<customer id>.<region>.fortimanager.forticloud.com,
+# but the credential is a FortiCloud IAM API user: its password grant (client
+# id "FortiManager", four hours) buys an access token, the instance login
+# /p/forticloud_jsonrpc_login/ turns it into a JSON-RPC session, and every
+# call carries "session" in the body instead of a Bearer header. One cached
+# session per host and user (the service caps an API user at 20 sessions),
+# renewed once when a call answers status -11, which is how a FortiManager
+# reports a session it no longer knows. Built from the documentation
+# (Fortinet community tip 132120, FortiManager Cloud 7.6 "Adding API
+# users"), docs/CLOUD_MANAGERS_PLAN.md carries the assumptions until a live
+# run ticks them.
+FMG_CLOUD_CLIENT_ID = "FortiManager"
+_FMG_SESSIONS: dict[tuple[str, str], str] = {}     # (host, api_id) -> session
+
+
+class FmgCloudAuth:
+    """The credential of a FortiManager Cloud instance, passed wherever an
+    on-prem FortiManager's API key goes."""
+
+    def __init__(self, host: str, api_id: str, password: str):
+        self.host, self.api_id, self.password = host, api_id, password
+
+    def session(self) -> str:
+        key = (self.host, self.api_id)
+        sess = _FMG_SESSIONS.get(key)
+        if sess:
+            return sess
+        token = cloud_token(self.api_id, self.password, client_id=FMG_CLOUD_CLIENT_ID)
+        r = requests.post(f"https://{self.host}/p/forticloud_jsonrpc_login/",
+                          json={"access_token": token}, verify=False,
+                          timeout=(_CONNECT_TIMEOUT, 30))
+        try:
+            body = r.json() or {}
+        except ValueError:
+            body = {}
+        sess = body.get("session") if r.status_code == 200 else None
+        if not sess:
+            msg = (body.get("error_description") or body.get("message") or body.get("error")
+                   or (r.text or "")[:120] or f"HTTP {r.status_code}")
+            raise RuntimeError(f"FortiManager Cloud login refused on {self.host}: {msg}")
+        _FMG_SESSIONS[key] = str(sess)
+        return _FMG_SESSIONS[key]
+
+    def renew(self) -> None:
+        """Forget the session so the next call logs in again. The access
+        token is kept while it is valid, cloud_token renews it on its own."""
+        _FMG_SESSIONS.pop((self.host, self.api_id), None)
+
+    def __repr__(self) -> str:   # never the password
+        return f"FmgCloudAuth({self.host}, {self.api_id})"
+
+
+def fmg_auth(host: str, key: str, cloud_api_id: str = ""):
+    """What `fmg_rpc` takes as `token`: the plain API key of an on-prem
+    FortiManager, or the cloud credential when the row names an IAM API user
+    (the key is then that user's password)."""
+    return FmgCloudAuth(host, cloud_api_id, key) if cloud_api_id else key
+
+
+def fmg_rpc(host: str, token, method: str, url: str,
+            data=None, port: int = 443, _retry: bool = True, extra: dict | None = None):
+    """One FortiManager JSON-RPC call. `token` is the on-prem API key (Bearer
+    header) or an FmgCloudAuth (session in the body, see fmg_auth). `extra`
+    joins the request parameter (fields, filter, option). Returns
+    (ok: bool, result0: dict, error: str)."""
+    param: dict = {"url": url}
+    if data is not None:
+        param["data"] = data
+    if extra:
+        param.update(extra)
+    body: dict = {"method": method, "params": [param], "id": 1}
+    headers: dict = {}
+    if isinstance(token, FmgCloudAuth):
+        try:
+            body["session"] = token.session()
+        except Exception as e:
+            return False, {}, str(e)
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        r = requests.post(f"https://{host}:{port}/jsonrpc", headers=headers,
+                          json=body, verify=False, timeout=(_CONNECT_TIMEOUT, 60))
+        j = r.json()
+    except Exception as e:
+        return False, {}, str(e)
+    res = (j.get("result") or [{}])[0]
+    st = res.get("status") or {}
+    code = st.get("code")
+    if code not in (0, None):
+        if code == -11 and isinstance(token, FmgCloudAuth) and _retry:
+            # a session the instance no longer knows: log in once more
+            token.renew()
+            return fmg_rpc(host, token, method, url, data=data, port=port, _retry=False, extra=extra)
+        return False, res, f"{code}: {st.get('message')}"
+    return True, res, ""
+
+
+def fmg_logout(host: str, token, port: int = 443) -> None:
+    """Close a FortiManager Cloud session (a discovery leaves none behind);
+    an on-prem token has no session to close."""
+    if not isinstance(token, FmgCloudAuth):
+        return
+    try:
+        fmg_rpc(host, token, "exec", "/sys/logout", port=port, _retry=False)
+    except Exception:
+        pass
+    token.renew()

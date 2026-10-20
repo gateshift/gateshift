@@ -51,7 +51,13 @@ services:
 
   python:
     build:
-      context: ./pyapp/gateshift
+      # The repository root, so the image bakes the SQL jobs and the VERSION
+      # file beside the collector's code. Everything the collector runs is
+      # then in the image: a git pull alone changes nothing at runtime, and
+      # only a rebuild brings new code, in both halves at once
+      # (docs/DEVICE_IDENTITY_PLAN.md, D7).
+      context: .
+      dockerfile: pyapp/gateshift/Dockerfile
     restart: unless-stopped
     working_dir: /app
     depends_on:
@@ -64,8 +70,8 @@ services:
       DB_USER: ${DB_USER:-gateshift}
       DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (see .env.example)}
     volumes:
-      # Data, not code: SQL jobs and the syslog spool the collector reads.
-      - ./sql:/sql
+      # Data, not code: the syslog spool the collector reads. The SQL jobs
+      # are code and live in the image.
       - ./syslog-ng/logs:/logs:ro
     command: ["sleep", "infinity"]
 

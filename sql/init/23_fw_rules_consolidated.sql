@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS fw_rules_consolidated_1 (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor VARCHAR(64) NULL,
-  device_host VARCHAR(255) NULL,
+  -- the Device (docs/DEVICE_IDENTITY_PLAN.md, phases 5 and 7)
+  device_id INT NULL,
   action ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
   iface_in VARCHAR(64) NULL,
@@ -34,9 +35,11 @@ CREATE TABLE IF NOT EXISTS fw_rules_consolidated_1 (
   -- sql/jobs/23_build_rules_consolidated.sql so override tables can bind to rules
   -- even when no pipeline modules are enabled (i.e. tail = consolidated_1).
   content_hash BINARY(20) NULL,
+  KEY idx_device_id (device_id),
   PRIMARY KEY (id),
   KEY idx_generated (generated_at),
   KEY idx_dst (dst_ip, proto, dst_port),
   KEY idx_src (src_ip),
-  KEY idx_content_hash (content_hash)
+  KEY idx_content_hash (content_hash),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;

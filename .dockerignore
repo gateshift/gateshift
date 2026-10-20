@@ -1,0 +1,12 @@
+# The collector image is built from the repository root (see
+# docker-compose.yml, service python). Keep the build context to what the
+# image copies: pyapp/gateshift, sql and webui/VERSION. Everything else is
+# excluded, the webapp's own context is ./webui and has its own ignore.
+*
+!pyapp/gateshift/**
+!sql/**
+!webui/VERSION
+pyapp/gateshift/__pycache__
+pyapp/gateshift/**/__pycache__
+pyapp/gateshift/tests
+sql/**/*.disabled

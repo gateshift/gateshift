@@ -25,11 +25,11 @@
 
   <div class="field">
     <label style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
-      Pick the gateway running <span style="color:var(--blue);">{{ form_package }}</span>
+      Pick the gateway for <span style="color:var(--blue);">{{ form_package }}</span>
     </label>
     {% if not gateways %}
       <div class="tag warn" style="display:flex;width:auto;padding:10px 14px;border-radius:0;font-size:var(--fs-body);">
-        No gateways are currently running this policy. In Check Point, install the policy on a gateway first (SmartConsole → Install Policy).
+        No gateway runs this policy and none is without a policy. In Check Point, create the gateway object or install the policy on a gateway first (SmartConsole → Install Policy).
       </div>
     {% else %}
       <div style="display:flex;flex-direction:column;gap:6px;max-width:720px;">
@@ -52,6 +52,9 @@
             <span class="tag" style="padding:1px 8px;font-size:var(--fs-caption);">Gateway</span>
           {% endif %}
           <span class="dash" style="">{{ gw.ipv4 or '-' }}</span>
+          {% if not gw.installed and not _disabled %}
+          <span class="dash" style="margin-left:auto;font-style:italic;font-size:var(--fs-small);" title="The package becomes this device's pin. Install it on the gateway in SmartConsole when ready.">no policy installed yet</span>
+          {% endif %}
           {% if _disabled %}
           <span style="margin-left:auto;color:var(--amber);opacity:0.7;font-style:italic;font-size:var(--fs-small);">{{ gw.reason }}</span>
           {% endif %}

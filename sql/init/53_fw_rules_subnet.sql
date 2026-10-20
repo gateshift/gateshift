@@ -4,14 +4,15 @@
 USE gateshift;
 
 -- Module: Subnet aggregation
--- Groups rules by (vendor, device_host, action, direction, proto, dst_port)
+-- Groups rules by (vendor, device_id, action, direction, proto, dst_port)
 -- Private IPs aggregated into subnets based on density thresholds
 
 CREATE TABLE IF NOT EXISTS fw_rules_subnet (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor       VARCHAR(64) NULL,
-  device_host  VARCHAR(255) NULL,
+  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  device_id  INT NULL,
   action       ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction    ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
   proto        VARCHAR(16) NULL,
@@ -32,10 +33,12 @@ CREATE TABLE IF NOT EXISTS fw_rules_subnet (
   -- Stable per-rule identity hash; written post-stage from db_jobs.py.
   -- See gateshift/modules/db_jobs.py::_write_content_hash_subtable.
   content_hash BINARY(20) NULL,
+  KEY idx_device_id (device_id),
   PRIMARY KEY (id),
   KEY idx_generated  (generated_at),
   KEY idx_proto_port (proto, dst_port),
-  KEY idx_content_hash (content_hash)
+  KEY idx_content_hash (content_hash),
+  FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fw_rules_subnet_sources (

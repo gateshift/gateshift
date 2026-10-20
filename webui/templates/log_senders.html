@@ -1,0 +1,124 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# The log senders (docs/DEVICE_IDENTITY_PLAN.md, phase 4): every syslog
+   sender the receiver has heard, three observed fields each (the hostname in
+   the syslog header, the address the packets came from, the vendor's serial
+   from inside the message), with the Device it points at. A sender string
+   never creates a Device; attaching and detaching are the operator's acts
+   here or in the add dialog's "from the log stream" route. #}
+{% extends "base.html" %}
+{% block title %}Log Senders &middot; Gateshift{% endblock %}
+{% block content %}
+<div class="sec-hd">
+  <h1>Log Senders</h1>
+  <div class="count">
+    <span class="n">{{ senders | length }}</span>
+    <span class="lbl">sender{{ '' if senders|length == 1 else 's' }}</span>
+    {% if unattributed %}<span class="lbl" style="margin-left:10px;">&middot; {{ unattributed }} not attributed</span>{% endif %}
+  </div>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+    <form method="post" action="/devices/senders/scan" style="display:contents;"
+          onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
+      <button type="submit" class="btn" title="Read the receiver's spool and refresh this list. Registers nothing">Scan for senders</button>
+    </form>
+    <a href="/projects" class="btn">Devices</a>
+  </div>
+</div>
+
+<div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.55;margin-bottom:12px;">
+  What the receiver hears, not what was registered: a sender is the hostname in the syslog header, the
+  address the packets came from and, where the vendor sends one, the unit's serial. A FortiGate writes no
+  header hostname and shows its address there. Attach a sender to the Device it is, and its stored lines
+  join that Device's evidence at once. Detaching rebuilds the Device without them.
+</div>
+
+{% if senders %}
+<div class="twrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Header host</th>
+        <th>Address</th>
+        <th>Serial</th>
+        <th>Vendor</th>
+        <th style="text-align:right;">Lines</th>
+        <th>Last seen</th>
+        <th>Device</th>
+        <th style="text-align:right;"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in senders %}
+      <tr id="sender-{{ s.id }}">
+        <td>{{ s.header_host or '-' }}</td>
+        <td>{{ s.source_addr or '-' }}</td>
+        <td>{{ s.vendor_serial or '-' }}</td>
+        <td>{{ s.vendor_label }}</td>
+        <td style="text-align:right;">{{ s.line_count }}</td>
+        <td class="date">{% if s.last_seen %}{{ s.last_seen | rel_time }}{% else %}<span class="dash">-</span>{% endif %}</td>
+        <td>
+          {% if s.device_id %}
+          {{ s.device_name }} <span class="mut">&middot; {{ platform_labels.get(s.device_platform, s.device_platform or '') }}</span>
+          {% else %}
+          <span class="dash" title="No Device is mapped to this sender: its lines are stored and count for nothing yet">not attributed</span>
+          {% endif %}
+        </td>
+        <td style="text-align:right;white-space:nowrap;">
+          {% if s.device_id %}
+          <button type="button" class="btn danger" onclick="senderDetach({{ s.id }}, {{ (s.device_name or '') | tojson }}, {{ s.override_rows }})"
+                  title="Release the mapping. The lines stay with the sender, the Device is rebuilt without them">Detach</button>
+          {% else %}
+          <select id="sender-dev-{{ s.id }}" class="inp" style="font-size:var(--fs-small);padding:4px 8px;width:auto;">
+            <option value="">attach to…</option>
+            {% for d in devices %}
+            <option value="{{ d.id }}">{{ d.display_name or d.host_name }} ({{ platform_labels.get(d.platform, d.platform or '?') }})</option>
+            {% endfor %}
+          </select>
+          <button type="button" class="btn" onclick="senderAttach({{ s.id }})">Attach</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty" style="background:var(--bg1);border:1px solid var(--line);border-radius:0;">
+  The receiver has heard no sender yet. Point the firewall's remote logging at this host (UDP 514), let
+  traffic flow for a few minutes, then scan.
+</div>
+{% endif %}
+
+<script>
+function senderAttach(id) {
+  var sel = document.getElementById('sender-dev-' + id);
+  var did = sel ? Number(sel.value || 0) : 0;
+  if (!did) { showToast('Pick a Device first', 'error'); return; }
+  fetch('/devices/senders/attach', {method: 'POST', headers: {'Content-Type': 'application/json'},
+         body: JSON.stringify({sender_id: id, device_id: did})})
+    .then(function (r) { return r.json().then(function (j) { return [r.ok, j]; }); })
+    .then(function (res) {
+      if (!res[0]) { showToast(res[1].error || 'attach failed', 'error', 9000); return; }
+      showToast('Attached to ' + res[1].device, 'success');
+      window.location.reload();
+    })
+    .catch(function (e) { showToast('attach failed: ' + e.message, 'error'); });
+}
+function senderDetach(id, device, overrides) {
+  var body = ['The lines stay with the sender. ' + device + ' is rebuilt without them.'];
+  if (overrides) body.push('Up to ' + overrides + ' edit(s) on the rules of ' + device + ' can be lost at the next generate, where a rule no longer derives.');
+  confirmModal({title: 'Detach this sender from ' + device + '?', body: body, confirmLabel: 'Detach', danger: true})
+    .then(function (ok) {
+      if (!ok) return;
+      return fetch('/devices/senders/detach', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                   body: JSON.stringify({sender_id: id})})
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j.error) { showToast(j.error, 'error', 9000); return; }
+          showToast('Detached', 'success');
+          window.location.reload();
+        });
+    })
+    .catch(function (e) { showToast('detach failed: ' + e.message, 'error'); });
+}
+</script>
+{% endblock %}

@@ -20,7 +20,8 @@
 
       <div class="field">
         <label>Platform</label>
-        <select name="platform" id="add-device-platform" onchange="onAddPlatformChange(this.value)" class="inp">
+        <select name="platform" id="add-device-platform" onchange="onAddPlatformChange(this.value)" class="inp" required>
+          <option value="" selected disabled>Select a platform</option>
           {# Check Point splits by tier: a single Gateway (CE - via its mgmt API) vs a management
              server / MDS (EE - fans into scopes). Render both explicitly; skip the generic
              'checkpoint' loop entry. The Mgmt/MDS entry only when the Enterprise module is present.
@@ -32,33 +33,57 @@
              discovery from its logs. Credentials are added on the device row afterwards,
              which is what turns a box into a push TARGET: same platform key throughout,
              one device row per firewall, whatever roles it ends up carrying. #}
-          {% for val, label in platform_labels.items() if val not in ('checkpoint', 'opnsense') %}
-          <option value="{{ val }}">{{ label }}</option>
-          {% endfor %}
-          <option value="checkpoint_gw">Check Point (Single Gateway)</option>
-          {# Mgmt/MDS renders in CE too - selecting it there shows the EE hint
-             (same conversion message the Panorama/FMG import detection gives). #}
-          <option value="checkpoint">Check Point (SMS / MDS)</option>
-          <option value="opnsense_upload">OPNsense (configuration upload)</option>
-          <option value="logsource">Log source (OPNsense), discover from logs</option>
+          {# Four groups (user decision 2026-10-18): the firewalls, the cloud
+             platforms (credentials or a bundle, switched inside the block), the
+             log sources, the managers to discover. #}
+          <optgroup label="Firewalls and Clusters">
+            <option value="panw">{{ platform_labels.get('panw', 'Palo Alto Networks') }}</option>
+            <option value="fortigate">{{ platform_labels.get('fortigate', 'FortiGate') }}</option>
+            <option value="checkpoint_gw">Check Point</option>
+            {# A management server / MDS registers as a manager in the EE only; the CE
+               reads it through the discovery group below. #}
+            {% if manager_ui %}<option value="checkpoint">Check Point (SMS / MDS)</option>{% endif %}
+            <option value="firepower">{{ platform_labels.get('firepower', 'Cisco Firepower') }}</option>
+            <option value="asa">{{ platform_labels.get('asa', 'Cisco ASA') }}</option>
+            <option value="opnsense_upload">OPNsense</option>
+            {% for val, label in platform_labels.items()
+               if val not in ('panw', 'fortigate', 'checkpoint', 'firepower', 'asa', 'opnsense') and val not in cloud_platforms %}
+            <option value="{{ val }}">{{ label }}</option>
+            {% endfor %}
+          </optgroup>
+          {% if cloud_platforms %}
+          <optgroup label="Cloud Platforms">
+            {% for val in cloud_platforms | sort %}
+            <option value="{{ val }}">{{ platform_labels.get(val, val) }}</option>
+            {% endfor %}
+          </optgroup>
+          {% endif %}
+          {# A box that enters from the LOG STREAM (docs/DEVICE_IDENTITY_PLAN.md, phase 4):
+             the real platform, and the senders the receiver has heard as the candidates.
+             Only OPNsense is offered: its sender is verified live. The FortiOS and
+             Check Point log parsers read recorded lines only so far, their entries
+             (fortigate_logs, checkpoint_logs) return with the live check of the log
+             ingest (CE backlog item 13, next version); the routes still accept them. #}
+          <optgroup label="Log Sources">
+            <option value="opnsense_logs">OPNsense</option>
+          </optgroup>
+          {# Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): the manager is read with
+             the credentials typed into its block and its scopes are shown with counts.
+             Nothing is stored. Importing the scopes is the Enterprise Edition. #}
+          <optgroup label="Manager (Discovery)">
+            <option value="discover_panorama">Panorama</option>
+            <option value="discover_fortimanager">FortiManager</option>
+            <option value="discover_fmgcloud">FortiManager Cloud</option>
+            <option value="discover_checkpoint">Check Point management (SmartCenter, Smart-1 Cloud, MDS)</option>
+            <option value="discover_scm">Strata Cloud Manager</option>
+          </optgroup>
         </select>
       </div>
-
-      {# CE only: selecting Mgmt/MDS without the Enterprise module shows the same
-         conversion hint the Panorama/FMG import detection gives. #}
-      {% if not manager_ui %}
-      <div id="cp-ee-hint" class="tag" style="display:none;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.55;">
-        Connecting a Check Point management server (SmartCenter or MDS) needs the
-        Enterprise module. A single gateway can be added via the
-        "Check Point (Single Gateway)" entry.
-      </div>
-      {% endif %}
 
       {# Cisco FTD = source-only via the on-box FDM REST API (admin user/password -
          FDM has no static API keys). FMC-managed boxes have no FDM API. #}
       <div id="ftd-hint" class="tag" style="display:none;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
         Connect a standalone (FDM-managed) FTD as a migration <b>source</b>.
-        FMC is not yet supported.
       </div>
       <div id="ftd-fields" style="display:none;flex-direction:column;gap:12px;">
         <div class="field">
@@ -66,6 +91,19 @@
           <input type="text" name="ftd_username" class="inp" autocomplete="off">
         </div>
       </div>
+
+      {# Cloud platform: credentials, or a bundle the collector script wrote (the
+         upload form below the main form), switched here instead of two entries
+         per platform in the list (user decision 2026-10-18). #}
+      {% if cloud_platforms %}
+      <div id="cloud-mode" style="display:none;gap:18px;align-items:center;font-size:var(--fs-body);color:var(--tx);">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="radio" name="cloud_mode" value="credentials" checked onchange="cloudModeChange(this.value)"> Credentials</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;" title="A bundle the collector script wrote in the provider's cloud shell: no credentials in Gateshift">
+          <input type="radio" name="cloud_mode" value="bundle" onchange="cloudModeChange(this.value)"> Bundle file</label>
+      </div>
+      {% include 'cloud_add_fields.html' %}
+      {% endif %}
 
       {# OPNsense has no fields here on purpose: it is not added as an API host
          (see the Platform comment above). Its credential pair is entered on the
@@ -134,6 +172,78 @@
         </div>
       </div>
 
+      {# Strata Cloud Manager tenant as a SOURCE (EE, docs/CLOUD_MANAGERS_PLAN.md C4):
+         no management address, the service account's secret is the row's
+         secret, TSG and client id go to config.scm, the row is named here. #}
+      <div id="panw-scm-block" style="display:none;flex-direction:column;gap:12px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
+          <input type="checkbox" name="scm_enabled" id="scm-enabled" onchange="onScmToggle(this.checked)">
+          This is a Strata Cloud Manager tenant <span class="dash">(import its folders, snippets and devices)</span>
+        </label>
+        <div id="scm-fields" style="display:none;flex-direction:column;gap:12px;">
+          <div class="field"><label>Name</label>
+            <input type="text" name="scm_name" id="scm-name" class="inp" autocomplete="off"></div>
+          <div class="field"><label>Tenant service group (TSG) id</label>
+            <input type="text" name="scm_tsg_id" id="scm-tsg" class="inp" autocomplete="off"></div>
+          <div class="field"><label>Service account client id</label>
+            <input type="text" name="scm_client_id" id="scm-client-id" class="inp" autocomplete="off"></div>
+          <div class="field"><label>Service account client secret</label>
+            <input type="password" name="scm_client_secret" id="scm-client-secret" class="inp" autocomplete="new-password"></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button type="button" onclick="scmDiscover()" class="btn">Test connection</button>
+            <span id="scm-discover-status" class="dash" style="font-size:var(--fs-small);"></span></div>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if manager_ui %}
+      {# FortiGate reached through FortiGate Cloud (docs/CLOUD_SOURCES_PLAN.md, C1):
+         the same FortiOS API, proxied per serial number; the IAM API user's
+         password takes the API key's place, id, region and serial go to config. #}
+      <div id="fgt-cloud-block" style="display:none;flex-direction:column;gap:12px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
+          <input type="checkbox" name="fgc_enabled" id="fgc-enabled" onchange="onFgcToggle(this.checked)">
+          Reached through FortiGate Cloud <span class="dash">(no direct management access needed)</span>
+        </label>
+        <div id="fgc-fields" style="display:none;flex-direction:column;gap:12px;">
+          <div class="field"><label>Region</label>
+            <select name="fgc_region" id="fgc-region" class="inp">
+              <option value="global">Global</option><option value="us">United States</option>
+              <option value="eu">Europe</option><option value="jp">Japan</option>
+            </select></div>
+          <div class="field"><label>IAM API user id</label>
+            <input type="text" name="fgc_api_id" id="fgc-api-id" class="inp" autocomplete="off"></div>
+          <div class="field"><label>IAM API user password</label>
+            <input type="password" name="fgc_password" id="fgc-password" class="inp" autocomplete="new-password">
+            <p class="dash" style="margin:0;font-size:var(--fs-small);">An IAM API user of the FortiCloud account with FortiGate Cloud set to Admin in its permission profile.</p></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button type="button" onclick="fgcLoadDevices()" class="btn">Load devices</button>
+            <span id="fgc-status" class="dash" style="font-size:var(--fs-small);"></span></div>
+          <div class="field"><label>Serial number</label>
+            <input type="text" name="fgc_serial" id="fgc-serial" list="fgc-serial-list" placeholder="FGT..." class="inp" autocomplete="off"
+                   onchange="fgcSerialChanged()" oninput="fgcSerialChanged()">
+            <datalist id="fgc-serial-list"></datalist>
+            {# the address the cloud reports for the picked serial: becomes the row's mgmt_ip (display only, nothing connects to it) #}
+            <input type="hidden" name="fgc_ip" id="fgc-ip"></div>
+        </div>
+      </div>
+
+      {# A FortiManager Cloud INSTANCE as a source (EE): the management address
+         is the instance host, the API key the IAM API user's password, the
+         user id goes to config.fortimanager.cloud. The import route detects
+         the manager from that block (no probe). #}
+      <div id="fgt-fmgc-block" style="display:none;flex-direction:column;gap:12px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
+          <input type="checkbox" name="fmgc_enabled" id="fmgc-enabled" onchange="onFmgcToggle(this.checked)">
+          This is a FortiManager Cloud instance <span class="dash">(import its ADOMs and packages)</span>
+        </label>
+        <div id="fmgc-fields" style="display:none;flex-direction:column;gap:12px;">
+          <div class="field"><label>IAM API user id</label>
+            <input type="text" name="fmgc_api_id" id="fmgc-api-id" class="inp" autocomplete="off">
+            <p class="dash" style="margin:0;font-size:var(--fs-small);">Management address = the instance host (customer id.region.fortimanager.forticloud.com), API key = the IAM API user's password.</p></div>
+        </div>
+      </div>
+
       <div id="fgt-fmg-block" style="display:none;flex-direction:column;gap:12px;">
         <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
           <input type="checkbox" name="fmg_enabled" id="fmg-enabled" onchange="onFmgToggle(this.checked)">
@@ -145,6 +255,9 @@
                    class="inp" style=""></div>
           <div class="field"><label>FortiManager API Key</label>
             <input type="password" name="fmg_api_key" id="fmg-key" class="inp" autocomplete="new-password"></div>
+          <div class="field"><label>FortiManager Cloud IAM API user id <span class="dash">(optional)</span></label>
+            <input type="text" name="fmg_cloud_api_id" id="fmg-cloud-id" class="inp" autocomplete="off">
+            <p class="dash" style="margin:0;font-size:var(--fs-small);">Only for a FortiManager Cloud instance: host = the instance host, API key = this IAM API user's password.</p></div>
           <div style="display:flex;align-items:center;gap:8px;">
             <button type="button" onclick="fmgDiscover()" class="btn">Discover</button>
             <span id="fmg-discover-status" class="dash" style="font-size:var(--fs-small);"></span></div>
@@ -173,36 +286,76 @@
       <div id="wizard-content"></div>
     </div>
 
-    {# Inline log-source discovery - a SIBLING of the form (own <form>, POSTs to
-       /devices/discover). Log sources are never entered manually: the device is
-       registered from the syslog stream by hostname. #}
-    <div id="logsource-inline" style="display:none;">
-      <form method="post" action="/devices/discover" style="display:flex;flex-direction:column;gap:12px;"
-            onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
+    {# From the log stream (docs/DEVICE_IDENTITY_PLAN.md, phase 4): the candidate
+       list of senders the receiver has heard and no Device is mapped to. One
+       submit creates the Device and the mappings in one transaction; a sender
+       string never creates a Device by itself. A SIBLING of the main form. #}
+    <div id="logstream-inline" style="display:none;">
+      <form method="post" action="/devices/add/logs" id="logstream-form" style="display:flex;flex-direction:column;gap:12px;"
+            onsubmit="return logstreamConfirm(this);">
+        <input type="hidden" class="gs-add-next" name="next" value="">
+        <input type="hidden" name="platform" id="logstream-platform" value="">
         <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.55;">
-          Log-source devices are not entered manually: they are discovered from the syslog
-          stream by hostname. On the firewall, configure remote logging to this Gateshift host
-          (UDP port 514), make sure the relevant rules log, let traffic flow for a few
-          minutes, then discover.
+          The firewall sends its traffic logs to this host (UDP port 514). Pick the sender(s) that
+          are this firewall: the hostname in the syslog header, the address the packets came from
+          and, where the vendor sends one, the unit's serial. A FortiGate writes no header hostname
+          and shows its address there. Two senders on one Device are two members of one firewall
+          (an HA pair or a cluster).
         </div>
+        <div class="field">
+          <label>Name <span class="dash">(optional, the first sender's serial or hostname otherwise)</span></label>
+          <input type="text" name="display_name" class="inp" autocomplete="off">
+        </div>
+        {% if log_senders %}
+        <div class="twrap" style="max-height:260px;overflow:auto;">
+          <table>
+            <thead><tr><th></th><th>Header host</th><th>Address</th><th>Serial</th><th>Vendor</th><th style="text-align:right;">Lines</th><th>Last seen</th></tr></thead>
+            <tbody>
+              {% for s in log_senders %}
+              <tr>
+                <td><input type="checkbox" name="sender" value="{{ s.id }}" class="logstream-sender" data-vendor="{{ s.vendor_platform or '' }}"></td>
+                <td>{{ s.header_host or '-' }}</td>
+                <td>{{ s.source_addr or '-' }}</td>
+                <td>{{ s.vendor_serial or '-' }}</td>
+                <td>{{ s.vendor_label }}</td>
+                <td style="text-align:right;">{{ s.line_count }}</td>
+                <td class="date">{% if s.last_seen %}{{ s.last_seen | rel_time }}{% else %}-{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="mut" style="font-size:var(--fs-small);">No unattributed sender yet. Let the firewall send a few minutes of
+          logs and scan, or upload a capture below. The Device can also be created now, empty, and senders
+          attached later under Log senders.</div>
+        {% endif %}
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
           <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
-          <button type="submit" class="btn">Discover from Logs</button>
+          <button type="submit" class="btn">Add Device</button>
         </div>
       </form>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;">
+        <div class="mut" style="font-size:var(--fs-small);">Refresh the list from the receiver's spool. Registers nothing.</div>
+        <form method="post" action="/devices/senders/scan" style="display:contents;"
+              onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
+          <button type="submit" class="btn">Scan for senders</button>
+        </form>
+      </div>
       {# Capture upload - the UI alternative to copying files into
          syslog-ng/logs/ by hand. Own multipart form (sibling pattern of
          the ASA uploader); the endpoint pre-checks the format, places the
-         file next to the live-received logs and runs discover. #}
+         file next to the live-received logs and scans for senders. A file
+         named by the operator carries no source address. #}
       <form method="post" action="/devices/logs/upload" enctype="multipart/form-data"
             style="display:flex;flex-direction:column;gap:10px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"
             onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Uploading…';">
         <div class="mut" style="font-size:var(--fs-small);">…or upload a syslog capture file: it is placed next to the
-          live-received logs and scanned right away.</div>
+          live-received logs and its senders join the list.</div>
         <input type="file" name="log_file" required accept=".log,.txt,text/plain"
                class="inp" style="font-size:var(--fs-small);padding:6px;">
         <div style="display:flex;justify-content:flex-end;gap:8px;">
-          <button type="submit" class="btn">Upload &amp; Discover</button>
+          <button type="submit" class="btn">Upload &amp; Scan</button>
         </div>
       </form>
     </div>
@@ -241,6 +394,9 @@
       </form>
     </div>
 
+    {# Inline cloud bundle uploader (EE) - a sibling form, like the OPNsense one. #}
+    {% if cloud_platforms %}{% include 'cloud_upload_inline.html' %}{% endif %}
+
     {# Inline ASA uploader - a SIBLING of the form (needs its own multipart <form>).
        Shown for the 'Cisco ASA' entry; the hostname comes from the config itself. #}
     <div id="asa-inline" style="display:none;">
@@ -268,6 +424,52 @@
         </div>
       </form>
     </div>
+
+    {# Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): a SIBLING of the main form,
+       its inputs carry data-field names instead of form names, so nothing here is ever
+       submitted; the credentials travel in the one fetch and are stored nowhere. #}
+    <div id="discover-inline" style="display:none;flex-direction:column;gap:12px;">
+      <div class="discover-kind" data-kind="panorama" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>Panorama address</label>
+          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="panorama.example.net"></div>
+        <div class="field"><label>API key</label>
+          <input type="password" data-field="api_key" class="inp" autocomplete="new-password"></div>
+      </div>
+      <div class="discover-kind" data-kind="fortimanager" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>FortiManager address</label>
+          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="fortimanager.example.net"></div>
+        <div class="field"><label>API token <span class="dash">(an API user with rpc-permit read)</span></label>
+          <input type="password" data-field="api_key" class="inp" autocomplete="new-password"></div>
+      </div>
+      <div class="discover-kind" data-kind="fmgcloud" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>Instance <span class="dash">(customer id.region.fortimanager.forticloud.com)</span></label>
+          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="123456.eu.fortimanager.forticloud.com"></div>
+        <div class="field"><label>IAM API user id</label>
+          <input type="text" data-field="api_id" class="inp" autocomplete="off"></div>
+        <div class="field"><label>IAM API user password</label>
+          <input type="password" data-field="password" class="inp" autocomplete="new-password"></div>
+      </div>
+      <div class="discover-kind" data-kind="checkpoint" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>Management address <span class="dash">(host, or the Smart-1 Cloud tenant URL)</span></label>
+          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="mgmt.example.net"></div>
+        <div class="field"><label>API key</label>
+          <input type="password" data-field="api_key" class="inp" autocomplete="new-password"></div>
+      </div>
+      <div class="discover-kind" data-kind="scm" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>TSG id</label>
+          <input type="text" data-field="tsg_id" class="inp" autocomplete="off"></div>
+        <div class="field"><label>Client id <span class="dash">(a service account of the tenant)</span></label>
+          <input type="text" data-field="client_id" class="inp" autocomplete="off"></div>
+        <div class="field"><label>Client secret</label>
+          <input type="password" data-field="client_secret" class="inp" autocomplete="new-password"></div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:6px;">
+        <span id="discover-status" class="dash" style="font-size:var(--fs-small);flex:1;"></span>
+        <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
+        <button type="button" id="discover-run" onclick="managerDiscover()" class="btn">Discover</button>
+      </div>
+      <div id="discover-result" style="display:none;flex-direction:column;gap:6px;font-size:var(--fs-small);line-height:1.5;"></div>
+    </div>
   </div>
 </div>
 
@@ -282,8 +484,10 @@ function openAddModal(opts) {
   m.classList.remove('hidden');
   m.style.display = 'flex';
   document.addEventListener('keydown', _addModalEsc, true);
-  const first = document.getElementById('add-device-mgmt');
-  if (first) first.focus();
+  // No platform is picked for the operator (user decision 2026-10-18): the
+  // list opens on its placeholder, the fields follow the pick.
+  const sel = document.getElementById('add-device-platform');
+  if (sel) { sel.value = ''; onAddPlatformChange(''); sel.focus(); }
 }
 function closeAddModal() {
   const m = document.getElementById('add-device-modal');
@@ -302,16 +506,70 @@ function _cpWizardReset() {
   if (inline) inline.style.display = 'none';
 }
 const MANAGER_UI = {{ 'true' if manager_ui else 'false' }};
+const CLOUD_PLATFORMS = {{ cloud_platforms | list | tojson }};   // cloud accounts as sources (EE), empty in the CE
+// The cloud block's switch: the list carries the platform, the bundle mode is
+// the same platform with the '_upload' suffix the rest of this script knows.
+function cloudModeChange(mode) {
+  const sel = document.getElementById('add-device-platform');
+  const plat = ((sel && sel.value) || '').replace(/_upload$/, '');
+  if (!plat) return;
+  onAddPlatformChange(mode === 'bundle' ? plat + '_upload' : plat);
+}
+
 function onAddPlatformChange(value) {
   const isCpMgmt = (value === 'checkpoint');       // Mgmt server / MDS (EE) - plain add; CE shows hint
   const isCpGw   = (value === 'checkpoint_gw');    // single gateway (CE) - inline wizard
   const isAsa    = (value === 'asa');
   const isFtd    = (value === 'firepower');        // FDM user/password instead of API key
-  const isLogSrc = (value === 'logsource');        // syslog discovery - no manual add
+  const isLogSrc = value.endsWith('_logs');        // from the log stream: the candidate list, own form
   const isOpnUp  = (value === 'opnsense_upload');  // exported config.xml - the only OPNsense entry
+  const isDiscover = value.startsWith('discover_');  // manager discovery: read-only, its own block
+  const logPlat = document.getElementById('logstream-platform');
+  if (logPlat) logPlat.value = isLogSrc ? value.slice(0, -5) : '';
+  // Cloud account (EE): credentials replace the management address; the
+  // '<platform>_upload' entry takes an exported bundle through its own form.
+  const isCloud  = CLOUD_PLATFORMS.includes(value);
+  const cloudUpKey = value.endsWith('_upload') ? value.slice(0, -7) : '';
+  const isCloudUp = !!cloudUpKey && CLOUD_PLATFORMS.includes(cloudUpKey);
+  const cloudFields = document.getElementById('cloud-fields');
+  if (cloudFields) {
+    cloudFields.style.display = isCloud ? 'flex' : 'none';
+    // The shown block's mandatory fields (data-must) and the name are
+    // required, so the browser keeps the dialog open and points at the
+    // empty one instead of a round trip that discards the form (found
+    // 2026-10-18). A hidden block must not be required: the browser cannot
+    // focus an invisible control and refuses the whole submit.
+    cloudFields.querySelectorAll('.cloud-block').forEach(function (b) {
+      const shown = isCloud && b.dataset.cloud === value;
+      b.style.display = shown ? 'flex' : 'none';
+      b.querySelectorAll('[data-must]').forEach(function (el) { el.required = shown; });
+      // a validity message of a hidden block (an unparsable GCP key) would block every submit
+      if (!shown) b.querySelectorAll('input,textarea').forEach(function (el) {
+        if (el.setCustomValidity) el.setCustomValidity('');
+      });
+    });
+    const cloudName = cloudFields.querySelector('[name="cloud_name"]');
+    if (cloudName) cloudName.required = isCloud;
+  }
+  // The credentials-or-bundle switch of a cloud platform: shown in both
+  // modes, its radio follows the mode the value carries (a '<platform>_upload'
+  // value is the bundle mode, the list itself carries only the platform).
+  const cloudMode = document.getElementById('cloud-mode');
+  if (cloudMode) {
+    cloudMode.style.display = (isCloud || isCloudUp) ? 'flex' : 'none';
+    cloudMode.querySelectorAll('input[name="cloud_mode"]').forEach(function (r) {
+      r.checked = (r.value === 'bundle') ? isCloudUp : isCloud;
+    });
+  }
+  const cloudUpInline = document.getElementById('cloud-upload-inline');
+  if (cloudUpInline) cloudUpInline.style.display = isCloudUp ? 'block' : 'none';
+  const cloudUpPlatform = document.getElementById('cloud-upload-platform');
+  if (cloudUpPlatform) cloudUpPlatform.value = isCloudUp ? cloudUpKey : '';
+  const cloudCollector = document.getElementById('cloud-collector-link');
+  if (cloudCollector) cloudCollector.href = isCloudUp ? '/devices/add/cloud/collector/' + cloudUpKey : '#';
   const asaInline = document.getElementById('asa-inline');
   const opnUpInline = document.getElementById('opn-upload-inline');
-  const logInline = document.getElementById('logsource-inline');
+  const logInline = document.getElementById('logstream-inline');
   const fields = document.getElementById('add-device-legacy-fields');
   const submit = document.getElementById('add-device-submit');
   const actions= document.getElementById('add-device-actions');
@@ -324,8 +582,17 @@ function onAddPlatformChange(value) {
   if (asaInline) asaInline.style.display = isAsa ? 'block' : 'none';
   if (opnUpInline) opnUpInline.style.display = isOpnUp ? 'block' : 'none';
   if (logInline) logInline.style.display = isLogSrc ? 'block' : 'none';
-  const cpEeHint = document.getElementById('cp-ee-hint');
-  if (cpEeHint) cpEeHint.style.display = (isCpMgmt && !MANAGER_UI) ? 'block' : 'none';
+  const discInline = document.getElementById('discover-inline');
+  if (discInline) {
+    discInline.style.display = isDiscover ? 'flex' : 'none';
+    discInline.querySelectorAll('.discover-kind').forEach(function (b) {
+      b.style.display = (isDiscover && b.dataset.kind === value.slice(9)) ? 'flex' : 'none';
+    });
+    const dres = document.getElementById('discover-result');
+    if (dres) { dres.style.display = 'none'; dres.innerHTML = ''; }
+    const dst = document.getElementById('discover-status');
+    if (dst) dst.textContent = '';
+  }
   if (gaia)   gaia.style.display   = (isCpMgmt && MANAGER_UI) ? 'flex' : 'none';
   if (ftdHint)   ftdHint.style.display   = isFtd ? 'block' : 'none';
   if (ftdFields) ftdFields.style.display = isFtd ? 'flex'  : 'none';
@@ -344,11 +611,12 @@ function onAddPlatformChange(value) {
   } else {
     _cpWizardReset();
   }
-  const plainHidden = isAsa || isOpnUp || isCpGw || isLogSrc || (isCpMgmt && !MANAGER_UI);
-  if (fields) fields.style.display = plainHidden ? 'none' : 'flex';
-  if (submit) submit.style.display = plainHidden ? 'none' : '';
+  const plainHidden = isAsa || isOpnUp || isCpGw || isLogSrc || isCloudUp || isDiscover;
+  const none = !value;        // the placeholder: no fields, no Add until a platform is picked
+  if (fields) fields.style.display = (plainHidden || isCloud || none) ? 'none' : 'flex';
+  if (submit) submit.style.display = (plainHidden || none) ? 'none' : '';
   if (actions)actions.style.display= plainHidden ? 'none' : 'flex';
-  if (mgmt)   mgmt.required = !plainHidden;
+  if (mgmt)   mgmt.required = !(plainHidden || isCloud || none);
   // Panorama-managed option is panw-only. Reset it when switching away so a
   // hidden checkbox can't smuggle a config.panorama onto another platform.
   const isPanw = (value === 'panw');
@@ -358,6 +626,12 @@ function onAddPlatformChange(value) {
     const cb = document.getElementById('pano-enabled');
     if (cb && cb.checked) { cb.checked = false; onPanoramaToggle(false); }
   }
+  const scmBlock = document.getElementById('panw-scm-block');   // EE only
+  if (scmBlock) scmBlock.style.display = isPanw ? 'flex' : 'none';
+  if (!isPanw) {
+    const scb = document.getElementById('scm-enabled');
+    if (scb && scb.checked) { scb.checked = false; onScmToggle(false); }
+  }
   const isFgt = (value === 'fortigate');
   const fmgBlock = document.getElementById('fgt-fmg-block');
   if (fmgBlock) fmgBlock.style.display = isFgt ? 'flex' : 'none';
@@ -365,6 +639,84 @@ function onAddPlatformChange(value) {
     const fcb = document.getElementById('fmg-enabled');
     if (fcb && fcb.checked) { fcb.checked = false; onFmgToggle(false); }
   }
+  const fgcBlock = document.getElementById('fgt-cloud-block');
+  if (fgcBlock) fgcBlock.style.display = isFgt ? 'flex' : 'none';
+  if (!isFgt) {
+    const ccb = document.getElementById('fgc-enabled');
+    if (ccb && ccb.checked) { ccb.checked = false; onFgcToggle(false); }
+  }
+  const fmgcBlock = document.getElementById('fgt-fmgc-block');   // EE only
+  if (fmgcBlock) fmgcBlock.style.display = isFgt ? 'flex' : 'none';
+  if (!isFgt) {
+    const mcb = document.getElementById('fmgc-enabled');
+    if (mcb && mcb.checked) { mcb.checked = false; onFmgcToggle(false); }
+  }
+}
+
+// From the log stream: more than one sender on one Device, or a sender the
+// parsers detected as another vendor, is confirmed in words, not blocked
+// (the operator owns the mapping).
+function logstreamConfirm(form) {
+  const checked = Array.from(form.querySelectorAll('.logstream-sender:checked'));
+  const plat = (document.getElementById('logstream-platform') || {}).value || '';
+  const other = checked.filter(function (c) { return c.dataset.vendor && c.dataset.vendor !== plat; });
+  const parts = [];
+  if (checked.length > 1) parts.push(checked.length + ' senders on one Device: the same firewall with ' + checked.length + ' members (an HA pair or a cluster).');
+  if (other.length) parts.push(other.length + ' chosen sender(s) were detected as another vendor than the platform picked.');
+  if (!parts.length) return true;
+  return confirmFormSubmit(form, {title: 'Add this Device?', body: parts.join(' '), confirmLabel: 'Add'});
+}
+
+// FortiGate reached through FortiGate Cloud: the IAM credential and the serial
+// replace the direct management address and API key (same swap as Panorama).
+function onFgcToggle(checked) {
+  const f = document.getElementById('fgc-fields');
+  if (f) f.style.display = checked ? 'flex' : 'none';
+  const legacy = document.getElementById('add-device-legacy-fields');
+  const mgmt = document.getElementById('add-device-mgmt');
+  if (legacy) legacy.style.display = checked ? 'none' : 'flex';
+  if (mgmt) mgmt.required = !checked;
+  ['fgc-api-id','fgc-password','fgc-serial'].forEach(function(id){
+    const el = document.getElementById(id); if (el) el.required = checked;
+  });
+}
+
+function fgcLoadDevices() {
+  const status = document.getElementById('fgc-status');
+  const fd = new FormData();
+  ['fgc_region','fgc_api_id','fgc_password'].forEach(function(n){
+    const el = document.querySelector('#fgt-cloud-block [name="' + n + '"]'); fd.append(n, el ? el.value : '');
+  });
+  if (!fd.get('fgc_api_id') || !fd.get('fgc_password')) { if (status) status.textContent = 'Enter the API user id and password first'; return; }
+  if (status) status.textContent = 'Reading the account…';
+  fetch('/devices/fortigate-cloud/devices', {method: 'POST', body: fd})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if (j.error) { if (status) status.textContent = j.error; return; }
+      const list = document.getElementById('fgc-serial-list');
+      if (list) {
+        list.innerHTML = '';
+        (j.devices || []).forEach(function(d){
+          const o = document.createElement('option');
+          o.value = d.serial; o.label = d.name + (d.ip ? ' (' + d.ip + ')' : '') + (d.tunnel ? '' : ' [offline]');
+          o.dataset.ip = d.ip || '';
+          list.appendChild(o);
+        });
+      }
+      if (status) status.textContent = (j.devices || []).length + ' device(s) in the account';
+      const serial = document.getElementById('fgc-serial');
+      if (serial && (j.devices || []).length === 1) { serial.value = j.devices[0].serial; fgcSerialChanged(); }
+    })
+    .catch(function(e){ if (status) status.textContent = 'failed: ' + e; });
+}
+
+function fgcSerialChanged() {
+  const serial = document.getElementById('fgc-serial');
+  const ip = document.getElementById('fgc-ip');
+  const list = document.getElementById('fgc-serial-list');
+  if (!serial || !ip || !list) return;
+  const hit = Array.prototype.find.call(list.options, function(o){ return o.value === serial.value; });
+  ip.value = hit ? (hit.dataset.ip || '') : '';
 }
 
 function onPanoramaToggle(checked) {
@@ -418,16 +770,63 @@ function onFmgToggle(checked) {
   });
 }
 
+// Strata Cloud Manager tenant registered as a source (EE): the service
+// account replaces the address and key fields, like the Panorama toggle.
+function onScmToggle(checked) {
+  const f = document.getElementById('scm-fields');
+  if (f) f.style.display = checked ? 'flex' : 'none';
+  const legacy = document.getElementById('add-device-legacy-fields');
+  const mgmt = document.getElementById('add-device-mgmt');
+  if (legacy) legacy.style.display = checked ? 'none' : 'flex';
+  if (mgmt) mgmt.required = !checked;
+  ['scm-tsg','scm-client-id','scm-client-secret'].forEach(function(id){
+    const el = document.getElementById(id); if (el) el.required = checked;
+  });
+  if (checked) {
+    const pcb = document.getElementById('pano-enabled');
+    if (pcb && pcb.checked) { pcb.checked = false; onPanoramaToggle(false); }
+  }
+}
+
+function scmDiscover() {
+  const status = document.getElementById('scm-discover-status');
+  const v = function(id){ const el = document.getElementById(id); return el ? (el.value || '').trim() : ''; };
+  const tsg = v('scm-tsg'), cid = v('scm-client-id'), sec = v('scm-client-secret');
+  if (!tsg || !cid || !sec) { if (status) status.textContent = 'Enter TSG id, client id and secret first'; return; }
+  if (status) status.textContent = 'Connecting…';
+  fetch('/devices/scm/discover', {method: 'POST', body: new URLSearchParams({tsg_id: tsg, client_id: cid, client_secret: sec})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d.ok) { if (status) status.textContent = d.error || 'Failed'; return; }
+      if (status) status.textContent = (d.folders || []).length + ' NGFW folder(s) under ' + (d.roots || []).join(', ') +
+        ', ' + d.devices + ' device(s), ' + d.snippets + ' snippet(s)' +
+        (d.prisma_access_folders ? ', ' + d.prisma_access_folders + ' Prisma Access folder(s) left out' : '');
+    })
+    .catch(function(e){ if (status) status.textContent = 'Error: ' + e; });
+}
+
+// FortiManager Cloud instance registered as a source: only the IAM user id is
+// extra, the address and key fields stay the normal ones.
+function onFmgcToggle(checked) {
+  const f = document.getElementById('fmgc-fields');
+  if (f) f.style.display = checked ? 'flex' : 'none';
+  const el = document.getElementById('fmgc-api-id'); if (el) el.required = checked;
+  const lbl = document.getElementById('add-device-apikey-label');
+  if (lbl) lbl.innerHTML = checked ? 'IAM API user password' : 'API Key <span class="dash">(optional)</span>';
+}
+
 function fmgDiscover() {
   const host = (document.getElementById('fmg-host').value || '').trim();
   const key = (document.getElementById('fmg-key').value || '').trim();
   const adom = (document.getElementById('fmg-adom').value || 'root').trim() || 'root';
+  const cloudEl = document.getElementById('fmg-cloud-id');
+  const cloudId = cloudEl ? (cloudEl.value || '').trim() : '';
   const status = document.getElementById('fmg-discover-status');
   if (!host || !key) { if (status) status.textContent = 'Enter host + API key first'; return; }
   if (status) status.textContent = 'Discovering…';
   fetch('/devices/fortimanager/discover', {
     method: 'POST',
-    body: new URLSearchParams({host: host, api_key: key, adom: adom})
+    body: new URLSearchParams({host: host, api_key: key, adom: adom, cloud_api_id: cloudId})
   })
     .then(function(r){ return r.json(); })
     .then(function(d){
@@ -444,5 +843,83 @@ function fmgDiscover() {
         ' dev (adom ' + d.adom + ')';
     })
     .catch(function(e){ if (status) status.textContent = 'Error: ' + e; });
+}
+
+// Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): the block's inputs go into one
+// fetch, the answer is rendered as the scope tree with counts. No form, no row.
+function managerDiscover() {
+  const sel = document.getElementById('add-device-platform');
+  const kind = ((sel && sel.value) || '').replace(/^discover_/, '');
+  const block = document.querySelector('#discover-inline .discover-kind[data-kind="' + kind + '"]');
+  const status = document.getElementById('discover-status');
+  const out = document.getElementById('discover-result');
+  const btn = document.getElementById('discover-run');
+  if (!block) return;
+  const body = new URLSearchParams();
+  let missing = false;
+  block.querySelectorAll('input[data-field]').forEach(function (i) {
+    const v = (i.value || '').trim();
+    if (!v) missing = true;
+    body.set(i.dataset.field, v);
+  });
+  if (missing) { if (status) status.textContent = 'Fill in every field first.'; return; }
+  if (status) status.textContent = 'Reading the manager…';
+  if (btn) btn.disabled = true;
+  if (out) { out.style.display = 'none'; out.innerHTML = ''; }
+  fetch('/devices/discover/' + encodeURIComponent(kind), {method: 'POST', body: body})
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (btn) btn.disabled = false;
+      if (!d.ok) { if (status) status.textContent = d.error || 'Discovery failed.'; return; }
+      if (status) status.textContent = '';
+      if (out) { out.innerHTML = renderDiscovery(d); out.style.display = 'flex'; }
+    })
+    .catch(function (e) { if (btn) btn.disabled = false; if (status) status.textContent = 'Error: ' + e; });
+}
+
+function renderDiscovery(d) {
+  const esc = function (x) { return String(x == null ? '' : x).replace(/[&<>"]/g, function (c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]; }); };
+  const m = d.manager || {};
+  const head = '<div><b>' + esc(m.label) + '</b> ' + esc(m.name) +
+    (m.version ? ' <span class="dash">' + esc(m.version) + '</span>' : '') +
+    (m.model ? ' <span class="dash">' + esc(m.model) + '</span>' : '') + '</div>';
+  const byName = {};
+  (d.nodes || []).forEach(function (n) { byName[n.name] = n; });
+  const depth = function (n) {
+    let k = 0, cur = n, seen = {};
+    while (cur && cur.parent && byName[cur.parent] && !seen[cur.name]) { seen[cur.name] = 1; cur = byName[cur.parent]; k++; if (k > 12) break; }
+    return k;
+  };
+  const countText = function (c) {
+    const parts = [];
+    if (c && c.rules != null) parts.push(c.rules + ' rules');
+    if (c && c.objects != null) parts.push(c.objects + ' objects');
+    if (c && c.devices != null) parts.push(c.devices + ' devices');
+    return parts.join(', ');
+  };
+  const rows = (d.nodes || []).map(function (n) {
+    const ct = countText(n.counts);
+    const mem = (n.members && n.members.length) ? ' <span class="dash">(' + esc(n.members.join(', ')) + ')</span>' : '';
+    return '<div style="padding-left:' + (depth(n) * 14) + 'px;"><span class="mut">' + esc(n.type) + '</span> ' +
+      esc(n.name) + (ct ? ' <span class="dash">' + esc(ct) + '</span>' : '') + mem + '</div>';
+  }).join('');
+  const fws = d.firewalls || [];
+  const fwRows = fws.map(function (f) {
+    return '<div style="padding-left:14px;">' + esc(f.name) +
+      (f.serial ? ' <span class="dash">' + esc(f.serial) + '</span>' : '') +
+      (f.model ? ' <span class="dash">' + esc(f.model) + '</span>' : '') +
+      (f.version ? ' <span class="dash">' + esc(f.version) + '</span>' : '') +
+      (f.state ? ' <span class="mut">' + esc(f.state) + '</span>' : '') +
+      (f.scope ? ' <span class="dash">in ' + esc(f.scope) + '</span>' : '') + '</div>';
+  }).join('');
+  const fwHead = '<div style="margin-top:6px;"><b>Firewalls</b> <span class="dash">' + fws.length + '</span></div>';
+  const notes = [].concat(d.skipped || [], d.truncated || []).map(function (t) {
+    return '<div class="mut">' + esc(t) + '</div>'; }).join('');
+  const foot = d.enterprise ? '' :
+    '<div class="tag" style="margin-top:8px;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);line-height:1.55;">' +
+    'Importing, curating and pushing these scopes is the Enterprise Edition. ' +
+    '<a href="https://gateshift.org" target="_blank" rel="noopener">gateshift.org</a></div>';
+  return head + rows + fwHead + fwRows + notes + foot;
 }
 </script>

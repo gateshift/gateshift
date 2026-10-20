@@ -108,6 +108,50 @@ def reveal(stored: str | None) -> str | None:
     return decrypt(s[len(_CRED_PREFIX):])
 
 
+# ── Pre-shared keys in a push ──────────────────────────────────────────────
+#
+# A generated configuration carries __GATESHIFT_PSK_<vpn_hash>__ tokens: the
+# tunnel's identity, no secret, so it is safe to preview, audit and round-trip
+# through the browser. The real key is substituted server-side just before
+# the live push.
+PSK_TOKEN_RE = re.compile(r"__GATESHIFT_PSK_([0-9a-fA-F]+)__")
+
+
+def psk_tokens(values) -> set[str]:
+    """The tunnel hashes (lower-case hex) referenced by PSK tokens in the
+    string values of a configuration."""
+    out: set[str] = set()
+    for v in values:
+        if isinstance(v, str) and "__GATESHIFT_PSK_" in v:
+            out |= {m.group(1).lower() for m in PSK_TOKEN_RE.finditer(v)}
+    return out
+
+
+def detached_tokens(values, stored_hashes, has_secrets=None) -> list[str]:
+    """The tunnels in a push whose key this Device holds under ANOTHER tunnel.
+
+    A token with no stored secret while the Device has secrets stored at all
+    means a key detached from its tunnel: the tunnel was renamed on the
+    source and re-imported under the new name, and the key stayed under the
+    old one. Substituting the placeholder there, which is what the push did,
+    installs a tunnel that never comes up and says nothing
+    (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2). A Device with no stored
+    secret at all is the other case, the operator never entered one, and
+    keeps the placeholder. `stored_hashes` are the hashes of the tunnels
+    that have a key; `has_secrets` says whether the Device stores any key at
+    all, including one whose tunnel is gone (which has no hash to list), and
+    defaults to "some hash is stored". Returns the detached hashes, sorted,
+    empty when the push is clean.
+    """
+    wanted = psk_tokens(values)
+    stored = {(h or "").lower() for h in (stored_hashes or ()) if h}
+    if has_secrets is None:
+        has_secrets = bool(stored)
+    if not wanted or not has_secrets:
+        return []
+    return sorted(wanted - stored)
+
+
 def _safe_cert_name(s: str) -> str:
     """Vendor-safe cert reference name: alphanumerics, dash, underscore, dot;
     collapse the rest; cap at 63 (the store column + a sane vendor limit)."""

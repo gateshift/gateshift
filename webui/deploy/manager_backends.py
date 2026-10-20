@@ -98,10 +98,20 @@ def resolve_push_driver(platform: str, device: dict, ce_cls: type):
 # CE ships no manager-UI logic.
 
 _MANAGER_CONFIG_BUILDERS: dict[str, object] = {}
+# The platforms whose builder is a MANAGER builder (the enterprise module's
+# Panorama and FortiManager forms). The cloud package registers builders the
+# same way for its account forms, and those must not switch the manager UI
+# on: the CE showed "Check Point (SMS / MDS)" and the managed-target
+# fieldsets because of them (0.9.4 matrix, 2026-10-18).
+_MANAGER_PLATFORMS: set[str] = set()
 
 
-def register_manager_config_builder(platform: str, fn) -> None:
+def register_manager_config_builder(platform: str, fn, *, manager: bool = True) -> None:
     _MANAGER_CONFIG_BUILDERS[platform] = fn
+    if manager:
+        _MANAGER_PLATFORMS.add(platform)
+    else:
+        _MANAGER_PLATFORMS.discard(platform)
 
 
 def build_manager_config(platform: str, form):
@@ -114,5 +124,6 @@ def build_manager_config(platform: str, form):
 
 def manager_ui_available() -> bool:
     """True when an enterprise module has contributed the manager device-add UI -
-    the devices template gates the manager fieldsets on this."""
-    return bool(_MANAGER_CONFIG_BUILDERS)
+    the devices template gates the manager fieldsets on this. A cloud
+    account builder does not count."""
+    return bool(_MANAGER_PLATFORMS)

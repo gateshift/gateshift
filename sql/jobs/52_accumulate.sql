@@ -4,7 +4,8 @@
 USE gateshift;
 
 -- Module: Accumulate (destination-centric)
--- Groups consolidated_1 by (vendor, device_host, action, direction, proto, dst_port, effective_dst_ip)
+-- Groups consolidated_1 by (vendor, device_id, action, direction, proto, dst_port, effective_dst_ip);
+-- the rows match by the Device's id (docs/DEVICE_IDENTITY_PLAN.md, phases 5 and 7).
 -- internet_public_dst / internet_public_src collapse public IPs independently per side.
 
 SET @ip_dst_on = IFNULL(
@@ -39,21 +40,15 @@ DROP TEMPORARY TABLE IF EXISTS tmp_pub_dst_count;
 CREATE TEMPORARY TABLE tmp_pub_dst_count
 CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
 AS
-SELECT vendor, device_host, action, direction, proto, dst_port,
+SELECT vendor, device_id, action, direction, proto, dst_port,
        COUNT(DISTINCT dst_ip) AS pub_dst_count
 FROM fw_rules_consolidated_1
 WHERE generated_at = @run_ts
   AND dst_ip IS NOT NULL
   AND dst_nat IS NULL
-  AND INET_ATON(dst_ip) IS NOT NULL
-  AND NOT (
-       INET_ATON(dst_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-    OR INET_ATON(dst_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-    OR INET_ATON(dst_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-    OR INET_ATON(dst_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-    OR INET_ATON(dst_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-  )
-GROUP BY vendor, device_host, action, direction, proto, dst_port;
+  AND INET6_ATON(dst_ip) IS NOT NULL
+  AND NOT gs_ip_is_private(INET6_ATON(dst_ip))
+GROUP BY vendor, device_id, action, direction, proto, dst_port;
 
 -- ============================================================
 -- 0b. Pre-compute COUNT(DISTINCT public src_ip) per group
@@ -62,20 +57,14 @@ DROP TEMPORARY TABLE IF EXISTS tmp_pub_src_count;
 CREATE TEMPORARY TABLE tmp_pub_src_count
 CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
 AS
-SELECT vendor, device_host, action, direction, proto, dst_port,
+SELECT vendor, device_id, action, direction, proto, dst_port,
        COUNT(DISTINCT src_ip) AS pub_src_count
 FROM fw_rules_consolidated_1
 WHERE generated_at = @run_ts
   AND src_ip IS NOT NULL
-  AND INET_ATON(src_ip) IS NOT NULL
-  AND NOT (
-       INET_ATON(src_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-    OR INET_ATON(src_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-    OR INET_ATON(src_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-    OR INET_ATON(src_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-    OR INET_ATON(src_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-  )
-GROUP BY vendor, device_host, action, direction, proto, dst_port;
+  AND INET6_ATON(src_ip) IS NOT NULL
+  AND NOT gs_ip_is_private(INET6_ATON(src_ip))
+GROUP BY vendor, device_id, action, direction, proto, dst_port;
 
 -- ============================================================
 -- 0c. Build effective_dst_ip and effective_src_ip
@@ -89,14 +78,8 @@ SELECT c.*,
   CASE
     WHEN @ip_dst_on = 0 THEN c.dst_ip
     WHEN c.dst_ip IS NULL THEN NULL
-    WHEN INET_ATON(c.dst_ip) IS NULL THEN c.dst_ip
-    WHEN (
-         INET_ATON(c.dst_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-      OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-      OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-      OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-      OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-    ) THEN c.dst_ip
+    WHEN INET6_ATON(c.dst_ip) IS NULL THEN c.dst_ip
+    WHEN gs_ip_is_private(INET6_ATON(c.dst_ip)) THEN c.dst_ip
     WHEN c.dst_nat IS NOT NULL THEN c.dst_ip   -- NAT'd target: always keep real IP, never collapse
     WHEN COALESCE(pd.pub_dst_count, 0) >= @ip_dst_threshold THEN 'internet_public'
     ELSE c.dst_ip
@@ -105,28 +88,22 @@ SELECT c.*,
   CASE
     WHEN @ip_src_on = 0 THEN c.src_ip
     WHEN c.src_ip IS NULL THEN NULL
-    WHEN INET_ATON(c.src_ip) IS NULL THEN c.src_ip
-    WHEN (
-         INET_ATON(c.src_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-      OR INET_ATON(c.src_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-      OR INET_ATON(c.src_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-      OR INET_ATON(c.src_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-      OR INET_ATON(c.src_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-    ) THEN c.src_ip
+    WHEN INET6_ATON(c.src_ip) IS NULL THEN c.src_ip
+    WHEN gs_ip_is_private(INET6_ATON(c.src_ip)) THEN c.src_ip
     WHEN COALESCE(ps.pub_src_count, 0) >= @ip_src_threshold THEN 'internet_public'
     ELSE c.src_ip
   END AS effective_src_ip
 FROM fw_rules_consolidated_1 c
 LEFT JOIN tmp_pub_dst_count pd
   ON  pd.vendor      <=> c.vendor
-  AND pd.device_host <=> c.device_host
+  AND pd.device_id   <=> c.device_id
   AND pd.action       =  c.action
   AND pd.direction    =  c.direction
   AND pd.proto       <=> c.proto
   AND pd.dst_port    <=> c.dst_port
 LEFT JOIN tmp_pub_src_count ps
   ON  ps.vendor      <=> c.vendor
-  AND ps.device_host <=> c.device_host
+  AND ps.device_id   <=> c.device_id
   AND ps.action       =  c.action
   AND ps.direction    =  c.direction
   AND ps.proto       <=> c.proto
@@ -137,7 +114,7 @@ WHERE c.generated_at = @run_ts;
 -- 1. One rule per (proto, port, effective_dst_ip)
 -- ============================================================
 INSERT INTO fw_rules_accumulated (
-  generated_at, vendor, device_host, action, direction,
+  generated_at, vendor, device_id, action, direction,
   proto, dst_port,
   application, rule_name, security_profile, security_profile_group,
   dst_ip,
@@ -147,7 +124,7 @@ INSERT INTO fw_rules_accumulated (
 )
 SELECT
   @run_ts,
-  vendor, device_host, action, direction,
+  vendor, device_id, action, direction,
   proto, dst_port,
   MIN(application), MIN(rule_name), MIN(security_profile), MIN(security_profile_group),
   effective_dst_ip,
@@ -161,7 +138,7 @@ SELECT
   MIN(seq_num) AS seq_num,
   MIN(schedule) AS schedule
 FROM tmp_c1_effective
-GROUP BY vendor, device_host, action, direction, proto, dst_port, effective_dst_ip,
+GROUP BY vendor, device_id, action, direction, proto, dst_port, effective_dst_ip,
   CASE WHEN source_type = 'api_import' THEN rule_name ELSE NULL END,
   -- Negate flags split: rules with disagreeing negate-flags on the same
   -- (proto, port, dst_ip) tuple stay separate after aggregation. Per
@@ -176,7 +153,7 @@ SELECT r.id, c.effective_src_ip, MIN(c.src_zone), MIN(c.iface_in), SUM(c.hit_cou
 FROM fw_rules_accumulated r
 JOIN tmp_c1_effective c
   ON  c.vendor           <=> r.vendor
-  AND c.device_host      <=> r.device_host
+  AND c.device_id        <=> r.device_id
   AND c.action            =  r.action
   AND c.direction         =  r.direction
   AND c.proto            <=> r.proto
@@ -198,7 +175,7 @@ FROM fw_rules_accumulated r
 JOIN fw_rules_consolidated_1 c
   ON  c.generated_at  = @run_ts
   AND c.vendor        <=> r.vendor
-  AND c.device_host   <=> r.device_host
+  AND c.device_id     <=> r.device_id
   AND c.action         =  r.action
   AND c.direction      =  r.direction
   AND c.proto         <=> r.proto
@@ -208,13 +185,7 @@ JOIN fw_rules_consolidated_1 c
   AND (
     c.dst_ip <=> r.dst_ip
     OR (r.dst_ip = 'internet_public' AND @ip_dst_on = 1 AND c.dst_nat IS NULL
-        AND INET_ATON(c.dst_ip) IS NOT NULL AND NOT (
-             INET_ATON(c.dst_ip) BETWEEN INET_ATON('10.0.0.0')    AND INET_ATON('10.255.255.255')
-          OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('172.16.0.0')  AND INET_ATON('172.31.255.255')
-          OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('192.168.0.0') AND INET_ATON('192.168.255.255')
-          OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('127.0.0.0')   AND INET_ATON('127.255.255.255')
-          OR INET_ATON(c.dst_ip) BETWEEN INET_ATON('169.254.0.0') AND INET_ATON('169.254.255.255')
-        ))
+        AND INET6_ATON(c.dst_ip) IS NOT NULL AND NOT gs_ip_is_private(INET6_ATON(c.dst_ip)))
   )
 WHERE r.generated_at = @run_ts
   AND r.dst_ip IS NOT NULL

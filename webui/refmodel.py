@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import ipaddress
+import re
 import json
 
 from sqlalchemy import text
@@ -139,7 +140,7 @@ REFERENT_SOURCES: dict[str, tuple[tuple[str, str, str | None], ...]] = {
     "zone":      (("fw_zones", "name", None),),
     "vrf":       (("fw_vrfs", "name", None),),
     "object":    (("fw_address_objects", "name", None),
-                  ("fw_imported_objects", "name", f"obj_type IN ('address', 'address_group') AND ({_GRP_ACTIVE})")),
+                  ("fw_imported_objects", "name", f"obj_type IN ('address', 'address_group', 'nat_vip') AND ({_GRP_ACTIVE})")),
     "service":   (("fw_service_objects", "name", None),
                   ("fw_imported_objects", "name", f"obj_type IN ('service', 'service_group') AND ({_GRP_ACTIVE})")),
     "schedule":  (("fw_imported_objects", "name", f"obj_type = 'schedule' AND ({_GRP_ACTIVE})"),),
@@ -157,7 +158,8 @@ DANGLING_SKIP_TYPES = frozenset({"schedule"})
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-_SENTINELS = {"", "any", "all", "none"}
+# the D5 family tokens (docs/IPV6_PLAN.md) are catch-alls, not references
+_SENTINELS = {"", "any", "all", "none", "any4", "any6"}
 
 
 def _clean(name) -> str | None:
@@ -184,6 +186,16 @@ def _is_ip_literal(name) -> bool:
         except ValueError:
             return False
     return True
+
+
+_SERVICE_LITERAL = re.compile(r"^(tcp|udp|icmp|esp|ah|gre|sctp)(?:/\d{1,5}(?:-\d{1,5})?)?$", re.I)
+
+
+def _is_service_literal(name) -> bool:
+    """True if `name` is a bare proto/port literal (tcp/443, udp/8000-8100,
+    icmp) rather than a service object name. Cloud sources and OPNsense
+    carry services this way; the generate makes objects of them."""
+    return bool(name) and bool(_SERVICE_LITERAL.match(str(name)))
 
 
 def _jload(v):
@@ -262,7 +274,7 @@ def _excluded_tokens(excluded: dict | None, target_type: str) -> set:
     return out
 
 
-def collect_references(conn, device_id: int, *, device_host: str | None = None,
+def collect_references(conn, device_id: int, *,
                        projects: list | None = None, excluded: dict | None = None,
                        view=None) -> list[Reference]:
     """All outgoing references for a device: table-backed referrers + groups +
@@ -352,7 +364,7 @@ def collect_references(conn, device_id: int, *, device_host: str | None = None,
                     out.append(Reference(rr.kind, rid, label, targets, name, fr.literal_ok))
 
     out.extend(_group_references(conn, device_id, excluded))
-    rule_refs, view_has_rules = _rule_references(conn, device_id, device_host, projects)
+    rule_refs, view_has_rules = _rule_references(conn, device_id, projects)
     out.extend(rule_refs)
     imported = _imported_rule_references(conn, device_id)
     if excluded:
@@ -583,8 +595,7 @@ def _group_references(conn, device_id: int, excluded: dict | None = None) -> lis
     return refs
 
 
-def _rule_references(conn, device_id: int,
-                     device_host: str | None, projects=None) -> tuple[list[Reference], bool]:
+def _rule_references(conn, device_id: int, projects=None) -> tuple[list[Reference], bool]:
     """Access-rule references from the effective, name-bearing rules view
     (main._fetch_rules_and_devices) - NOT raw consolidated columns. Lazy import
     avoids a circular import. Returns (refs, view_has_rules): the second slot
@@ -594,18 +605,12 @@ def _rule_references(conn, device_id: int,
     refs: list[Reference] = []
     try:
         from main import _fetch_rules_and_devices, load_display  # lazy
-        if device_host is None:
-            device_host = conn.execute(text(
-                "SELECT COALESCE(display_name, host_name) FROM fw_devices WHERE id = :id"
-            ), {"id": device_id}).scalar()
-        if not device_host:
-            return refs, False
         disp = load_display(conn)
         # One effective view per project (`projects`, else every project of
         # the device) - each holds its own decisions; the references are
         # their union, a project's own list kept as it is.
         views = [(pid, _fetch_rules_and_devices(conn, page=1, page_size=100000,
-                                                device=device_host, display=disp,
+                                                device_id=device_id, display=disp,
                                                 project_id=pid))
                  for pid in (projects if projects is not None
                              else _device_projects(conn, device_id))]
@@ -806,17 +811,17 @@ def collect_referent_names(conn, device_id: int) -> dict[str, set[str]]:
 # ── engine ops (read side) ───────────────────────────────────────────────────
 
 def find_referrers(conn, device_id: int, target_type: str, name: str,
-                   *, device_host: str | None = None, projects: list | None = None,
+                   *, projects: list | None = None,
                    excluded: dict | None = None, view=None) -> list[Reference]:
     """Everything that references (target_type, name)."""
     want = _clean(name)
-    return [r for r in collect_references(conn, device_id, device_host=device_host,
+    return [r for r in collect_references(conn, device_id,
                                           projects=projects, excluded=excluded, view=view)
             if target_type in r.targets and r.name == want]
 
 
 def find_unused(conn, device_id: int, target_type: str,
-                *, device_host: str | None = None, projects: list | None = None,
+                *, projects: list | None = None,
                 excluded: dict | None = None) -> set[str]:
     """Referents of target_type that nothing references. The used-set folds in
     SSL/TLS-inspection rule refs (a separate policy layer, see _ssl_used_names) so an
@@ -826,7 +831,7 @@ def find_unused(conn, device_id: int, target_type: str,
     referents = collect_referent_names(conn, device_id).get(target_type, set())
     if excluded:
         referents = referents - _excluded_tokens(excluded, target_type)
-    used = {r.name for r in collect_references(conn, device_id, device_host=device_host,
+    used = {r.name for r in collect_references(conn, device_id,
                                                projects=projects, excluded=excluded)
             if target_type in r.targets}
     used |= _ssl_used_names(conn, device_id).get(target_type, set())
@@ -852,20 +857,21 @@ def _valid_names(conn, device_id: int) -> dict[str, set[str]]:
 
 
 def find_dangling(conn, device_id: int,
-                  *, device_host: str | None = None,
-                  projects: list | None = None) -> list[Reference]:
+                  *, projects: list | None = None) -> list[Reference]:
     """References whose name exists under NONE of their validatable target types
     (interface accepts source names + target bindings). `projects` as in
     collect_references - generate passes its own project."""
     valid = _valid_names(conn, device_id)
     dangling: list[Reference] = []
-    for r in collect_references(conn, device_id, device_host=device_host,
+    for r in collect_references(conn, device_id,
                                 projects=projects):
         if r.literal_ok:
             continue  # value may legitimately be a bare literal (e.g. NAT trans IP)
         # object/service refs can hold bare IP/CIDR/range literals (syslog-derived
         # rules) - those aren't object references.
         if _is_ip_literal(r.name) and any(t in ("object", "service") for t in r.targets):
+            continue
+        if _is_service_literal(r.name) and "service" in r.targets:
             continue
         checkable = [t for t in r.targets if t in valid and t not in DANGLING_SKIP_TYPES]
         if not checkable:
@@ -1014,23 +1020,28 @@ def _recompute_nat_hash(conn, device_id: int) -> None:
 
 
 def _rewrite_zone_mirrors(conn, device_id: int, old: str, new: str) -> int:
-    """A zone name also lives in fw_flows and the consolidated rule tables
-    (keyed by device_host) - the mirror the old zone cascade rewrote. Used
-    by reverse_rename (migration) only; model A never rewrites it again."""
+    """A zone name also lives in fw_flows and the consolidated rule tables -
+    the mirror the old zone cascade rewrote. Used by reverse_rename
+    (migration) only; model A never rewrites it again. The rule tables are
+    keyed on the Device's id, the flows reach it through their sender
+    (docs/DEVICE_IDENTITY_PLAN.md, phases 4 and 5)."""
     touched = 0
-    host = conn.execute(text(
-        "SELECT COALESCE(display_name, host_name) FROM fw_devices WHERE id = :id"
-    ), {"id": device_id}).scalar()
-    if host:
-        from main import _CONSOLIDATED_ZONE_TABLES  # lazy (single source of the list)
-        for tbl in ("fw_flows",) + tuple(_CONSOLIDATED_ZONE_TABLES):
-            for col in ("src_zone", "dst_zone"):
-                try:
-                    touched += conn.execute(text(
-                        f"UPDATE {tbl} SET {col} = :new WHERE device_host = :h AND {col} = :old"
-                    ), {"new": new, "old": old, "h": host}).rowcount
-                except Exception:
-                    pass
+    from main import _CONSOLIDATED_ZONE_TABLES  # lazy (single source of the list)
+    for col in ("src_zone", "dst_zone"):
+        try:
+            touched += conn.execute(text(
+                f"UPDATE fw_flows f JOIN fw_log_senders s ON s.id = f.sender_id "
+                f"SET f.{col} = :new WHERE s.device_id = :d AND f.{col} = :old"
+            ), {"new": new, "old": old, "d": device_id}).rowcount
+        except Exception:
+            pass
+        for tbl in _CONSOLIDATED_ZONE_TABLES:
+            try:
+                touched += conn.execute(text(
+                    f"UPDATE {tbl} SET {col} = :new WHERE device_id = :d AND {col} = :old"
+                ), {"new": new, "old": old, "d": device_id}).rowcount
+            except Exception:
+                pass
     return touched
 
 
@@ -1154,41 +1165,59 @@ def reverse_rename(conn, device_id: int, kind: str, old: str, new: str) -> int:
 
 
 def rehash_and_rekey(conn, device_id: int) -> dict:
-    """Recompute nat/pbf/vpn hashes of a device and re-key every table that
-    keys on them (project overlays, VPN secrets + certs) old -> new per row.
-    Migration projects_names_v1 runs this once per device after the reverse
-    renames - the last time a hash of imported data ever changes."""
-    from main import _write_nat_hash, _write_pbf_hash, _write_vpn_hash  # lazy
+    """Recompute nat/pbf/ssl/vpn hashes of a device and re-key every table
+    that keys on them (the project overlays) old -> new per row. Migration
+    projects_names_v1 runs this once per device after the reverse renames -
+    the last time a hash of imported data ever changes. The VPN secrets and
+    certificates key on the tunnel's name since phase 3 of
+    docs/DEVICE_IDENTITY_PLAN.md, so no hash move reaches them."""
+    from main import (_write_nat_hash, _write_pbf_hash, _write_ssl_hash,
+                      _write_vpn_hash)  # lazy
     out = {}
+    # All four configuration hash families. The SSL family was missing here
+    # until phase 2 of docs/DEVICE_IDENTITY_PLAN.md, so its overrides were
+    # orphaned by every re-key that moved an ssl_hash.
     for name, table, col, writer, keyed in (
             ("nat", "fw_nat_rules", "nat_hash", _write_nat_hash, ("fw_nat_rule_overrides",)),
             ("pbf", "fw_pbf_rules", "pbf_hash", _write_pbf_hash, ("fw_pbf_rule_overrides",)),
-            ("vpn", "fw_vpn_tunnels", "vpn_hash", _write_vpn_hash,
-             ("fw_vpn_tunnel_overrides", "fw_vpn_tunnel_secrets", "fw_vpn_tunnel_certs"))):
-        try:
-            before = {r[0]: r[1] for r in conn.execute(text(
-                f"SELECT id, HEX({col}) FROM {table} WHERE device_id = :d"),
-                {"d": device_id}).fetchall()}
-            alias = {"fw_nat_rules": "n", "fw_pbf_rules": "p", "fw_vpn_tunnels": "v"}[table]
-            writer(conn, f"{alias}.device_id = :did", {"did": device_id})
-            after = {r[0]: r[1] for r in conn.execute(text(
-                f"SELECT id, HEX({col}) FROM {table} WHERE device_id = :d"),
-                {"d": device_id}).fetchall()}
-        except Exception:
-            continue
+            ("ssl", "fw_ssl_rules", "ssl_hash", _write_ssl_hash, ("fw_ssl_rule_overrides",)),
+            ("vpn", "fw_vpn_tunnels", "vpn_hash", _write_vpn_hash, ("fw_vpn_tunnel_overrides",))):
+        before = {r[0]: r[1] for r in conn.execute(text(
+            f"SELECT id, HEX({col}) FROM {table} WHERE device_id = :d"),
+            {"d": device_id}).fetchall()}
+        alias = {"fw_nat_rules": "n", "fw_pbf_rules": "p", "fw_ssl_rules": "s",
+                 "fw_vpn_tunnels": "v"}[table]
+        writer(conn, f"{alias}.device_id = :did", {"did": device_id})
+        after = {r[0]: r[1] for r in conn.execute(text(
+            f"SELECT id, HEX({col}) FROM {table} WHERE device_id = :d"),
+            {"d": device_id}).fetchall()}
+        moves = {old_h: new_h for rid, old_h in before.items()
+                 for new_h in (after.get(rid),)
+                 if old_h and new_h and old_h != new_h}
         n = 0
-        for rid, old_h in before.items():
-            new_h = after.get(rid)
-            if not old_h or not new_h or old_h == new_h:
-                continue
-            for t in keyed:
-                try:
-                    conn.execute(text(
-                        f"UPDATE IGNORE {t} SET {col} = UNHEX(:n) WHERE {col} = UNHEX(:o)"
-                    ), {"n": new_h, "o": old_h})
-                except Exception:
-                    pass
-            n += 1
+        for t in keyed:
+            # Counted writes. The former UPDATE IGNORE inside a bare except
+            # turned an N-to-1 collapse, or any failure, into a silently
+            # dropped row, and the two secret tables hold the only rows in
+            # the product that nothing can re-create. A move that does not
+            # land is an error with the table and the hashes named.
+            for old_h, new_h in moves.items():
+                had = conn.execute(text(
+                    f"SELECT COUNT(*) FROM {t} WHERE {col} = UNHEX(:o)"), {"o": old_h}).scalar()
+                if not had:
+                    continue
+                res = conn.execute(text(
+                    f"UPDATE {t} SET {col} = UNHEX(:n) WHERE {col} = UNHEX(:o)"
+                ), {"n": new_h, "o": old_h})
+                moved = int(res.rowcount or 0)
+                now = conn.execute(text(
+                    f"SELECT COUNT(*) FROM {t} WHERE {col} = UNHEX(:n)"), {"n": new_h}).scalar()
+                if moved != had or now < had:
+                    raise RuntimeError(
+                        f"rehash_and_rekey: {t} kept {had} row(s) on {old_h[:12]} but "
+                        f"{moved} moved to {new_h[:12]} ({now} now on it): refusing to "
+                        "continue with a half re-keyed table")
+                n += moved
         out[name] = n
     return out
 
@@ -1299,7 +1328,7 @@ def _rewrite_zone_override_values(conn, project_id: int, old: str, new: str) -> 
 
 
 def deletability(conn, device_id: int, target_type: str, name: str,
-                 *, device_host: str | None = None, projects: list | None = None,
+                 *, projects: list | None = None,
                  excluded: dict | None = None, view=None) -> dict:
     """Whether a referent can be removed. Interface: routes cascade with it
     (interface_delete clears routes by name), so they don't block; everything else
@@ -1310,7 +1339,7 @@ def deletability(conn, device_id: int, target_type: str, name: str,
             excluded = view.excluded_dict(device_id)
         if projects is None and getattr(view, "project_id", None):
             projects = [view.project_id]
-    refs = find_referrers(conn, device_id, target_type, name, device_host=device_host,
+    refs = find_referrers(conn, device_id, target_type, name,
                           projects=projects, excluded=excluded, view=view)
     if target_type != "interface":
         return {"removable": not refs, "referrers": refs}
@@ -1352,7 +1381,7 @@ def deletability(conn, device_id: int, target_type: str, name: str,
         # this the sole member of an otherwise unreferenced zone always
         # needed the empty-zone confirm, and the message counted the
         # interface itself as a rule reference.
-        zrefs = [r for r in find_referrers(conn, device_id, "zone", z, device_host=device_host,
+        zrefs = [r for r in find_referrers(conn, device_id, "zone", z,
                                            projects=projects, excluded=excluded, view=view)
                  if not (r.referrer_kind == "interface" and r.referrer_label == name)]
         if not others and zrefs:
