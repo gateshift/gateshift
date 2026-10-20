@@ -44,28 +44,6 @@ Complete migrations, start to finish, on YouTube:
 
 More on the [Gateshift channel](https://www.youtube.com/@Gateshifter).
 
-## What it can do
-
-- Migrate firewall configurations between different vendors and deployment models: standalones, clusters, unmanaged and managed devices, on hardware, virtual and cloud alike.
-- Carry firewall rules, NAT, address and service objects, interfaces, zones, virtual routers, static routes, policy routing, IPsec VPN, decryption rules, Check Point threat prevention, schedules, URL categories and tags across to the target.
-- Carry IPv6 alongside IPv4: dual-stack address objects, IPv6 rule sides, static routes and tunnel peers. What a target cannot express in IPv6 is declared per rule instead of going out silently.
-- Attach what the target itself offers instead of copying the source: security profiles, applications, user identity and log settings.
-- Find rules an earlier, broader rule already covers completely, and disable them in bulk.
-- Generate new rulesets from traffic logs.
-- Optimize and clean up firewall configurations, directly on a firewall or during migrations.
-- Keep every migration as a project with snapshots to save working states.
-- Hold several tenants in one installation, so projects and devices stay sorted by tenant.
-- Operate fully offline: no telemetry, no phone-home, no licence callbacks, no cloud uploads, no LLM calls. Reading a cloud account over its provider's API needs outbound HTTPS to that provider, the bundle upload needs none.
-
-Cloud accounts (Microsoft Azure, AWS, Google Cloud) are read as migration sources, over the provider's API or from an exported bundle. Central managers (Panorama, FortiManager and FortiManager Cloud, Check Point management, Strata Cloud Manager) are discovered here and migrated in the Enterprise Edition. The table under Supported vendors marks the edition of every entry.
-
-## What it can't do
-
-- Do 1:1 migrations.
-- Run automated or unattended migrations.
-- Guarantee flawless output.
-- Make manual review obsolete.
-
 ## Install
 
 Prerequisites on the host: Docker Engine with the Compose plugin (`docker
@@ -128,6 +106,28 @@ That drops the database and starts empty, keeping your `.env` and your
 certificate. Received syslog files stay in `syslog-ng/logs` and are read again
 when you ingest them. Once the installation carries work you want to keep,
 dump the database and update in place instead.
+
+## What it can do
+
+- Migrate firewall configurations between different vendors and deployment models: standalones, clusters, unmanaged and managed devices, on hardware, virtual and cloud alike.
+- Carry firewall rules, NAT, address and service objects, interfaces, zones, virtual routers, static routes, policy routing, IPsec VPN, decryption rules, Check Point threat prevention, schedules, URL categories and tags across to the target.
+- Carry IPv6 alongside IPv4: dual-stack address objects, IPv6 rule sides, static routes and tunnel peers. What a target cannot express in IPv6 is declared per rule instead of going out silently.
+- Attach what the target itself offers instead of copying the source: security profiles, applications, user identity and log settings.
+- Find rules an earlier, broader rule already covers completely, and disable them in bulk.
+- Generate new rulesets from traffic logs.
+- Optimize and clean up firewall configurations, directly on a firewall or during migrations.
+- Keep every migration as a project with snapshots to save working states.
+- Hold several tenants in one installation, so projects and devices stay sorted by tenant.
+- Operate fully offline: no telemetry, no phone-home, no licence callbacks, no cloud uploads, no LLM calls. Reading a cloud account over its provider's API needs outbound HTTPS to that provider, the bundle upload needs none.
+
+Cloud accounts (Microsoft Azure, AWS, Google Cloud) are read as migration sources, over the provider's API or from an exported bundle. Central managers (Panorama, FortiManager and FortiManager Cloud, Check Point management, Strata Cloud Manager) are discovered here and migrated in the Enterprise Edition. The table under Supported vendors marks the edition of every entry.
+
+## What it can't do
+
+- Do 1:1 migrations.
+- Run automated or unattended migrations.
+- Guarantee flawless output.
+- Make manual review obsolete.
 
 ## Workflow
 
