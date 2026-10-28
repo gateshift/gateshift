@@ -4,7 +4,7 @@
 
 Built to make firewall migration and optimization projects easier, faster and safer.
 
-Gateshift reads a firewall configuration, translates it into a vendor-neutral form, enriches it with what the target platform can do, and pushes it through the target's API.
+Gateshift reads a firewall configuration, enriches it with what the target platform can do, and pushes it through the target's API.
 
 Website: [gateshift.org](https://gateshift.org)
 
