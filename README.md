@@ -2,9 +2,11 @@
 
 **The firewall migration tool.**
 
-Built to make firewall migration and optimization projects easier, faster and safer.
+Built to make firewall migration and cleanup projects easier, faster and safer.
 
 Gateshift reads a firewall configuration, enriches it with what the target platform can do, and pushes it through the target's API.
+
+Runs on your own host, air-gapped after install, no activation, no account, no call-home, no AI, no LLM calls. Nothing leaves the host: configurations and credentials stay where they are, credentials encrypted at rest.
 
 Website: [gateshift.org](https://gateshift.org)
 
