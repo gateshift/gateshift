@@ -24,9 +24,14 @@ Conservatism contract (no false positives over missed findings):
   - a rule can only BE shadowed when it carries no negation (its own
     schedule/apps/identities merely narrow it further - a full cover of
     its declared space still covers the narrowed one);
-  - anything that does not resolve to comparable sets (FQDN objects,
-    unknown references, exotic service forms) makes that dimension
-    non-comparable, unless the covering side is universal ('any').
+  - anything that does not resolve to comparable sets (unknown references,
+    literals the engine cannot parse) makes that dimension non-comparable,
+    unless the covering side is universal ('any');
+  - an object the engine KNOWS but cannot expand (an FQDN, a dynamic, geo or
+    wildcard object, a service whose port form it cannot compare) is an
+    identity, not a hole: it is the same set wherever the same object is
+    named, so it is covered by itself or by 'any' and by nothing else, and it
+    covers nothing but itself (docs/SHADOWING_OBJECT_IDENTITY_PLAN.md).
 
 What the static view can NOT see: render-time transformations (e.g. a
 schedule the target cannot represent gets dropped declared, widening the
@@ -49,23 +54,48 @@ _INT_MAX = 0xFFFFFFFF
 _V6_OFFSET = 1 << 32
 _FULL4 = (0, _INT_MAX)
 _FULL6 = (_V6_OFFSET, _V6_OFFSET + (1 << 128) - 1)
+# a known object the engine cannot expand into ranges: compared by identity
+_OPAQUE = "__opaque__"
 
 
 @dataclasses.dataclass(frozen=True)
 class ShadowProfile:
-    """Per-target match-space semantics, supplied declaratively."""
+    """Per-target match-space semantics, supplied declaratively.
+
+    `apps_in_match` says whether a rule's applications narrow it ON THE
+    TARGET (docs/SHADOWING_TARGET_SEMANTICS_PLAN.md): `all` where the target
+    matches them (PA, a FortiGate in policy-based NGFW mode, no target),
+    `override` where only an App-Site override is bound and the source's
+    applications are declared drops (Check Point), `none` where nothing
+    matches them (a FortiGate in profile-based mode, a UTM profile inspects
+    but does not match). A rule the target matches wider than the source
+    wrote it covers more, and the analysis has to see that or it stays
+    silent where the target's own verification reports a conflict.
+    """
     zones_in_match: bool = True
+    apps_in_match: str = "all"
 
 
-_PROFILES = {
-    # Check Point access layers are zoneless - rules differing only by
-    # zone still conflict at install time.
-    "checkpoint": ShadowProfile(zones_in_match=False),
-}
+def apps_narrow(rule: dict, profile: ShadowProfile) -> bool:
+    """Do this rule's applications narrow its match space on the target?"""
+    if profile.apps_in_match == "none":
+        return False
+    if profile.apps_in_match == "override":
+        return _has_apps(rule) and bool(rule.get("app_override_source"))
+    return _has_apps(rule)
 
 
-def profile_for(platform: str | None) -> ShadowProfile:
-    return _PROFILES.get((platform or "").lower(), ShadowProfile())
+def profile_for(platform: str | None, ngfw_mode: str | None = None) -> ShadowProfile:
+    """The profile of a target platform; a FortiGate needs its NGFW mode
+    (the generate's `forti_ngfw_mode`, unknown reads as profile-based)."""
+    p = (platform or "").lower()
+    if p == "checkpoint":
+        # access layers are zoneless, rules differing only by zone still
+        # conflict at install time; source applications are declared drops
+        return ShadowProfile(zones_in_match=False, apps_in_match="override")
+    if p == "fortigate" and (ngfw_mode or "profile-based").lower() != "policy-based":
+        return ShadowProfile(apps_in_match="none")
+    return ShadowProfile()
 
 
 # ── Dimension values ─────────────────────────────────────────────
@@ -113,10 +143,11 @@ class _AddrResolver:
                     "SELECT name, value, value6, obj_type FROM fw_address_objects "
                     "WHERE device_id = :d"), {"d": device_id}):
                 if name and value:
-                    # fqdn/dynamic object types are not comparable sets
+                    # fqdn/dynamic/geo/wildcard objects are no sets, but the
+                    # same set wherever the object is named: an identity
                     if (obj_type or "").lower() in ("fqdn", "dynamic", "geo",
                                                     "wildcard"):
-                        self.objects[name] = "__unresolved__"
+                        self.objects[name] = _OPAQUE
                     else:
                         # a dual-stack object carries both halves (docs/IPV6_PLAN.md, D1)
                         self.objects[name] = f"{value}|{value6}" if value6 else value
@@ -168,13 +199,19 @@ class _AddrResolver:
             return None
 
     def entry_ranges(self, entry: str, _seen: frozenset = frozenset()):
-        """One entry → list[(lo,hi)] | UNIVERSAL | None (unresolved)."""
+        """One entry → (ranges, idents) | UNIVERSAL | None (unresolved).
+
+        ranges is a list[(lo, hi)] of everything that expanded, idents the
+        set of opaque objects the entry names (an FQDN, a dynamic, geo or
+        wildcard object, or a group holding one, see the module docstring).
+        A name the engine does not know and a literal it cannot parse are
+        None: nothing it can vouch for, so nothing it may compare."""
         if not entry or entry.lower() in ("any", "all"):
             return UNIVERSAL
         if entry == "any4":               # the D5 tokens: one family's whole range
-            return [_FULL4]
+            return ([_FULL4], set())
         if entry == "any6":
-            return [_FULL6]
+            return ([_FULL6], set())
         if entry in _seen:            # group cycle - refuse
             return None
         cached = self._cache.get(entry)
@@ -183,14 +220,13 @@ class _AddrResolver:
         result = None
         lit = self._literal(entry)
         if lit is not None:
-            result = lit
+            result = (lit, set())
         elif entry in self.groups:
             members = self.groups[entry]
-            if members is None:
-                result = None
-            else:
-                acc: list = []
-                result = acc
+            if members is not None:
+                acc_r: list = []
+                acc_i: set = set()
+                result = (acc_r, acc_i)
                 for m in members:
                     sub = self.entry_ranges(m, _seen | {entry})
                     if sub is UNIVERSAL:
@@ -199,33 +235,37 @@ class _AddrResolver:
                     if sub is None:
                         result = None
                         break
-                    acc.extend(sub)
+                    acc_r.extend(sub[0])
+                    acc_i |= sub[1]
         elif entry in self.objects:
             val = self.objects[entry]
-            if val == "__unresolved__":
-                result = None
+            if val == _OPAQUE:
+                result = ([], {entry})
             else:
-                result = self._literal(val)
+                lit = self._literal(val)
+                result = (lit, set()) if lit is not None else None
         if result is not None and result is not UNIVERSAL:
             # both families whole is universal; one family's whole range stays a range
-            if _FULL4 in result and _FULL6 in result:
+            if _FULL4 in result[0] and _FULL6 in result[0]:
                 result = UNIVERSAL
         self._cache[entry] = result
         return result
 
     def side(self, entries: list[str]):
-        """Whole src/dst side → (kind, merged ranges)."""
+        """Whole src/dst side → (kind, merged ranges, identities)."""
         if not entries:
-            return (UNIVERSAL, ())
+            return (UNIVERSAL, (), frozenset())
         acc: list = []
+        idents: set = set()
         for e in entries:
             r = self.entry_ranges(str(e))
             if r is UNIVERSAL:
-                return (UNIVERSAL, ())
+                return (UNIVERSAL, (), frozenset())
             if r is None:
-                return (UNRESOLVED, ())
-            acc.extend(r)
-        return ("set", _merge_ranges(acc))
+                return (UNRESOLVED, (), frozenset())
+            acc.extend(r[0])
+            idents |= r[1]
+        return ("set", _merge_ranges(acc), frozenset(idents))
 
 
 # tcp/udp carry port ranges; other protocols compare whole-proto.
@@ -267,8 +307,11 @@ class _SvcResolver:
                 except Exception:
                     continue
                 proto, port = val.get("protocol"), val.get("port")
-                if proto and port not in (None, ""):
-                    self.objects[name] = (str(proto).lower(), str(port))
+                # a known object with a protocol or a port the engine cannot
+                # expand is still a known object: entry_specs makes it an
+                # identity instead of leaving the name unknown
+                if proto or port not in (None, ""):
+                    self.objects[name] = (str(proto or "").lower(), str(port or ""))
         except Exception:
             pass
         try:
@@ -305,7 +348,12 @@ class _SvcResolver:
         return out or None
 
     def entry_specs(self, entry: str, _seen: frozenset = frozenset()):
-        """One entry → list[(proto, lo, hi)] | UNIVERSAL | None."""
+        """One entry → (specs, idents) | UNIVERSAL | None.
+
+        specs is a list[(proto, lo, hi)], idents the set of known service
+        objects the engine cannot compare (a port form like '<1024', an ICMP
+        object carrying a type, an empty protocol): identities, the same
+        service wherever the same object is named. An unknown name is None."""
         if not entry or str(entry).lower() in ("any", "all"):
             return UNIVERSAL
         entry = str(entry).strip()
@@ -318,14 +366,13 @@ class _SvcResolver:
         m = _SVC_SPEC_RE.fullmatch(entry)
         if m:
             lo = int(m.group(2)); hi = int(m.group(3) or lo)
-            result = [(m.group(1).lower(), min(lo, hi), max(lo, hi))]
+            result = ([(m.group(1).lower(), min(lo, hi), max(lo, hi))], set())
         elif entry in self.groups:
             members = self.groups[entry]
-            if members is None:
-                result = None
-            else:
-                acc: list = []
-                result = acc
+            if members is not None:
+                acc_s: list = []
+                acc_i: set = set()
+                result = (acc_s, acc_i)
                 for mm in members:
                     sub = self.entry_specs(mm, _seen | {entry})
                     if sub is UNIVERSAL:
@@ -334,58 +381,70 @@ class _SvcResolver:
                     if sub is None:
                         result = None
                         break
-                    acc.extend(sub)
+                    acc_s.extend(sub[0])
+                    acc_i |= sub[1]
         elif entry in self.objects:
             proto, port = self.objects[entry]
+            specs = None
             if proto in ("tcp", "udp"):
                 pr = self._ports(port)
-                result = [(proto, lo, hi) for lo, hi in pr] if pr else None
-            elif proto in ("ip", "any", ""):
-                result = UNIVERSAL if proto != "" else None
-            elif proto:
+                specs = [(proto, lo, hi) for lo, hi in pr] if pr else None
+            elif proto in ("ip", "any"):
+                result = UNIVERSAL
+            elif proto and not str(port or "").strip():
                 # whole-protocol service (icmp, gre, esp, ...) - compare
-                # proto-level; port qualifier (icmp type) folds into it
-                # conservatively as whole-proto only when no port is set.
-                result = [(proto, 0, 65535)] if not str(port or "").strip() else None
+                # proto-level; a port qualifier (icmp type) makes it opaque
+                specs = [(proto, 0, 65535)]
+            if result is not UNIVERSAL:
+                result = (specs, set()) if specs is not None else ([], {entry})
         self._cache[entry] = result
         return result
 
     def side(self, entries: list[str]):
         if not entries:
-            return (UNIVERSAL, ())
+            return (UNIVERSAL, (), frozenset())
         acc: list = []
+        idents: set = set()
         for e in entries:
             r = self.entry_specs(e)
             if r is UNIVERSAL:
-                return (UNIVERSAL, ())
+                return (UNIVERSAL, (), frozenset())
             if r is None:
-                return (UNRESOLVED, ())
-            acc.extend(r)
+                return (UNRESOLVED, (), frozenset())
+            acc.extend(r[0])
+            idents |= r[1]
         # merge per proto
         per: dict[str, list] = {}
         for proto, lo, hi in acc:
             per.setdefault(proto, []).append((lo, hi))
         merged = {p: _merge_ranges(rs) for p, rs in per.items()}
-        return ("set", merged)
+        return ("set", merged, frozenset(idents))
 
 
 def _dim_covers(a, b) -> bool:
-    """Does dimension value a fully cover b? (addr sides)"""
-    ka, va = a
-    kb, vb = b
+    """Does dimension value a fully cover b? (addr sides)
+
+    Both halves: b's ranges inside a's ranges and b's identities among a's.
+    An identity covers only itself, never a range, and no range covers an
+    identity, so a subset of both halves is a subset of the real match
+    space and the verdict stays free of false positives."""
+    ka, va, ia = a
+    kb, vb, ib = b
     if ka == UNIVERSAL:
         return True
     if ka == UNRESOLVED or kb == UNRESOLVED or kb == UNIVERSAL:
         return False
-    return _ranges_subset(vb, va)
+    return ib <= ia and _ranges_subset(vb, va)
 
 
 def _svc_covers(a, b) -> bool:
-    ka, va = a
-    kb, vb = b
+    ka, va, ia = a
+    kb, vb, ib = b
     if ka == UNIVERSAL:
         return True
     if ka == UNRESOLVED or kb == UNRESOLVED or kb == UNIVERSAL:
+        return False
+    if not ib <= ia:
         return False
     for proto, ranges in vb.items():
         cover = va.get(proto)
@@ -422,11 +481,19 @@ def analyze(conn, device_id: int, rules: list[dict],
         {"shadowed": {rhash: {"kind": "duplicate"|"shadowed",
                               "by": rule_name, "by_hash": rhash}},
          "shadowers": {rhash: n},
-         "skipped": n_without_a_verdict}
+         "skipped": n_without_a_verdict,
+         "candidates": n_rules_that_could_cover,
+         "no_cover": {reason: n_active_rules_kept_out_by_it}}
 
     ``skipped`` counts the ACTIVE rules the analysis has no opinion on
     (negation, or an address or service that does not resolve) - the number
     the UI shows so that silence is not read as "reachable".
+
+    ``candidates`` and ``no_cover`` say whether anything could have covered
+    at all: a source whose rules all carry applications (narrowing on the
+    target) or ``application-default`` without applications the table knows
+    has no covering rule, and an empty result then means nothing. The first
+    gate that kept a rule out is counted (``explain_no_cover`` words it).
     """
     addr = _AddrResolver(conn, device_id)
     svc = _SvcResolver(conn, device_id)
@@ -439,12 +506,13 @@ def analyze(conn, device_id: int, rules: list[dict],
             "name": rule.get("rule_name") or rule.get("name") or "",
             "disabled": bool(rule.get("disabled")),
             "negated": _negated(rule),
-            "apps": _has_apps(rule),
+            "apps": apps_narrow(rule, profile),
             "schedule": bool((rule.get("schedule") or "").strip()),
             "idents": bool(rule.get("source_identities")),
             "src": addr.side(rule.get("sources") or []),
             "dst": addr.side(rule.get("destinations") or []),
             "svc": _svc_side_for_rule(rule, svc),
+            "appdef": _uses_app_default(rule),
             "src_zones": rule.get("src_zones") or [],
             "dst_zones": rule.get("dst_zones") or [],
         }
@@ -453,6 +521,7 @@ def analyze(conn, device_id: int, rules: list[dict],
     shadowed: dict = {}
     shadowers: dict = {}
     skipped = 0
+    no_cover: dict = {}
     # Shadower candidates seen so far, in order.
     candidates: list[dict] = []
     for e in prepared:
@@ -493,20 +562,70 @@ def analyze(conn, device_id: int, rules: list[dict],
         # that silence is never mistaken for a clean bill (the count reaches
         # the Shadowed filter and the generate's note). A disabled rule is out
         # by the operator's own choice and does not count here; a negated one
-        # or one whose address or service does not resolve does.
+        # or one whose address or service does not resolve does, and so does
+        # one naming an opaque object: the analysis can say "the same object,
+        # covered", it cannot say anything about the reach of an opaque set.
         if (not e["disabled"] and e["rhash"] not in shadowed
                 and (e["negated"] or e["src"][0] == UNRESOLVED
-                     or e["dst"][0] == UNRESOLVED or e["svc"][0] == UNRESOLVED)):
+                     or e["dst"][0] == UNRESOLVED or e["svc"][0] == UNRESOLVED
+                     or e["src"][2] or e["dst"][2] or e["svc"][2])):
             skipped += 1
         # Can this rule SHADOW later ones? (must be always-active superset)
-        if (not e["disabled"] and not e["negated"] and not e["apps"]
-                and not e["schedule"] and not e["idents"]
-                and e["src"][0] != UNRESOLVED and e["dst"][0] != UNRESOLVED
-                and e["svc"][0] != UNRESOLVED
-                and e["rhash"] not in shadowed):
+        # The first gate that holds it back is counted, so an empty result
+        # can say why nothing could cover (a source of application-default
+        # rules, measured 2026-10-20 on PA 95: 720 of 720, no candidate).
+        if e["disabled"] or e["rhash"] in shadowed:
+            continue
+        gate = ("negation" if e["negated"] else "applications" if e["apps"]
+                else "schedule" if e["schedule"] else "identities" if e["idents"]
+                else "address" if (e["src"][0] == UNRESOLVED or e["dst"][0] == UNRESOLVED)
+                else ("application-default" if e["appdef"] else "service") if e["svc"][0] == UNRESOLVED
+                else None)
+        if gate is None:
             candidates.append(e)
+        else:
+            no_cover[gate] = no_cover.get(gate, 0) + 1
 
-    return {"shadowed": shadowed, "shadowers": shadowers, "skipped": skipped}
+    return {"shadowed": shadowed, "shadowers": shadowers, "skipped": skipped,
+            "candidates": len(candidates), "no_cover": no_cover}
+
+
+_NO_COVER_LABELS = {
+    "applications": "carry applications, which narrow a rule on this target",
+    "application-default": "use application-default without applications the analysis can resolve to ports",
+    "service": "name a service that does not resolve",
+    "address": "name an address that does not resolve",
+    "negation": "negate a side",
+    "schedule": "carry a schedule",
+    "identities": "carry identities",
+}
+
+
+def explain_no_cover(result: dict) -> str:
+    """Why nothing could cover, for an empty result. '' when at least one
+    rule could act as a covering rule, so the caller shows it only when the
+    silence needs the explanation (CE backlog 15b)."""
+    if not isinstance(result, dict) or result.get("candidates"):
+        return ""
+    reasons = result.get("no_cover") or {}
+    if not reasons:
+        return ""
+    total = sum(reasons.values())
+    parts = [f"{n} {_NO_COVER_LABELS.get(k, k)}"
+             for k, n in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return (f"No rule can act as a covering rule here: of {total} active rule"
+            f"{'' if total == 1 else 's'}, " + ", ".join(parts) + ".")
+
+
+def _uses_app_default(rule: dict) -> bool:
+    """Does the rule's service list carry the application-default token?"""
+    names = rule.get("import_services")
+    if isinstance(names, str):
+        try:
+            names = json.loads(names)
+        except Exception:
+            names = None
+    return any(str(n).strip().lower() == "application-default" for n in (names or []) if n)
 
 
 def _app_default_entries(rule: dict, names: list) -> list | None:
@@ -549,6 +668,10 @@ def _svc_side_for_rule(rule: dict, svc: "_SvcResolver"):
     api_import rules carry service NAMES (import_services JSON, already
     surfaced by the loader); log-derived rules carry proto/port columns.
     """
+    # the rule's service mode (the PA switch, honoured on every target since
+    # item 16): `any` is every service, the universal side
+    if str(rule.get("service_override") or "").strip().lower() == "any":
+        return (UNIVERSAL, (), frozenset())
     if rule.get("source_type") in ("api_import", "both"):
         names = rule.get("import_services")
         if isinstance(names, str):
@@ -562,16 +685,16 @@ def _svc_side_for_rule(rule: dict, svc: "_SvcResolver"):
         if any(str(n).strip().lower() == "application-default" for n in names):
             names = _app_default_entries(rule, names)
             if names is None:
-                return (UNRESOLVED, ())
+                return (UNRESOLVED, (), frozenset())
         return svc.side(names)
     proto = (rule.get("proto") or rule.get("protocol") or "").lower()
     pf, pt = rule.get("port_from"), rule.get("port_to")
     if not proto and pf is None:
-        return (UNIVERSAL, ())
+        return (UNIVERSAL, (), frozenset())
     if proto in ("tcp", "udp") and pf is not None:
         lo = int(pf)
         hi = int(pt if pt is not None else pf)
-        return ("set", {proto: ((min(lo, hi), max(lo, hi)),)})
+        return ("set", {proto: ((min(lo, hi), max(lo, hi)),)}, frozenset())
     if proto and pf is None:
-        return ("set", {proto: ((0, 65535),)})
-    return (UNRESOLVED, ())
+        return ("set", {proto: ((0, 65535),)}, frozenset())
+    return (UNRESOLVED, (), frozenset())

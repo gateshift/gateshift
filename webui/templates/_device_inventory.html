@@ -1,10 +1,10 @@
 {# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
-{# The device inventory (U7, docs/PROJECTS_UI_DESIGN.md): the device column of
-   the Projects page. One row per device with import / edit / delete; the edit
+{# The device inventory (U7, docs/PROJECTS_UI_DESIGN.md): the Devices page
+   (/devices, D30 of docs/UI_USABILITY_PLAN.md). One row per device with import / edit / delete; the edit
    dialog carries the former inline edit form, the reset and (hidden R1) the
    restore. Expects the inventory context: devices, platform_labels,
    manager_ui, has_logs, tenant_id and the flash values form_error /
-   discovered / uploaded / no_data / discover_empty. #}
+   discovered / uploaded / no_data. #}
 
 {# ── Flash messages from the device endpoints - shown as toasts, the params
      stripped from the URL after the first render (GET handlers stay
@@ -19,7 +19,7 @@
     try {
       var u = new URL(window.location.href);
       var had = false;
-      ['form_error', 'discovered', 'uploaded', 'no_data', 'discover_empty', 'picked', 'scanned', 'unattributed'].forEach(function (p) {
+      ['form_error', 'discovered', 'uploaded', 'no_data', 'picked', 'scanned', 'unattributed'].forEach(function (p) {
         if (u.searchParams.has(p)) { u.searchParams.delete(p); had = true; }
       });
       if (had) {
@@ -37,19 +37,20 @@
     <span class="lbl">device{{ '' if devices|length == 1 else 's' }}</span>
   </div>
   <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
-    <a href="/devices/senders" class="btn" title="The senders the syslog receiver heard, each attached to the Device it is">+Add Log Sender</a>
-    <button type="button" onclick="openAddModal({next: '/projects'})" class="btn" title="Register a device in this tenant">+Add Device</button>
+    <button type="button" onclick="openAddModal({next: '/devices'})" class="btn" title="Register a Device in this tenant">+Add Device</button>
+    {# The Log Senders page (what the syslog receiver heard, the operator attaches, D36) has no
+       button in 0.9.5 (D40, operator 2026-11-12): the page stays at /devices/senders, the add
+       dialog's "from the log stream" route and the capture upload stay. Re-enable: the flag. #}
+    {% set _show_log_senders = false %}
+    {% if _show_log_senders %}
+    <a href="/devices/senders" class="btn" title="The senders the syslog receiver heard, each attached to the Device it belongs to">Log Senders</a>
+    {% endif %}
+    {# the tenants are managed where they bind, next to the Devices (D76, 2026-11-15): the dialog of _tenant_modal.html #}
+    {% if tenants is defined %}<button type="button" onclick="gsTenantsOpen()" class="btn" title="The tenants: one customer's estate each, with its Devices and projects">Tenants</button>{% endif %}
   </div>
 </div>
-{# ── What the syslog receiver hears and no Device is mapped to: a sender string
-     never registers a Device by itself (docs/DEVICE_IDENTITY_PLAN.md, phase 4),
-     so the count is shown here, as a count, with the way in. ── #}
-{% if unattributed_senders %}
-<div class="mut" style="margin:-8px 0 12px;font-size:var(--fs-small);display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-  <a href="/devices/senders" title="The senders the receiver heard, with the Device each points at">{{ unattributed_senders }} log sender{{ '' if unattributed_senders == 1 else 's' }} not attributed to a Device</a>
-  <span>&middot; +Add Device, then a platform's "from the log stream" entry</span>
-</div>
-{% endif %}
+{# A sender no Device is mapped to is counted on the Log Senders page only (D37,
+     2026-11-12): the Devices page shows Devices, the receiver registers nothing. #}
 
 {% if devices %}
 <div class="twrap">
@@ -68,9 +69,9 @@
       <tr id="device-{{ d.id }}" data-device-id="{{ d.id }}" data-host="{{ d.host_name }}"
           data-text="{{ ((d.display_name or d.host_name) ~ ' ' ~ d.host_name ~ ' ' ~ _pl_label ~ ' ' ~ (d.mgmt_ip or '') ~ ' ' ~ (d.role or '') ~ ' ' ~ (d.notes or '')) | lower }}">
         <td style="max-width:280px;white-space:normal;overflow-wrap:anywhere;">
-          {% if d.device_kind == 'manager-source' and d.pano_default_scope %}
-          {# A manager (EE): the name enters the Manager-View (scope tree + cross-scope analysis). #}
-          <a href="/manager/{{ d.id }}" onclick="showNavOverlay()" class="pl-dev-link" title="Manager view: scopes and cross-scope analysis">{{ d.display_name or d.host_name }}</a>
+          {% if (d.device_kind == 'manager-source' and d.pano_default_scope) or (d.has_instances and d.pano_default_scope) %}
+          {# A manager: the name enters the Manager workbench (EE) or the read-only scope page (CE, docs/FMC_SOURCE_PLAN.md D17). #}
+          <a href="{{ '/manager/' if (manager_ui and not d.has_instances) else '/scopes/' }}{{ d.id }}" onclick="showNavOverlay()" class="pl-dev-link" title="{{ 'The box\'s instances' if d.has_instances else ('Manager view: scopes and cross-scope analysis' if manager_ui else 'The manager\'s scopes') }}">{{ d.display_name or d.host_name }}</a>
           {% else %}
           <button type="button" class="pl-dev-link" style="background:none;border:0;border-bottom:1px dotted var(--line2);padding:0;font:inherit;cursor:pointer;text-align:left;white-space:normal;overflow-wrap:anywhere;" onclick="openEditDevice({{ d.id }})" title="Details and settings">{{ d.display_name or d.host_name }}</button>
           {% endif %}
@@ -162,7 +163,7 @@
             <button type="button" onclick="openEditDevice({{ d.id }})" class="btn" title="Details and settings">Details</button>
             <form method="post" action="/devices/reset/{{ d.id }}" style="display:contents;"
                   onsubmit="return confirmFormSubmit(this, {title:'Reset device?', body:'All collected data for {{ d.host_name }} will be wiped. The device registration itself stays.', confirmLabel:'Reset', danger:true});">
-              <button type="submit" class="btn danger" title="Wipe everything collected for this device. The registration stays">Reset</button>
+              <button type="submit" class="btn danger" title="Wipe everything collected for this Device. The registration stays">Reset</button>
             </form>
             <form method="post" action="/devices/delete/{{ d.id }}" style="display:contents;"
                   onsubmit="return confirmFormSubmit(this, {title:'Remove device?', body:'{{ d.host_name }} and all its collected data will be removed.', confirmLabel:'Remove', danger:true});">
@@ -178,8 +179,8 @@
 </div>
 {% else %}
 <div class="empty" style="background:var(--bg1);border:1px solid var(--line);border-radius:0;">
-  No devices in this tenant yet.
-  <div style="margin-top:12px;"><button type="button" onclick="openAddModal({next: '/projects'})" class="btn">+Add Device</button></div>
+  No Devices in this tenant yet.
+  <div style="margin-top:12px;"><button type="button" onclick="openAddModal({next: '/devices'})" class="btn">+Add Device</button></div>
 </div>
 {% endif %}
 
@@ -192,7 +193,7 @@
       <h2 style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);">{{ d.display_name or d.host_name }} <span class="mut" style="font-weight:400;">&middot; {{ platform_labels.get(d.platform, 'Unknown') }}</span></h2>
       <button type="button" onclick="closeEditDevice({{ d.id }})" class="x" aria-label="Close">&times;</button>
     </div>
-    <div class="mut" style="font-size:var(--fs-body);margin:-6px 0 12px;" title="Device facts are shared: an edit reaches every project that uses this device">
+    <div class="mut" style="font-size:var(--fs-body);margin:-6px 0 12px;" title="Device facts are shared: an edit reaches every project that uses this Device">
       {% if d.projects %}Used in {{ d.projects }} project{{ '' if d.projects == 1 else 's' }}{% else %}Not used in any project yet{% endif %}
     </div>
     <form method="post" action="/devices/edit/{{ d.id }}" style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
@@ -258,6 +259,16 @@
         <label>Notes</label>
         <input type="text" name="notes" value="{{ d.notes or '' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;">
       </div>
+      {# the tenant of a Device no project binds may change (D66, 2026-11-13): the select
+         shows once a second tenant exists, a bound Device shows it disabled #}
+      {% if tenants is defined and tenants|length > 1 %}
+      <div class="field" style="min-width:170px;flex:1 1 170px;">
+        <label>Tenant{% if d.projects %} <span class="dash">(bound by {{ d.projects }} project{{ '' if d.projects == 1 else 's' }})</span>{% endif %}</label>
+        <select name="tenant_id" class="inp" style="font-size:var(--fs-body);padding:7px 10px;{% if d.projects %}opacity:0.55;cursor:not-allowed;{% endif %}"{% if d.projects %} disabled{% endif %}>
+          {% for t in tenants %}<option value="{{ t.id }}"{% if t.id == tenant_id %} selected{% endif %}>{{ t.name }}</option>{% endfor %}
+        </select>
+      </div>
+      {% endif %}
       {% if d.platform == 'fortigate' %}
       <div class="field" style="min-width:170px;flex:1 1 170px;">
         <label>NAT mode <span class="dash">(Forti)</span> <span id="nat-mode-hint-{{ d.id }}" class="dash"></span></label>
@@ -427,7 +438,6 @@ function restoreRun(id, host) {
           showToast('Restore failed, see the panel', 'error', 9000);
         }
         el.info.textContent = lines.join('\n');
-        if (window.loadPushHistory) loadPushHistory();
       })
       .catch(function (e) {
         el.info.textContent = 'Restore failed: ' + e.message;

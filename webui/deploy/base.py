@@ -343,6 +343,53 @@ def ipv6_loss(rule_id: str, field: str, lost: list, kept: list, *, action,
                         issue=IPV6_DENY_LOSS if deny else "", rhash=rhash)
 
 
+# application-default on a target without App-ID (docs/APPDEF_WIDENING_PLAN.md).
+# The deploy loader resolves the rule's App-IDs to their default ports
+# (deploy.app_defaults). An App-ID the table does not know has no port; when
+# other App-IDs of the rule resolved, the rule goes out narrower, a warning.
+# When none did, or the rule names no application at all, the rule goes out
+# with EVERY service where the source matched default ports only. For an
+# allow rule that fails open, so this kind blocks the push until the operator
+# sets the rule's service mode to any (recording the decision) or excludes
+# the rule; a deny rule that widens blocks more than the source and stays a
+# warning. Found 2026-10-20 on a PA source whose rules all said
+# application-default, 136 of them with no application: they went out as Any
+# and nothing said so.
+APPDEF_WIDENED = "appdef_widened"
+
+
+def appdef_result(rule_id: str, action, *, unresolved: list, kept: list,
+                  any_word: str = "Any", rhash: str = "") -> "DroppedField":
+    """The declaration for an application-default rule the target cannot
+    resolve in full. `unresolved` are the App-IDs without a known default
+    port, `kept` the services the rule still carries: non-empty means the
+    rule is narrower (warning), empty means it is wider (blocks on allow)."""
+    apps = [str(a) for a in (unresolved or []) if a]
+    many = len(apps) > 1
+    named = ", ".join(f"'{a}'" for a in apps)
+    if kept:
+        return DroppedField(
+            rule_id=rule_id, field="service",
+            reason=(f"application-default: the application{'s' if many else ''} {named} "
+                    f"{'have' if many else 'has'} no known default port and "
+                    f"{'are' if many else 'is'} left out, the migrated rule is narrower "
+                    "than the source"),
+            fallback="pushed with the default ports of the applications that resolved",
+            rhash=rhash)
+    deny = is_deny_action(action)
+    what = (f"the application{'s' if many else ''} {named} {'have' if many else 'has'} "
+            "no known default port" if apps else "no application named")
+    return DroppedField(
+        rule_id=rule_id, field="service",
+        reason=(f"application-default with {what}, so the migrated rule matches every "
+                "service where the source matched the applications' default ports: "
+                + ("the migrated rule denies more than the source" if deny
+                   else "the migrated rule allows more than the source")),
+        fallback=(f"replaced by {any_word}: set the rule's service mode to any if every "
+                  "service is acceptable, or exclude the rule"),
+        issue="" if deny else APPDEF_WIDENED, rhash=rhash)
+
+
 # ── Address values across families (docs/IPV6_PLAN.md, D1, phase 2) ──
 # An address object's value document carries `value` (the representative:
 # the IPv4 half where the object has one, the IPv6 value of a v6-only
@@ -777,6 +824,28 @@ class DeployDriver(ABC):
             f"{type(self).__name__} does not provide options for {key!r}"
         )
 
+    def strand_unavailable(self, *, device: dict, strand: str) -> str | None:
+        """The reason this target takes no push of ``strand``, None when it does.
+
+        A target that lacks a strand by its nature answers one sentence here
+        (a Check Point virtual system: its interfaces, VLANs and routes are
+        VSX provisioning, the management API of R81.20 carries no
+        provisioning command, so only the policy strand is pushed). Four
+        readers share the answer, none stores it: the build drops the
+        strand's sections and declares the strand in the artefact, the
+        deploy tab offers no push of it, the push route refuses it with
+        HTTP 409, and ``push()`` refuses it before any login
+        (docs/VSX_TARGET_PLAN.md, D2). Default: every strand is pushed.
+        """
+        return None
+
+    def section_strand(self, section: str) -> str | None:
+        """The strand a rendered section is pushed in ('policy' or
+        'network'), None when the driver does not say. The build drops the
+        sections of a strand the target lacks (``strand_unavailable``), a
+        section without a strand stays in the artefact."""
+        return None
+
     @abstractmethod
     def generate(
         self,
@@ -945,6 +1014,17 @@ class DeployDriver(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support target-VRF discovery"
         )
+
+    def warn_discover(self, message: str) -> None:
+        """A discover read that succeeded with a part missing says so (product finding 10,
+        2026-11-16: a Gaia login that fails left the Check Point interface list short
+        without a word). The discover route clears ``discover_warnings`` before the read
+        and returns the list with the payload. Push steps have StepResult for this."""
+        lst = getattr(self, "discover_warnings", None)
+        if lst is None:
+            lst = []
+            self.discover_warnings = lst
+        lst.append(message)
 
     def list_zone_protection_profiles(self, *, device: dict) -> list[dict]:
         """Read the target's zone-protection-profile catalog (PA-specific).

@@ -12,6 +12,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# pip comes from the base image and lags behind its own security
+# releases (12 advisories open in 25.0.1 on 2026-10-22). It is build
+# tooling, never run at runtime, but the install below goes through it,
+# so it is patched first.
+RUN pip install --no-cache-dir --upgrade pip
+
 COPY pyapp/gateshift/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 

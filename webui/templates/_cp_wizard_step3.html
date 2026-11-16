@@ -21,6 +21,7 @@
   <input type="hidden" name="mgmt_ip"   value="{{ form_mgmt_ip }}">
   <input type="hidden" name="mgmt_port" value="{{ form_mgmt_port or 443 }}">
   <input type="hidden" name="api_key"   value="{{ form_api_key }}">
+  <input type="hidden" name="domain"    value="{{ form_domain or '' }}">
   <input type="hidden" name="package"   value="{{ form_package }}">
 
   <div class="field">
@@ -29,7 +30,7 @@
     </label>
     {% if not gateways %}
       <div class="tag warn" style="display:flex;width:auto;padding:10px 14px;border-radius:0;font-size:var(--fs-body);">
-        No gateway runs this policy and none is without a policy. In Check Point, create the gateway object or install the policy on a gateway first (SmartConsole → Install Policy).
+        No gateway runs this policy and none is without a policy.
       </div>
     {% else %}
       <div style="display:flex;flex-direction:column;gap:6px;max-width:720px;">
@@ -53,7 +54,7 @@
           {% endif %}
           <span class="dash" style="">{{ gw.ipv4 or '-' }}</span>
           {% if not gw.installed and not _disabled %}
-          <span class="dash" style="margin-left:auto;font-style:italic;font-size:var(--fs-small);" title="The package becomes this device's pin. Install it on the gateway in SmartConsole when ready.">no policy installed yet</span>
+          <span class="dash" style="margin-left:auto;font-style:italic;font-size:var(--fs-small);">no policy installed yet</span>
           {% endif %}
           {% if _disabled %}
           <span style="margin-left:auto;color:var(--amber);opacity:0.7;font-style:italic;font-size:var(--fs-small);">{{ gw.reason }}</span>

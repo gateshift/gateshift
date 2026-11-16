@@ -1,8 +1,6 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
-USE gateshift;
-
 -- Remove candidates from all previous runs; keep only the current run.
 DELETE FROM fw_rule_candidates WHERE generated_at < @run_ts;
 

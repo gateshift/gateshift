@@ -20,6 +20,8 @@
 
       <div class="field">
         <label>Platform</label>
+        {# what the platform needs before it can be read or pushed (docs/UI_USABILITY_PLAN.md, D10) #}
+        <a id="add-device-prereq" class="mut" href="#" target="_blank" rel="noopener" style="display:none;font-size:var(--fs-small);margin-bottom:4px;" title="The platform's prerequisites: accounts, permissions, API access">Prerequisites for this platform</a>
         <select name="platform" id="add-device-platform" onchange="onAddPlatformChange(this.value)" class="inp" required>
           <option value="" selected disabled>Select a platform</option>
           {# Check Point splits by tier: a single Gateway (CE - via its mgmt API) vs a management
@@ -39,10 +41,10 @@
           <optgroup label="Firewalls and Clusters">
             <option value="panw">{{ platform_labels.get('panw', 'Palo Alto Networks') }}</option>
             <option value="fortigate">{{ platform_labels.get('fortigate', 'FortiGate') }}</option>
-            <option value="checkpoint_gw">Check Point</option>
-            {# A management server / MDS registers as a manager in the EE only; the CE
-               reads it through the discovery group below. #}
-            {% if manager_ui %}<option value="checkpoint">Check Point (SMS / MDS)</option>{% endif %}
+            {# One gateway or ClusterXL cluster through its SmartCenter or Smart-1 Cloud
+               (the wizard logs in without a domain, so a Multi-Domain server is the
+               manager entry below, EE, or its discovery). #}
+            <option value="checkpoint_gw">Check Point Security Gateway</option>
             <option value="firepower">{{ platform_labels.get('firepower', 'Cisco Firepower') }}</option>
             <option value="asa">{{ platform_labels.get('asa', 'Cisco ASA') }}</option>
             <option value="opnsense_upload">OPNsense</option>
@@ -67,6 +69,22 @@
           <optgroup label="Log Sources">
             <option value="opnsense_logs">OPNsense</option>
           </optgroup>
+          {# Managers registered as rows, one entry each like the discovery group below
+             (docs/UI_USABILITY_PLAN.md, D69): the add route maps the entry to the platform
+             whose reader serves it (a Panorama or a FortiManager is a PAN-OS or FortiOS row
+             the import recognises, the cloud managers carry their flag). The Enterprise
+             Edition's managers show with the manager UI; the Cisco Management Center is
+             read by the CE itself (docs/FMC_SOURCE_PLAN.md, D1). #}
+          <optgroup label="Manager">
+            {% if manager_ui %}
+            <option value="panw_panorama">Panorama</option>
+            <option value="fortigate_fmg">FortiManager</option>
+            <option value="fortigate_fmgc">FortiManager Cloud</option>
+            <option value="checkpoint">Check Point SmartCenter, Smart-1 Cloud or MDS</option>
+            <option value="panw_scm">Strata Cloud Manager</option>
+            {% endif %}
+            <option value="firepower_fmc">Cisco Secure Firewall Management Center</option>
+          </optgroup>
           {# Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): the manager is read with
              the credentials typed into its block and its scopes are shown with counts.
              Nothing is stored. Importing the scopes is the Enterprise Edition. #}
@@ -74,21 +92,45 @@
             <option value="discover_panorama">Panorama</option>
             <option value="discover_fortimanager">FortiManager</option>
             <option value="discover_fmgcloud">FortiManager Cloud</option>
-            <option value="discover_checkpoint">Check Point management (SmartCenter, Smart-1 Cloud, MDS)</option>
+            <option value="discover_checkpoint">Check Point SmartCenter, Smart-1 Cloud or MDS</option>
             <option value="discover_scm">Strata Cloud Manager</option>
+            <option value="discover_fmc">Cisco Secure Firewall Management Center</option>
+            <option value="discover_cdfmc">Cisco cloud-delivered Firewall Management Center</option>
           </optgroup>
         </select>
       </div>
 
       {# Cisco FTD = source-only via the on-box FDM REST API (admin user/password -
-         FDM has no static API keys). FMC-managed boxes have no FDM API. #}
-      <div id="ftd-hint" class="tag" style="display:none;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
-        Connect a standalone (FDM-managed) FTD as a migration <b>source</b>.
-      </div>
+         FDM has no static API keys). An FMC-managed box has no FDM API: it comes
+         in through the Management Center entry of the Manager group. #}
       <div id="ftd-fields" style="display:none;flex-direction:column;gap:12px;">
         <div class="field">
           <label>FDM User</label>
           <input type="text" name="ftd_username" class="inp" autocomplete="off">
+        </div>
+      </div>
+      {# Cisco Secure Firewall Management Center as a manager row (docs/FMC_SOURCE_PLAN.md,
+         D2): on premises the address below, a user and its password; cloud-delivered the
+         Security Cloud Control region and the tenant's API token. The import fans the
+         manager into domain, access-policy and device scopes. #}
+      <div id="fmc-fields" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field">
+          <label>Name <span class="dash">(optional)</span></label>
+          <input type="text" name="fmc_name" class="inp" autocomplete="off">
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:var(--fs-body);color:var(--tx);">
+          <input type="checkbox" name="fmc_cloud" id="fmc-cloud" value="1" onchange="fmcCloudToggle(this.checked)"> Cloud-delivered (Security Cloud Control)</label>
+        <div class="field" id="fmc-user-field">
+          <label>User</label>
+          <input type="text" name="fmc_username" class="inp" autocomplete="off">
+        </div>
+        <div class="field" id="fmc-region-field" style="display:none;">
+          <label>Security Cloud Control region</label>
+          <select name="fmc_region" class="inp">
+            <option value="us">United States (us)</option><option value="eu">Europe (eu)</option>
+            <option value="apj">Asia Pacific (apj)</option><option value="au">Australia (au)</option>
+            <option value="in">India (in)</option><option value="uae">United Arab Emirates (uae)</option>
+          </select>
         </div>
       </div>
 
@@ -112,7 +154,7 @@
       {# optional Gaia creds - CP only; used for cluster/gateway network collect #}
       <div id="cp-mds-gaia" style="display:none;flex-direction:column;gap:12px;">
         <div class="field">
-          <label>Gaia user <span class="dash">(optional, for network/interface collect)</span></label>
+          <label>Gaia user <span class="dash">(optional)</span></label>
           <input type="text" name="gaia_user" class="inp" autocomplete="off">
         </div>
         <div class="field">
@@ -125,15 +167,15 @@
         <div class="field">
           <label>Management IP / Hostname</label>
           <input id="add-device-mgmt" type="text" name="mgmt_ip" required
-                 class="inp" style="">
+                 class="inp" style="" autocomplete="off">
         </div>
         <div class="field">
-          <label id="add-device-apikey-label">API Key <span class="dash">(optional)</span></label>
-          <input type="password" name="api_key" class="inp" autocomplete="new-password">
+          <label id="add-device-apikey-label">API Key</label>
+          <input id="add-device-apikey" type="password" name="api_key" class="inp" autocomplete="new-password" required>
         </div>
         <div class="field">
           <label>Notes <span class="dash">(optional)</span></label>
-          <input type="text" name="notes" placeholder="E.g. datacenter edge FW" class="inp">
+          <input type="text" name="notes" class="inp" autocomplete="off">
         </div>
       </div>
 
@@ -141,13 +183,13 @@
       <div id="panw-panorama-block" style="display:none;flex-direction:column;gap:12px;">
         <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
           <input type="checkbox" name="panorama_enabled" id="pano-enabled" onchange="onPanoramaToggle(this.checked)">
-          Managed by Panorama <span class="dash">(push via device-group + template)</span>
+          Managed by Panorama
         </label>
         <div id="pano-fields" style="display:none;flex-direction:column;gap:12px;">
           <div class="field">
             <label>Panorama IP / Host</label>
             <input type="text" name="panorama_host" id="pano-host"
-                   class="inp" style="">
+                   class="inp" style="" autocomplete="off">
           </div>
           <div class="field">
             <label>Panorama API Key</label>
@@ -158,29 +200,25 @@
             <span id="pano-discover-status" class="dash" style="font-size:var(--fs-small);"></span>
           </div>
           <div class="field">
-            <label>Device-group <span class="dash">(policy target)</span></label>
+            <label>Device-group</label>
             <input type="text" name="panorama_device_group" id="pano-dg" list="pano-dg-list"
-                   placeholder="devicegroup1" class="inp">
+                   class="inp" autocomplete="off">
             <datalist id="pano-dg-list"></datalist>
           </div>
           <div class="field">
-            <label>Template <span class="dash">(network target)</span></label>
+            <label>Template</label>
             <input type="text" name="panorama_template" id="pano-tmpl" list="pano-tmpl-list"
-                   placeholder="template1" class="inp">
+                   class="inp" autocomplete="off">
             <datalist id="pano-tmpl-list"></datalist>
           </div>
         </div>
       </div>
 
-      {# Strata Cloud Manager tenant as a SOURCE (EE, docs/CLOUD_MANAGERS_PLAN.md C4):
-         no management address, the service account's secret is the row's
-         secret, TSG and client id go to config.scm, the row is named here. #}
+      {# Strata Cloud Manager tenant as a SOURCE (EE, docs/CLOUD_MANAGERS_PLAN.md C4), the
+         Manager entry panw_scm (D69): no management address, the service account's secret
+         is the row's secret, TSG and client id go to config.scm, the row is named here. #}
       <div id="panw-scm-block" style="display:none;flex-direction:column;gap:12px;">
-        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
-          <input type="checkbox" name="scm_enabled" id="scm-enabled" onchange="onScmToggle(this.checked)">
-          This is a Strata Cloud Manager tenant <span class="dash">(import its folders, snippets and devices)</span>
-        </label>
-        <div id="scm-fields" style="display:none;flex-direction:column;gap:12px;">
+        <div id="scm-fields" style="display:flex;flex-direction:column;gap:12px;">
           <div class="field"><label>Name</label>
             <input type="text" name="scm_name" id="scm-name" class="inp" autocomplete="off"></div>
           <div class="field"><label>Tenant service group (TSG) id</label>
@@ -203,7 +241,7 @@
       <div id="fgt-cloud-block" style="display:none;flex-direction:column;gap:12px;">
         <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
           <input type="checkbox" name="fgc_enabled" id="fgc-enabled" onchange="onFgcToggle(this.checked)">
-          Reached through FortiGate Cloud <span class="dash">(no direct management access needed)</span>
+          Reached through FortiGate Cloud
         </label>
         <div id="fgc-fields" style="display:none;flex-direction:column;gap:12px;">
           <div class="field"><label>Region</label>
@@ -214,13 +252,12 @@
           <div class="field"><label>IAM API user id</label>
             <input type="text" name="fgc_api_id" id="fgc-api-id" class="inp" autocomplete="off"></div>
           <div class="field"><label>IAM API user password</label>
-            <input type="password" name="fgc_password" id="fgc-password" class="inp" autocomplete="new-password">
-            <p class="dash" style="margin:0;font-size:var(--fs-small);">An IAM API user of the FortiCloud account with FortiGate Cloud set to Admin in its permission profile.</p></div>
+            <input type="password" name="fgc_password" id="fgc-password" class="inp" autocomplete="new-password"></div>
           <div style="display:flex;align-items:center;gap:8px;">
             <button type="button" onclick="fgcLoadDevices()" class="btn">Load devices</button>
             <span id="fgc-status" class="dash" style="font-size:var(--fs-small);"></span></div>
           <div class="field"><label>Serial number</label>
-            <input type="text" name="fgc_serial" id="fgc-serial" list="fgc-serial-list" placeholder="FGT..." class="inp" autocomplete="off"
+            <input type="text" name="fgc_serial" id="fgc-serial" list="fgc-serial-list" class="inp" autocomplete="off"
                    onchange="fgcSerialChanged()" oninput="fgcSerialChanged()">
             <datalist id="fgc-serial-list"></datalist>
             {# the address the cloud reports for the picked serial: becomes the row's mgmt_ip (display only, nothing connects to it) #}
@@ -228,48 +265,42 @@
         </div>
       </div>
 
-      {# A FortiManager Cloud INSTANCE as a source (EE): the management address
-         is the instance host, the API key the IAM API user's password, the
-         user id goes to config.fortimanager.cloud. The import route detects
-         the manager from that block (no probe). #}
+      {# A FortiManager Cloud INSTANCE as a source (EE), the Manager entry fortigate_fmgc
+         (D69): the management address is the instance host, the API key the IAM API
+         user's password, the user id goes to config.fortimanager.cloud. The import
+         route detects the manager from that block (no probe). #}
       <div id="fgt-fmgc-block" style="display:none;flex-direction:column;gap:12px;">
-        <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
-          <input type="checkbox" name="fmgc_enabled" id="fmgc-enabled" onchange="onFmgcToggle(this.checked)">
-          This is a FortiManager Cloud instance <span class="dash">(import its ADOMs and packages)</span>
-        </label>
-        <div id="fmgc-fields" style="display:none;flex-direction:column;gap:12px;">
+        <div id="fmgc-fields" style="display:flex;flex-direction:column;gap:12px;">
           <div class="field"><label>IAM API user id</label>
-            <input type="text" name="fmgc_api_id" id="fmgc-api-id" class="inp" autocomplete="off">
-            <p class="dash" style="margin:0;font-size:var(--fs-small);">Management address = the instance host (customer id.region.fortimanager.forticloud.com), API key = the IAM API user's password.</p></div>
+            <input type="text" name="fmgc_api_id" id="fmgc-api-id" class="inp" autocomplete="off"></div>
         </div>
       </div>
 
       <div id="fgt-fmg-block" style="display:none;flex-direction:column;gap:12px;">
         <label style="display:flex;align-items:center;gap:8px;font-size:var(--fs-body);color:var(--tx);cursor:pointer;">
           <input type="checkbox" name="fmg_enabled" id="fmg-enabled" onchange="onFmgToggle(this.checked)">
-          Managed by FortiManager <span class="dash">(push via ADOM package + device-DB)</span>
+          Managed by FortiManager
         </label>
         <div id="fmg-fields" style="display:none;flex-direction:column;gap:12px;">
           <div class="field"><label>FortiManager IP / Host</label>
             <input type="text" name="fmg_host" id="fmg-host"
-                   class="inp" style=""></div>
+                   class="inp" style="" autocomplete="off"></div>
           <div class="field"><label>FortiManager API Key</label>
             <input type="password" name="fmg_api_key" id="fmg-key" class="inp" autocomplete="new-password"></div>
           <div class="field"><label>FortiManager Cloud IAM API user id <span class="dash">(optional)</span></label>
-            <input type="text" name="fmg_cloud_api_id" id="fmg-cloud-id" class="inp" autocomplete="off">
-            <p class="dash" style="margin:0;font-size:var(--fs-small);">Only for a FortiManager Cloud instance: host = the instance host, API key = this IAM API user's password.</p></div>
+            <input type="text" name="fmg_cloud_api_id" id="fmg-cloud-id" class="inp" autocomplete="off"></div>
           <div style="display:flex;align-items:center;gap:8px;">
             <button type="button" onclick="fmgDiscover()" class="btn">Discover</button>
             <span id="fmg-discover-status" class="dash" style="font-size:var(--fs-small);"></span></div>
           <div class="field"><label>ADOM</label>
             <input type="text" name="fmg_adom" id="fmg-adom" list="fmg-adom-list"
-                   class="inp"><datalist id="fmg-adom-list"></datalist></div>
-          <div class="field"><label>Policy package <span class="dash">(policy target)</span></label>
+                   class="inp" autocomplete="off"><datalist id="fmg-adom-list"></datalist></div>
+          <div class="field"><label>Policy package</label>
             <input type="text" name="fmg_policy_package" id="fmg-pkg" list="fmg-pkg-list"
-                   placeholder="default" class="inp"><datalist id="fmg-pkg-list"></datalist></div>
-          <div class="field"><label>Managed device <span class="dash">(network target, optional)</span></label>
+                   class="inp" autocomplete="off"><datalist id="fmg-pkg-list"></datalist></div>
+          <div class="field"><label>Managed device <span class="dash">(optional)</span></label>
             <input type="text" name="fmg_device" id="fmg-dev" list="fmg-dev-list"
-                   placeholder="fortigate-name" class="inp"><datalist id="fmg-dev-list"></datalist></div>
+                   class="inp" autocomplete="off"><datalist id="fmg-dev-list"></datalist></div>
         </div>
       </div>
       {% endif %}
@@ -281,7 +312,7 @@
     </form>
 
     {# Inline CP GATEWAY wizard (CE) - a SIBLING of the form (its step fragments carry their own
-       <form>). #wizard-content is the HTMX swap target; shown for the 'Check Point Gateway' entry. #}
+       <form>). #wizard-content is the HTMX swap target; shown for the 'Check Point Security Gateway' entry. #}
     <div id="cp-wizard-inline" style="display:none;">
       <div id="wizard-content"></div>
     </div>
@@ -295,15 +326,8 @@
             onsubmit="return logstreamConfirm(this);">
         <input type="hidden" class="gs-add-next" name="next" value="">
         <input type="hidden" name="platform" id="logstream-platform" value="">
-        <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.55;">
-          The firewall sends its traffic logs to this host (UDP port 514). Pick the sender(s) that
-          are this firewall: the hostname in the syslog header, the address the packets came from
-          and, where the vendor sends one, the unit's serial. A FortiGate writes no header hostname
-          and shows its address there. Two senders on one Device are two members of one firewall
-          (an HA pair or a cluster).
-        </div>
         <div class="field">
-          <label>Name <span class="dash">(optional, the first sender's serial or hostname otherwise)</span></label>
+          <label>Name <span class="dash">(optional)</span></label>
           <input type="text" name="display_name" class="inp" autocomplete="off">
         </div>
         {% if log_senders %}
@@ -326,17 +350,14 @@
           </table>
         </div>
         {% else %}
-        <div class="mut" style="font-size:var(--fs-small);">No unattributed sender yet. Let the firewall send a few minutes of
-          logs and scan, or upload a capture below. The Device can also be created now, empty, and senders
-          attached later under Log senders.</div>
+        <div class="mut" style="font-size:var(--fs-small);">No unattributed sender yet: scan later, upload a capture below, or add the Device empty and attach senders later.</div>
         {% endif %}
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
           <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
           <button type="submit" class="btn">Add Device</button>
         </div>
       </form>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;">
-        <div class="mut" style="font-size:var(--fs-small);">Refresh the list from the receiver's spool. Registers nothing.</div>
+      <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;">
         <form method="post" action="/devices/senders/scan" style="display:contents;"
               onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
           <button type="submit" class="btn">Scan for senders</button>
@@ -350,8 +371,7 @@
       <form method="post" action="/devices/logs/upload" enctype="multipart/form-data"
             style="display:flex;flex-direction:column;gap:10px;margin-top:12px;border-top:1px solid var(--line);padding-top:12px;"
             onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Uploading…';">
-        <div class="mut" style="font-size:var(--fs-small);">…or upload a syslog capture file: it is placed next to the
-          live-received logs and its senders join the list.</div>
+        <div class="mut" style="font-size:var(--fs-small);">Or upload a syslog capture file.</div>
         <input type="file" name="log_file" required accept=".log,.txt,text/plain"
                class="inp" style="font-size:var(--fs-small);padding:6px;">
         <div style="display:flex;justify-content:flex-end;gap:8px;">
@@ -367,25 +387,17 @@
       <form method="post" action="/devices/add/opnsense" enctype="multipart/form-data"
             style="display:flex;flex-direction:column;gap:12px;">
         <input type="hidden" class="gs-add-next" name="next" value="">
-        <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
-          Export it on the firewall under <b>System &gt; Configuration &gt; Backups</b>.
-          Secrets are stripped before anything is stored - private keys, pre-shared
-          keys and password hashes never reach the database.
-          <div style="margin-top:7px;">To use this firewall as a migration
-            <b>target</b> as well, add an API key and secret on its device row
-            afterwards: pushing needs the box, reading it does not.</div>
-        </div>
         <div class="field">
           <label>Configuration file <span class="dash">(config.xml)</span></label>
           <input type="file" name="config_file" accept=".xml" required class="inp" style="padding:6px 10px;">
         </div>
         <div class="field">
           <label>Display name <span class="dash">(optional)</span></label>
-          <input type="text" name="display_name" placeholder="E.g. branch-opn-01" class="inp">
+          <input type="text" name="display_name" class="inp" autocomplete="off">
         </div>
         <div class="field">
           <label>Notes <span class="dash">(optional)</span></label>
-          <input type="text" name="notes" placeholder="E.g. site to be decommissioned" class="inp">
+          <input type="text" name="notes" class="inp" autocomplete="off">
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
           <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
@@ -403,20 +415,17 @@
       <form method="post" action="/devices/add/asa" enctype="multipart/form-data"
             style="display:flex;flex-direction:column;gap:12px;">
         <input type="hidden" class="gs-add-next" name="next" value="">
-        <div class="tag" style="display:block;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);font-size:var(--fs-small);line-height:1.5;">
-          Cisco ASA devices are added from a "show running-config" dump.
-        </div>
         <div class="field">
-          <label>Config file</label>
+          <label>Config file <span class="dash">(show running-config)</span></label>
           <input type="file" name="config_file" required class="inp" style="padding:6px 10px;">
         </div>
         <div class="field">
           <label>Display name <span class="dash">(optional)</span></label>
-          <input type="text" name="display_name" placeholder="E.g. branch-asa-01" class="inp">
+          <input type="text" name="display_name" class="inp" autocomplete="off">
         </div>
         <div class="field">
           <label>Notes <span class="dash">(optional)</span></label>
-          <input type="text" name="notes" placeholder="E.g. datacenter edge FW" class="inp">
+          <input type="text" name="notes" class="inp" autocomplete="off">
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
           <button type="button" onclick="closeAddModal()" class="btn">Cancel</button>
@@ -431,37 +440,58 @@
     <div id="discover-inline" style="display:none;flex-direction:column;gap:12px;">
       <div class="discover-kind" data-kind="panorama" style="display:none;flex-direction:column;gap:12px;">
         <div class="field"><label>Panorama address</label>
-          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="panorama.example.net"></div>
+          <input type="text" data-field="host" class="inp" autocomplete="off"></div>
         <div class="field"><label>API key</label>
           <input type="password" data-field="api_key" class="inp" autocomplete="new-password"></div>
       </div>
       <div class="discover-kind" data-kind="fortimanager" style="display:none;flex-direction:column;gap:12px;">
         <div class="field"><label>FortiManager address</label>
-          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="fortimanager.example.net"></div>
-        <div class="field"><label>API token <span class="dash">(an API user with rpc-permit read)</span></label>
+          <input type="text" data-field="host" class="inp" autocomplete="off"></div>
+        <div class="field"><label>API token</label>
           <input type="password" data-field="api_key" class="inp" autocomplete="new-password"></div>
       </div>
       <div class="discover-kind" data-kind="fmgcloud" style="display:none;flex-direction:column;gap:12px;">
-        <div class="field"><label>Instance <span class="dash">(customer id.region.fortimanager.forticloud.com)</span></label>
-          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="123456.eu.fortimanager.forticloud.com"></div>
+        <div class="field"><label>Instance</label>
+          <input type="text" data-field="host" class="inp" autocomplete="off"></div>
         <div class="field"><label>IAM API user id</label>
           <input type="text" data-field="api_id" class="inp" autocomplete="off"></div>
         <div class="field"><label>IAM API user password</label>
           <input type="password" data-field="password" class="inp" autocomplete="new-password"></div>
       </div>
       <div class="discover-kind" data-kind="checkpoint" style="display:none;flex-direction:column;gap:12px;">
-        <div class="field"><label>Management address <span class="dash">(host, or the Smart-1 Cloud tenant URL)</span></label>
-          <input type="text" data-field="host" class="inp" autocomplete="off" placeholder="mgmt.example.net"></div>
+        <div class="field"><label>Management address</label>
+          <input type="text" data-field="host" class="inp" autocomplete="off"></div>
         <div class="field"><label>API key</label>
           <input type="password" data-field="api_key" class="inp" autocomplete="new-password"></div>
       </div>
       <div class="discover-kind" data-kind="scm" style="display:none;flex-direction:column;gap:12px;">
         <div class="field"><label>TSG id</label>
           <input type="text" data-field="tsg_id" class="inp" autocomplete="off"></div>
-        <div class="field"><label>Client id <span class="dash">(a service account of the tenant)</span></label>
+        <div class="field"><label>Client id</label>
           <input type="text" data-field="client_id" class="inp" autocomplete="off"></div>
         <div class="field"><label>Client secret</label>
           <input type="password" data-field="client_secret" class="inp" autocomplete="new-password"></div>
+      </div>
+      {# Cisco Secure Firewall Management Center (docs/FMC_SOURCE_PLAN.md): the
+         on-premises one through a user with REST API access, the cloud-delivered
+         one through the Security Cloud Control tenant's API token. #}
+      <div class="discover-kind" data-kind="fmc" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>Management Center address</label>
+          <input type="text" data-field="host" class="inp" autocomplete="off"></div>
+        <div class="field"><label>User</label>
+          <input type="text" data-field="username" class="inp" autocomplete="off"></div>
+        <div class="field"><label>Password</label>
+          <input type="password" data-field="password" class="inp" autocomplete="new-password"></div>
+      </div>
+      <div class="discover-kind" data-kind="cdfmc" style="display:none;flex-direction:column;gap:12px;">
+        <div class="field"><label>Security Cloud Control region</label>
+          <select data-field="region" class="inp">
+            <option value="us">United States (us)</option><option value="eu">Europe (eu)</option>
+            <option value="apj">Asia Pacific (apj)</option><option value="au">Australia (au)</option>
+            <option value="in">India (in)</option><option value="uae">United Arab Emirates (uae)</option>
+          </select></div>
+        <div class="field"><label>API token</label>
+          <input type="password" data-field="token" class="inp" autocomplete="new-password"></div>
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:6px;">
         <span id="discover-status" class="dash" style="font-size:var(--fs-small);flex:1;"></span>
@@ -516,11 +546,52 @@ function cloudModeChange(mode) {
   onAddPlatformChange(mode === 'bundle' ? plat + '_upload' : plat);
 }
 
+// The Management Center entry's cloud switch: the regional gateway replaces the
+// address, the tenant's API token takes the password's field.
+function fmcCloudToggle(on) {
+  const mgmt = document.getElementById('add-device-mgmt');
+  const mgmtField = mgmt ? mgmt.closest('.field') : null;
+  const userField = document.getElementById('fmc-user-field');
+  const regionField = document.getElementById('fmc-region-field');
+  const apiLabel = document.getElementById('add-device-apikey-label');
+  if (mgmtField) mgmtField.style.display = on ? 'none' : '';
+  if (mgmt) mgmt.required = !on;
+  if (userField) userField.style.display = on ? 'none' : '';
+  if (regionField) regionField.style.display = on ? '' : 'none';
+  if (apiLabel) apiLabel.innerHTML = on ? 'API token' : 'Password';
+}
+
+// The platform's section of docs/vendor-prerequisites.md (D10).
+const _PREREQ_DOC = 'https://github.com/gateshift/gateshift/blob/main/docs/vendor-prerequisites.md';
+const _PREREQ_ANCHORS = {
+  panw: '#palo-alto-networks-pan-os', fortigate: '#fortigate-fortios',
+  checkpoint: '#check-point', checkpoint_gw: '#check-point', discover_checkpoint: '#check-point',
+  firepower: '#cisco-ftd-fdm-managed',
+  firepower_fmc: '#cisco-secure-firewall-management-center-fmc-cloud-delivered-fmc',
+  discover_fmc: '#cisco-secure-firewall-management-center-fmc-cloud-delivered-fmc',
+  discover_cdfmc: '#cisco-secure-firewall-management-center-fmc-cloud-delivered-fmc',
+  asa: '#cisco-asa', opnsense_upload: '#opnsense', opnsense_logs: '#opnsense',
+  azure: '#microsoft-azure-source-only', aws: '#amazon-web-services-source-only', gcp: '#google-cloud-source-only',
+  discover_panorama: '#managers-discovery', discover_fortimanager: '#managers-discovery',
+  discover_fmgcloud: '#managers-discovery', discover_scm: '#managers-discovery',
+  panw_panorama: '#palo-alto-networks-pan-os', fortigate_fmg: '#fortigate-fortios',
+  fortigate_fmgc: '#managers-discovery', panw_scm: '#managers-discovery',
+};
 function onAddPlatformChange(value) {
+  const prereq = document.getElementById('add-device-prereq');
+  if (prereq) {
+    const base = value.endsWith('_logs') ? value.slice(0, -5) : (value.endsWith('_upload') ? value.slice(0, -7) : value);
+    const anchor = _PREREQ_ANCHORS[value] || _PREREQ_ANCHORS[base] || '';
+    prereq.href = anchor ? _PREREQ_DOC + anchor : '#';
+    prereq.style.display = anchor ? 'inline-block' : 'none';
+  }
   const isCpMgmt = (value === 'checkpoint');       // Mgmt server / MDS (EE) - plain add; CE shows hint
+  const isScm    = (value === 'panw_scm');         // Strata Cloud Manager tenant: its own fields, no address (D69)
+  const isFmgc   = (value === 'fortigate_fmgc');   // FortiManager Cloud instance: address + IAM password (D69)
   const isCpGw   = (value === 'checkpoint_gw');    // single gateway (CE) - inline wizard
   const isAsa    = (value === 'asa');
   const isFtd    = (value === 'firepower');        // FDM user/password instead of API key
+  const isFmc    = (value === 'firepower_fmc');    // Management Center as a manager row (CE)
   const isLogSrc = value.endsWith('_logs');        // from the log stream: the candidate list, own form
   const isOpnUp  = (value === 'opnsense_upload');  // exported config.xml - the only OPNsense entry
   const isDiscover = value.startsWith('discover_');  // manager discovery: read-only, its own block
@@ -576,7 +647,6 @@ function onAddPlatformChange(value) {
   const mgmt   = document.getElementById('add-device-mgmt');
   const gaia   = document.getElementById('cp-mds-gaia');
   const cpInline = document.getElementById('cp-wizard-inline');
-  const ftdHint   = document.getElementById('ftd-hint');
   const ftdFields = document.getElementById('ftd-fields');
   const apiLabel  = document.getElementById('add-device-apikey-label');
   if (asaInline) asaInline.style.display = isAsa ? 'block' : 'none';
@@ -594,11 +664,16 @@ function onAddPlatformChange(value) {
     if (dst) dst.textContent = '';
   }
   if (gaia)   gaia.style.display   = (isCpMgmt && MANAGER_UI) ? 'flex' : 'none';
-  if (ftdHint)   ftdHint.style.display   = isFtd ? 'block' : 'none';
   if (ftdFields) ftdFields.style.display = isFtd ? 'flex'  : 'none';
+  const fmcFields = document.getElementById('fmc-fields');
+  if (fmcFields) fmcFields.style.display = isFmc ? 'flex'  : 'none';
+  if (isFmc) {
+    const cb = document.getElementById('fmc-cloud');
+    fmcCloudToggle(!!(cb && cb.checked));
+  }
   if (apiLabel)  apiLabel.innerHTML = isFtd
     ? 'FDM Password'
-    : 'API Key <span class="dash">(optional)</span>';
+    : (isFmc ? 'Password' : 'API Key');
   // CP GATEWAY (CE): the inline 3-step wizard carries its own form + actions. Everything else
   // (incl. CP Mgmt/MDS) uses the plain fields + Add. ASA shows its inline uploader form.
   if (cpInline) cpInline.style.display = isCpGw ? 'block' : 'none';
@@ -611,12 +686,19 @@ function onAddPlatformChange(value) {
   } else {
     _cpWizardReset();
   }
+  if (!isFmc) {
+    const mgmtEl = document.getElementById('add-device-mgmt');
+    const mgmtField = mgmtEl ? mgmtEl.closest('.field') : null;
+    if (mgmtField) mgmtField.style.display = '';
+  }
   const plainHidden = isAsa || isOpnUp || isCpGw || isLogSrc || isCloudUp || isDiscover;
   const none = !value;        // the placeholder: no fields, no Add until a platform is picked
-  if (fields) fields.style.display = (plainHidden || isCloud || none) ? 'none' : 'flex';
+  if (fields) fields.style.display = (plainHidden || isCloud || isScm || none) ? 'none' : 'flex';
   if (submit) submit.style.display = (plainHidden || none) ? 'none' : '';
   if (actions)actions.style.display= plainHidden ? 'none' : 'flex';
-  if (mgmt)   mgmt.required = !(plainHidden || isCloud || none);
+  if (mgmt)   mgmt.required = !(plainHidden || isCloud || isScm || none);
+  // the secret is the Device's only way in: required like the address (D68)
+  const keyEl = document.getElementById('add-device-apikey'); if (keyEl) keyEl.required = !(plainHidden || isCloud || isScm || none);
   // Panorama-managed option is panw-only. Reset it when switching away so a
   // hidden checkbox can't smuggle a config.panorama onto another platform.
   const isPanw = (value === 'panw');
@@ -626,12 +708,11 @@ function onAddPlatformChange(value) {
     const cb = document.getElementById('pano-enabled');
     if (cb && cb.checked) { cb.checked = false; onPanoramaToggle(false); }
   }
-  const scmBlock = document.getElementById('panw-scm-block');   // EE only
-  if (scmBlock) scmBlock.style.display = isPanw ? 'flex' : 'none';
-  if (!isPanw) {
-    const scb = document.getElementById('scm-enabled');
-    if (scb && scb.checked) { scb.checked = false; onScmToggle(false); }
-  }
+  const scmBlock = document.getElementById('panw-scm-block');   // EE only, the Manager entry (D69)
+  if (scmBlock) scmBlock.style.display = isScm ? 'flex' : 'none';
+  ['scm-tsg','scm-client-id','scm-client-secret'].forEach(function(id){
+    const el = document.getElementById(id); if (el) el.required = isScm;
+  });
   const isFgt = (value === 'fortigate');
   const fmgBlock = document.getElementById('fgt-fmg-block');
   if (fmgBlock) fmgBlock.style.display = isFgt ? 'flex' : 'none';
@@ -645,12 +726,9 @@ function onAddPlatformChange(value) {
     const ccb = document.getElementById('fgc-enabled');
     if (ccb && ccb.checked) { ccb.checked = false; onFgcToggle(false); }
   }
-  const fmgcBlock = document.getElementById('fgt-fmgc-block');   // EE only
-  if (fmgcBlock) fmgcBlock.style.display = isFgt ? 'flex' : 'none';
-  if (!isFgt) {
-    const mcb = document.getElementById('fmgc-enabled');
-    if (mcb && mcb.checked) { mcb.checked = false; onFmgcToggle(false); }
-  }
+  const fmgcBlock = document.getElementById('fgt-fmgc-block');   // EE only, the Manager entry (D69)
+  if (fmgcBlock) fmgcBlock.style.display = isFmgc ? 'flex' : 'none';
+  _fmgcMode(isFmgc);
 }
 
 // From the log stream: more than one sender on one Device, or a sender the
@@ -669,13 +747,21 @@ function logstreamConfirm(form) {
 
 // FortiGate reached through FortiGate Cloud: the IAM credential and the serial
 // replace the direct management address and API key (same swap as Panorama).
+// One way to reach a FortiGate: FortiGate Cloud or FortiManager, never both (the row
+// holds one address and one secret, D71). Checking one releases the other first.
+function _fgtOther(id, fn) {
+  const cb = document.getElementById(id);
+  if (cb && cb.checked) { cb.checked = false; fn(false); }
+}
 function onFgcToggle(checked) {
+  if (checked) _fgtOther('fmg-enabled', onFmgToggle);
   const f = document.getElementById('fgc-fields');
   if (f) f.style.display = checked ? 'flex' : 'none';
   const legacy = document.getElementById('add-device-legacy-fields');
   const mgmt = document.getElementById('add-device-mgmt');
   if (legacy) legacy.style.display = checked ? 'none' : 'flex';
   if (mgmt) mgmt.required = !checked;
+  const keyEl = document.getElementById('add-device-apikey'); if (keyEl) keyEl.required = !checked;
   ['fgc-api-id','fgc-password','fgc-serial'].forEach(function(id){
     const el = document.getElementById(id); if (el) el.required = checked;
   });
@@ -728,6 +814,7 @@ function onPanoramaToggle(checked) {
   const mgmt = document.getElementById('add-device-mgmt');
   if (legacy) legacy.style.display = checked ? 'none' : 'flex';
   if (mgmt) mgmt.required = !checked;
+  const keyEl = document.getElementById('add-device-apikey'); if (keyEl) keyEl.required = !checked;
   ['pano-host','pano-key','pano-dg','pano-tmpl'].forEach(function(id){
     const el = document.getElementById(id); if (el) el.required = checked;
   });
@@ -759,12 +846,14 @@ function panoramaDiscover() {
 }
 
 function onFmgToggle(checked) {
+  if (checked) _fgtOther('fgc-enabled', onFgcToggle);
   const f = document.getElementById('fmg-fields');
   if (f) f.style.display = checked ? 'flex' : 'none';
   const legacy = document.getElementById('add-device-legacy-fields');
   const mgmt = document.getElementById('add-device-mgmt');
   if (legacy) legacy.style.display = checked ? 'none' : 'flex';
   if (mgmt) mgmt.required = !checked;
+  const keyEl = document.getElementById('add-device-apikey'); if (keyEl) keyEl.required = !checked;
   ['fmg-host','fmg-key','fmg-pkg'].forEach(function(id){
     const el = document.getElementById(id); if (el) el.required = checked;
   });
@@ -772,21 +861,6 @@ function onFmgToggle(checked) {
 
 // Strata Cloud Manager tenant registered as a source (EE): the service
 // account replaces the address and key fields, like the Panorama toggle.
-function onScmToggle(checked) {
-  const f = document.getElementById('scm-fields');
-  if (f) f.style.display = checked ? 'flex' : 'none';
-  const legacy = document.getElementById('add-device-legacy-fields');
-  const mgmt = document.getElementById('add-device-mgmt');
-  if (legacy) legacy.style.display = checked ? 'none' : 'flex';
-  if (mgmt) mgmt.required = !checked;
-  ['scm-tsg','scm-client-id','scm-client-secret'].forEach(function(id){
-    const el = document.getElementById(id); if (el) el.required = checked;
-  });
-  if (checked) {
-    const pcb = document.getElementById('pano-enabled');
-    if (pcb && pcb.checked) { pcb.checked = false; onPanoramaToggle(false); }
-  }
-}
 
 function scmDiscover() {
   const status = document.getElementById('scm-discover-status');
@@ -807,12 +881,10 @@ function scmDiscover() {
 
 // FortiManager Cloud instance registered as a source: only the IAM user id is
 // extra, the address and key fields stay the normal ones.
-function onFmgcToggle(checked) {
-  const f = document.getElementById('fmgc-fields');
-  if (f) f.style.display = checked ? 'flex' : 'none';
+function _fmgcMode(checked) {
   const el = document.getElementById('fmgc-api-id'); if (el) el.required = checked;
   const lbl = document.getElementById('add-device-apikey-label');
-  if (lbl) lbl.innerHTML = checked ? 'IAM API user password' : 'API Key <span class="dash">(optional)</span>';
+  if (lbl) lbl.innerHTML = checked ? 'IAM API user password' : 'API Key';
 }
 
 function fmgDiscover() {
@@ -857,7 +929,7 @@ function managerDiscover() {
   if (!block) return;
   const body = new URLSearchParams();
   let missing = false;
-  block.querySelectorAll('input[data-field]').forEach(function (i) {
+  block.querySelectorAll('input[data-field],select[data-field]').forEach(function (i) {
     const v = (i.value || '').trim();
     if (!v) missing = true;
     body.set(i.dataset.field, v);
@@ -916,10 +988,16 @@ function renderDiscovery(d) {
   const fwHead = '<div style="margin-top:6px;"><b>Firewalls</b> <span class="dash">' + fws.length + '</span></div>';
   const notes = [].concat(d.skipped || [], d.truncated || []).map(function (t) {
     return '<div class="mut">' + esc(t) + '</div>'; }).join('');
-  const foot = d.enterprise ? '' :
+  // A Management Center is imported by the CE itself (docs/FMC_SOURCE_PLAN.md, D1):
+  // its footer points at the registration entry, not at the Enterprise Edition.
+  const isFmc = (m.kind === 'fmc' || m.kind === 'cdfmc');
+  const footText = isFmc
+    ? 'Register the Management Center as a Device (the Cisco Secure Firewall Management Center entry) to import these scopes.'
+    : 'Importing, curating and pushing these scopes is the Enterprise Edition. ' +
+      '<a href="https://gateshift.org" target="_blank" rel="noopener">gateshift.org</a>';
+  const foot = (d.enterprise && !isFmc) ? '' :
     '<div class="tag" style="margin-top:8px;width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);line-height:1.55;">' +
-    'Importing, curating and pushing these scopes is the Enterprise Edition. ' +
-    '<a href="https://gateshift.org" target="_blank" rel="noopener">gateshift.org</a></div>';
+    footText + '</div>';
   return head + rows + fwHead + fwRows + notes + foot;
 }
 </script>

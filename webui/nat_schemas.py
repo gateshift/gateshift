@@ -136,3 +136,33 @@ def coerce_value(field: dict, raw):
         return None
     s = str(raw).strip()
     return s or None
+
+
+def effective_props(base: dict | None, override: dict | None) -> dict:
+    """The properties a project shows for a NAT rule (2026-11-10, NAT edits are
+    project-own): the imported ones overlaid by the project's override row,
+    the negate flags aside (they are read as columns of their own)."""
+    out = dict(base or {})
+    for k, v in (override or {}).items():
+        if not str(k).startswith("negate_"):
+            out[k] = v
+    return out
+
+
+def override_props_merge(override: dict | None, patch: dict | None, platform: str | None) -> dict:
+    """The project's property override after a patch: the patch is validated
+    against the platform's vocabulary like the in-place merge, only the patched
+    keys land in the override, a key whose value coerces to None leaves it (the
+    imported value shows again), the negate flags in the same JSON stay as they are."""
+    allowed = field_keys(platform)
+    fields_map = {f["key"]: f for f in schema_for(platform).get("fields") or []}
+    out = dict(override or {})
+    for key, raw in (patch or {}).items():
+        if key not in allowed:
+            continue
+        coerced = coerce_value(fields_map[key], raw)
+        if coerced is None:
+            out.pop(key, None)
+        else:
+            out[key] = coerced
+    return out

@@ -1,0 +1,133 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# The path of the project (docs/UI_USABILITY_PLAN.md, D22): the step model's
+   evaluation in a dialog opened from the light bulb in the page head and from the
+   skipped count. One row per step with its evidence, the recommended next
+   step linked, Skip on the next row, Resume on a skipped one, the operator's
+   verification as the last step's button. Re-rendered by ovRenderSteps()
+   from the progress route after a build, a push, a review, a skip. The
+   workspace includes it (rules.html), the project list opens the project. #}
+<style>
+  #path-modal { position:fixed; inset:0; z-index:60; display:flex; align-items:flex-start; justify-content:center; padding-top:9vh; background:rgba(4,7,11,0.6); }
+  #path-modal.hidden { display:none; }
+  #path-modal .pbx { background:var(--bg1); border:1px solid var(--line2); padding:18px 20px 20px; width:100%; max-width:840px; margin:0 16px; box-shadow:var(--shadow-pop); max-height:82vh; overflow:auto; }
+  #path-modal .ph { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 12px; }
+  #path-modal .ph h3 { margin:0; font-size:var(--fs-title); font-weight:600; color:var(--tx); }
+  #path-modal .ph .pc { color:var(--tx3); font-size:var(--fs-small); margin-left:auto; }
+  #path-modal .ph .px { background:none; border:none; color:var(--tx3); font-size:18px; line-height:1; cursor:pointer; padding:0 4px; }
+  #path-modal .ph .px:hover { color:var(--tx); }
+  /* one row per step, the first open one linked (the strip of D7, in the dialog since D22) */
+  .ov-steps { display:grid; grid-template-columns:18px minmax(150px, max-content) minmax(0,1fr) auto; gap:7px 12px; align-items:center; border:1px solid var(--line); background:var(--bg2); padding:12px 14px; font-size:var(--fs-body); }
+  .ov-step { display:contents; }
+  .ov-step .g { color:var(--tx3); text-align:center; line-height:1; }
+  .ov-step .g .ic { width:14px; height:14px; display:block; margin:0 auto; }
+  .ov-step.done .g, .ov-step.next .g { color:var(--accent); }
+  .ov-step.next .l { color:var(--accent); }
+  .ov-step.fix .l { color:var(--amber); }
+  .ov-step.skipped .l { color:var(--tx3); text-decoration:line-through; }
+  .ov-step.skipped .d { color:var(--tx3); }
+  .ov-step .l { color:var(--tx); }
+  /* the steps the operator may skip read as recommended while open (D62), the three the path
+     needs (import, review, push) stand out by having no tag */
+  .ov-step .l .rec { color:var(--tx3); font-size:var(--fs-caption); margin-left:6px; font-weight:400; }
+  .ov-step.na .l, .ov-step.optional .l, .ov-step.locked .l { color:var(--tx3); }
+  .ov-step .d { color:var(--tx2); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ov-step .d a { color:var(--tx); text-decoration:none; border-bottom:1px dotted var(--line2); }
+  .ov-step .d a:hover { color:var(--accent); border-bottom-color:var(--accent); }
+</style>
+<div id="path-modal" class="hidden" onclick="if (event.target === this) gsPathClose()">
+  <div class="pbx" role="dialog" aria-modal="true" aria-labelledby="path-modal-title">
+    <div class="ph">
+      <h3 id="path-modal-title">The path of this project</h3>
+      <span class="pc" id="path-modal-count">{% if ov_progress %}{{ ov_progress.done }} of {{ ov_progress.total }} done{% if ov_progress.skipped %}, {{ ov_progress.skipped }} skipped{% endif %}{% endif %}</span>
+      <button type="button" class="px" onclick="gsPathClose()" aria-label="Close" title="Close">&times;</button>
+    </div>
+    {% if ov_progress %}
+    {% set _push = (ov_progress.steps | selectattr('key', 'equalto', 'push') | list | first) %}
+    <div id="ov-steps" class="ov-steps">
+      {% for st in ov_progress.steps %}
+      <div class="ov-step {{ st.state }}{% if st.key == ov_progress.next %} next{% endif %}{% if st.fix %} fix{% endif %}" title="{{ st.detail }}">
+        <span class="g">{% if st.state == 'done' %}<svg class="ic"><use href="#gs-ic-check"/></svg>{% elif st.key == ov_progress.next %}<svg class="ic"><use href="#gs-ic-arrow"/></svg>{% elif st.state in ('na', 'optional', 'skipped') %}&middot;{% else %}&#9675;{% endif %}</span>
+        <span class="l">{{ st.label }}{% if st.skippable and not st.fix and st.state == 'open' %}<span class="rec">recommended</span>{% endif %}</span>
+        <span class="d">{% if st.key == ov_progress.next and st.hint and st.key != 'verify' %}<a href="#" data-tab="{{ st.tab }}" data-sub="{{ st.sub or '' }}" data-main="{{ st.main or '' }}" onclick="gsPathClose(); gsGoTo(this.dataset.tab, this.dataset.sub, this.dataset.main ? {main: this.dataset.main} : {}); return false;">{{ st.hint }}</a>{% elif st.key == ov_progress.next and st.hint %}{{ st.hint }}{% else %}{{ st.detail }}{% endif %}</span>
+        <span>{% if st.key == 'verify' and st.state == 'open' and _push and _push.state == 'done' %}<button type="button" class="btn" onclick="ovMarkVerified()" title="The pushed configuration was checked and activated on the target">Mark Verified</button>{% endif %}{% if st.state == 'skipped' %}<button type="button" class="btn" data-step="{{ st.key }}" onclick="gsSkip(this.dataset.step, true)" title="Take this step up again">Resume</button>{% elif st.key == ov_progress.next and st.skippable %}<button type="button" class="btn" data-step="{{ st.key }}" onclick="gsSkip(this.dataset.step)" title="Skip this step: the path moves on, resume it here">Skip</button>{% endif %}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p style="margin:0;color:var(--tx2);font-size:var(--fs-body);">No evaluation for this project.</p>
+    {% endif %}
+  </div>
+</div>
+<script>
+  (function () {
+    var pid = {{ (selected_project.id if selected_project else none) | tojson }};
+    function post(url, body) {
+      var init = (body === undefined) ? {method: 'POST'}
+        : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)};
+      return fetch(url, init).then(function (r) { return r.json(); });
+    }
+    window.gsPathOpen = function () {
+      var m = document.getElementById('path-modal'); if (!m) return;
+      m.classList.remove('hidden');
+      var x = m.querySelector('.px'); if (x) x.focus();
+    };
+    window.gsPathClose = function () { var m = document.getElementById('path-modal'); if (m) m.classList.add('hidden'); };
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') window.gsPathClose(); });
+    // The last step: the operator's word, tied to the pushed build.
+    window.ovMarkVerified = function () {
+      if (!pid) return;
+      post('/projects/' + pid + '/status', {status: 'verified'}).then(function (j) {
+        if (j && j.ok) { showToast('Project marked verified', 'success'); if (typeof gsProgressRefresh === 'function') gsProgressRefresh(); return; }
+        showToast((j && j.error) || 'Not saved', 'error');
+      });
+    };
+    // The rows from the progress route (the server renders the same rows on load).
+    window.ovRenderSteps = function (j) {
+      var box = document.getElementById('ov-steps'); if (!box || !j || !j.steps) return;
+      var cnt = document.getElementById('path-modal-count');
+      if (cnt) cnt.textContent = (j.done || 0) + ' of ' + (j.total || 0) + ' done' + (j.skipped ? ', ' + j.skipped + ' skipped' : '');
+      box.textContent = '';
+      var pushStep = j.steps.filter(function (s) { return s.key === 'push'; })[0];
+      var pushDone = !!(pushStep && pushStep.state === 'done');
+      j.steps.forEach(function (st) {
+        var isNext = (st.key === j.next);
+        var row = document.createElement('div');
+        row.className = 'ov-step ' + st.state + (isNext ? ' next' : '') + (st.fix ? ' fix' : ''); row.title = st.detail || '';
+        var g = document.createElement('span'); g.className = 'g';
+        // the same symbols as the navigation's gutter column (D13), from the sprite in the navigation
+        if (st.state === 'done' || isNext) g.innerHTML = '<svg class="ic"><use href="#gs-ic-' + (st.state === 'done' ? 'check' : 'arrow') + '"/></svg>';
+        else g.textContent = (st.state === 'na' || st.state === 'optional' || st.state === 'skipped') ? '·' : '○';
+        var l = document.createElement('span'); l.className = 'l'; l.textContent = st.label;
+        if (st.skippable && !st.fix && st.state === 'open') {   // recommended, not required (D62)
+          var rc = document.createElement('span'); rc.className = 'rec'; rc.textContent = 'recommended'; l.appendChild(rc);
+        }
+        var d = document.createElement('span'); d.className = 'd';
+        if (isNext && st.hint && st.key !== 'verify') {
+          var a = document.createElement('a'); a.href = '#'; a.textContent = st.hint;
+          a.onclick = function () { window.gsPathClose(); gsGoTo(st.tab, st.sub || '', st.main ? {main: st.main} : {}); return false; };
+          d.appendChild(a);
+        } else {
+          d.textContent = (isNext && st.hint) ? st.hint : (st.detail || '');
+        }
+        var act = document.createElement('span');
+        if (st.key === 'verify' && st.state === 'open' && pushDone) {
+          var b = document.createElement('button'); b.type = 'button'; b.className = 'btn'; b.textContent = 'Mark Verified';
+          b.title = 'The pushed configuration was checked and activated on the target';
+          b.onclick = function () { window.ovMarkVerified(); };
+          act.appendChild(b);
+        }
+        if (st.state === 'skipped') {   // the skip and its undo (D20)
+          var rb = document.createElement('button'); rb.type = 'button'; rb.className = 'btn'; rb.textContent = 'Resume';
+          rb.title = 'Take this step up again'; rb.onclick = function () { gsSkip(st.key, true); };
+          act.appendChild(rb);
+        } else if (isNext && st.skippable) {
+          var sb = document.createElement('button'); sb.type = 'button'; sb.className = 'btn'; sb.textContent = 'Skip';
+          sb.title = 'Skip this step: the path moves on, resume it here'; sb.onclick = function () { gsSkip(st.key); };
+          act.appendChild(sb);
+        }
+        row.appendChild(g); row.appendChild(l); row.appendChild(d); row.appendChild(act);
+        box.appendChild(row);
+      });
+    };
+  })();
+</script>

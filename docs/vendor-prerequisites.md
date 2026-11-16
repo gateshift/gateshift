@@ -22,8 +22,10 @@ curl -k "https://<fw>/api/?type=keygen&user=<admin>&password=<pw>"
 Paste the `<key>` value. A common mistake is pasting the admin *password*
 into the API-key field. You get HTTP 403 on every call.
 
-**Permissions:** an admin role with XML-API access for config read/write and
-operational commands.
+**Permissions** (on a multi-vsys firewall the role must see every vsys the
+migration touches, the shared objects included): an admin role with XML-API access for config read/write and
+operational commands. The rule hit counters are read with an operational
+command (`show rule-hit-count`) through the same role.
 
 **Notes**
 
@@ -62,7 +64,13 @@ operational commands.
 **Credential:** REST API token of a dedicated REST API administrator
 (see Fortinet's documentation on REST API administrators).
 
-**Permissions:** a profile with read-write on the objects you migrate.
+**Permissions:** a profile with read-write on the objects you migrate,
+and read on the firewall monitor for the policy hit counters.
+On a multi-VDOM unit the API user must be assigned every VDOM Gateshift is
+to read or write (`config system api-user`, `set vdom`), or carry the
+super_admin profile: a VDOM outside the user's list is invisible to the API
+and is listed as skipped. The management VDOM is read like any other, its
+management port stays protected.
 
 **Notes**
 
@@ -99,8 +107,8 @@ operational commands.
   switches it (the switch needs an empty policy set and central NAT, which
   is the operator's step). A push built for the other mode is refused up
   front. Source applications are taken over only where the FortiGuard
-  catalog carries an application of the same name (auto-assign in Target
-  Settings, Firewall, Applications), the rest stays for you to pick from
+  catalog carries an application of the same name (auto-assign under Profiles &
+  Settings > Applications), the rest stays for you to pick from
   the catalog there, and the push report names what found no match. A
   rule with `application-default` renders service ALL with the
   applications' default ports enforced. As a source, the security
@@ -159,7 +167,9 @@ address is never contacted.
 **Credential:** Management API key for a **dedicated** API user on the
 management server (SmartCenter or MDS), not on the gateway.
 
-**Permissions:** read-write on the relevant policy packages.
+**Permissions:** read-write on the relevant policy packages. The rule hit
+counters come with the rulebase read (`show-hits` for the pinned gateway,
+cluster or virtual system) and need nothing further.
 
 **Notes**
 
@@ -180,6 +190,22 @@ management server (SmartCenter or MDS), not on the gateway.
   required for the network strand: interfaces and routes live in Gaia, not
   in the management API. In a cluster each member is configured through its
   own Gaia session.
+- **Multi-Domain management**: the wizard takes the domain the gateway
+  object lives in. Leave it empty for a SmartCenter.
+- **VSX**: register the VSX gateway or cluster object as the device, with
+  the package the wizard lists for it (its own VSX package). Its virtual
+  systems, in whichever domains they live, are imported as source scopes,
+  each through the policy installed on it. The network of a virtual system
+  is read from its object on the management: interfaces, topology and the
+  connected networks. Its static routes are not read (the Gaia API carries
+  no virtual system context). A push into a virtual system carries the
+  policy strand: objects, access rules, NAT, Threat Prevention and
+  decryption rules into the package installed on it, in its domain, staged
+  in a session, published from the page and installed by the operator like
+  on every Check Point target. Its network strand (interfaces, VLANs,
+  routes) is provisioned on the VSX and never pushed: the deploy page
+  declares it instead of offering it. The package semantics are unchanged:
+  a package installed on every gateway of the domain serves them all.
 - The gateway wizard **pins a policy package** to the device. Import and
   push both use exactly that package. The Review & Deploy tab shows the pin and can
   re-check it against the management server (it updates when the gateway
@@ -200,7 +226,8 @@ management server (SmartCenter or MDS), not on the gateway.
 ## Cisco FTD (FDM-managed)
 
 **Credential:** FDM admin username and password. FDM has no static API
-keys: Gateshift obtains a short-lived token per run.
+keys: Gateshift obtains a short-lived token per run. The hit counts of
+the access policy are read through the same session, and never reset.
 
 **Notes**
 
@@ -210,6 +237,33 @@ keys: Gateshift obtains a short-lived token per run.
   disables its local API.
 - A factory-fresh device rejects every API call until initial provisioning
   (EULA acceptance) is completed.
+
+---
+
+## Cisco Secure Firewall Management Center (FMC, cloud-delivered FMC)
+
+**Credential, on-premises:** a Management Center user whose role allows the
+REST API (Administrator, or a custom role with API access) and its
+password. Gateshift logs in per run (the API's token, refreshed within its
+30-minute lifetime) and reads only. The hit counts of an access policy
+are read per device through the same role. The Center fetches them from
+the device on the first read of a device (its own rule), Gateshift never
+orders a fetch and never resets them.
+
+**Credential, cloud-delivered:** the Security Cloud Control tenant's API
+token (Administration, API user management) and the tenant's region.
+
+**Notes**
+
+- **Source only.** The Management Center registers through the add
+  dialog's Manager group and is imported as a whole: its domains, access
+  policies and devices become scopes a project picks as its source. The
+  discovery entries read the same manager without storing anything.
+- The API's rate limit (120 requests per minute, 300 from version 7.6)
+  bounds the import: a Management Center with many policies and devices
+  takes a few minutes.
+- An FTD registered to a Management Center has no FDM API. It is imported
+  through the Management Center.
 
 ---
 
@@ -228,9 +282,12 @@ source, and one firewall may hold both at once on a single device row.
 ### As a configuration source
 
 **No credential.** Export the configuration under *System >
-Configuration > Backups*, then add the firewall with *Devices > Add
-device > Firewalls and Clusters > OPNsense*. The hostname comes from the
-file, so nothing has to be typed.
+Configuration > Backups*, then add the firewall with *Devices > +Add Device >
+Firewalls and Clusters > OPNsense*. The hostname comes from the
+file, so nothing has to be typed. The pf counters per rule are read
+through the firewall API when the device also has an API key and secret,
+an upload alone carries none. A device registered with the key pair alone
+reads its configuration and its counters through the API.
 
 **Notes**
 
@@ -278,8 +335,8 @@ copy it into the receiver's log directory (`syslog-ng/logs/`).
   (the hostname in the syslog header, the address the packets came from,
   a serial where the vendor sends one) and the device is created from the
   sender or senders that are this firewall. Nothing is registered from the
-  stream by itself. Devices > Log senders shows what was heard and lets a
-  sender be attached to a device later.
+  stream by itself. The Log Senders page at /devices/senders shows what was
+  heard and lets a sender be attached to a device later.
 - A firewall created this way becomes a configuration source simply by
   being given credentials. It stays one device either way.
 
@@ -328,9 +385,10 @@ in.
 - **Credentials.** An IAM access key (key ID and secret) of a user or role
   that may read EC2 (the Describe calls for VPCs, subnets, route tables,
   security groups, network ACLs, network interfaces and managed prefix
-  lists), the caller identity, and, where Network Firewall is in use, its
-  List and Describe calls for firewalls, firewall policies and rule
-  groups. Gateshift needs the key ID, the regions to read
+  lists, plus `ec2:GetManagedPrefixListEntries` for the members of the
+  prefix lists, which `ec2:Describe*` alone does not grant), the caller
+  identity, and, where Network Firewall is in use, its List and Describe
+  calls for firewalls, firewall policies and rule groups. Gateshift needs the key ID, the regions to read
   (comma-separated) and the secret. Optionally a list of VPC IDs narrows
   the read. Temporary credentials (session tokens) are not stored, use
   the bundle upload for those. Reading happens over the EC2, STS and
@@ -398,7 +456,7 @@ translation leaves out.
 The Community Edition reads a central manager and shows its scopes with
 their counts (device groups, templates, ADOMs, policy packages, domains,
 folders, and the managed firewalls) through the add dialog's "Manager
-(discovery)" entries. Nothing is stored: the credentials travel in that
+(Discovery)" entries. Nothing is stored: the credentials travel in that
 one request. Importing, curating and pushing a manager's scopes is the
 Enterprise Edition.
 

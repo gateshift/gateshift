@@ -32,6 +32,7 @@ from .base import (
     DropTagger,
     DeployDriver,
     DroppedField,
+    appdef_result,
     StepResult,
     transport_fail_fast,
     default_rule_disposition,
@@ -320,6 +321,13 @@ def _login(device: dict, *, fresh: bool = False) -> tuple[str, str]:
     raise RuntimeError(last_msg or "login failed")
 
 
+def _forget_sid(sid: str) -> None:
+    """Drop a session the management rejected from the shared cache."""
+    for key, (cached_sid, _exp) in list(_SID_CACHE.items()):
+        if cached_sid == sid:
+            _SID_CACHE.pop(key, None)
+
+
 def _logout(base_url: str, sid: str) -> None:
     """Best-effort logout. With SID caching, callers of `_login()` don't
     actually want to invalidate a still-cached session - so only POST
@@ -580,6 +588,13 @@ def _call(base_url: str, sid: str, command: str, payload: dict) -> dict:
                     details.append(entry["message"])
         if details:
             msg = f"{msg} [{'; '.join(details)}]"
+        if resp.status_code == 401:
+            # The management no longer knows this session (expired, logged
+            # out elsewhere, disconnected by a take-over): a cached copy
+            # would fail every caller until its TTL ran out, so drop it and
+            # let the next _login open a fresh one (QA finding, CP collect
+            # 2026-11-03).
+            _forget_sid(sid)
         raise RuntimeError(f"{command} → HTTP {resp.status_code}: {msg}")
     try:
         return resp.json()
@@ -1642,7 +1657,7 @@ def _fetch_cp_reserved_names(base_url: str, sid: str) -> set[str]:
     return reserved
 
 
-def _fetch_cp_access_roles(base_url: str, sid: str) -> set[str]:
+def _fetch_cp_access_roles(base_url: str, sid: str) -> set[str] | None:
     """Names of Access-Roles that EXIST at the target (Phase 2.5).
 
     Identity refs on rules are pushed by reference only - the role's
@@ -1650,7 +1665,10 @@ def _fetch_cp_access_roles(base_url: str, sid: str) -> set[str]:
     target or add-access-rule 404s. We fetch the live set here and gate
     the refs in push(). Returns the exact (case-preserved) role names.
     `show-access-roles` verified live: plural, hyphen, returns 0 cleanly
-    when none exist. Pagination mirrors _fetch_cp_reserved_names."""
+    when none exist. Pagination mirrors _fetch_cp_reserved_names. Returns
+    None when the call fails: the caller then pushes the identities as
+    imported and says so (fail open, 2026-11-10; until then an empty set
+    stripped every identity, docs/UI_USABILITY_PLAN.md 14.4 item 5)."""
     roles: set[str] = set()
     offset = 0
     for _ in range(60):
@@ -1658,7 +1676,7 @@ def _fetch_cp_access_roles(base_url: str, sid: str) -> set[str]:
             resp = _call(base_url, sid, "show-access-roles",
                          {"limit": 500, "offset": offset, "details-level": "standard"})
         except Exception:
-            break  # unsupported / transient - fail open (no gating)
+            return None  # unsupported / transient: unknown, the gate stays open
         objs = resp.get("objects") or []
         for o in objs:
             nm = o.get("name")
@@ -2899,6 +2917,8 @@ def _render_security_rules(
     any_svc_names: set[str] | None = None,
     pushable_addrs: set[str] | None = None,
     known_addrs: set[str] | None = None,
+    pushable_svcs: set[str] | None = None,
+    known_svcs: set[str] | None = None,
     ipv6_names: set[str] | None = None,
     group_ipv6: dict[str, list[str]] | None = None,
 ) -> list[dict]:
@@ -3029,7 +3049,13 @@ def _render_security_rules(
         port_from = rule.get("port_from")
         port_to = rule.get("port_to")
         _any_svc = any_svc_names or set()
-        if named_svcs:
+        # The rule's service mode (the PA switch, honoured on every target since
+        # docs/APPDEF_WIDENING_PLAN.md D5): 'any' is the operator accepting every
+        # service, so CP's builtin Any, declared by nothing.
+        _svc_mode = str(rule.get("service_override") or "").strip().lower()
+        if _svc_mode == "any":
+            services = ["Any"]
+        elif named_svcs:
             # An all-traffic service (Forti 'ALL') → CP builtin 'Any'; it
             # subsumes any concrete members and isn't a pushable object, so the
             # whole rule's service becomes 'Any' (else add-access-rule 404s on
@@ -3037,7 +3063,21 @@ def _render_security_rules(
             if any((s or "").strip().lower() in _any_svc for s in named_svcs):
                 services = ["Any"]
             else:
-                services = [_safe_name(s) for s in named_svcs]
+                # Invariant I1, the service side of _prune_unpushable: a
+                # reference this push neither creates nor the management
+                # ships (predefined services stay reference-only) fails
+                # add-access-rule mid-push ("object not found"), so it is
+                # pruned and declared here like on PA and FortiGate; a side
+                # that empties is the unresolved_reference blocker.
+                services, _lost_svcs = _integ.prune_refs(
+                    [_safe_name(s) for s in named_svcs], pushable_svcs,
+                    keep=("any", "Any"))
+                if _lost_svcs:
+                    dropped.append(unresolved_reference(
+                        rule_id, "service", _lost_svcs, services,
+                        what="service", any_word="Any", known=known_svcs))
+                if not services:
+                    services = ["Any"]
         elif proto and port_from is not None:
             port_str = (f"{port_from}-{port_to}"
                         if port_to and port_to != port_from else str(port_from))
@@ -3054,16 +3094,17 @@ def _render_security_rules(
         else:
             services = ["Any"]
 
-        # application-default App-IDs the resolver couldn't map to ports
-        # (icmp-only / unmapped) - surfaced so the Any fallback is visible.
-        unresolved_app = rule.get("_appdef_unresolved")
-        if unresolved_app:
-            dropped.append(DroppedField(
-                rule_id=rule_id, field="service",
-                reason="application-default not resolvable for: "
-                       + ", ".join(unresolved_app),
-                fallback="replaced by Any: set the service on the target",
-            ))
+        # application-default on a target without App-ID (deploy.base.appdef_result,
+        # docs/APPDEF_WIDENING_PLAN.md): App-IDs the table does not know narrow
+        # the rule when others resolved, widen it to Any when none did.
+        if rule.get("_appdef_unresolved"):
+            dropped.append(appdef_result(rule_id, rule.get("action"),
+                                         unresolved=rule["_appdef_unresolved"],
+                                         kept=services, any_word="Any"))
+        if "_appdef_widened" in rule:
+            dropped.append(appdef_result(rule_id, rule.get("action"),
+                                         unresolved=rule["_appdef_widened"],
+                                         kept=[], any_word="Any"))
 
         # ── L7 Applications (App-Sites) ─────────────────────────
         # CP's `service` field accepts a mixed list of Service-Objects AND
@@ -4583,6 +4624,149 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
 #  needing a Gaia round-trip. Defined-by-routing interfaces still need
 #  Gaia for static routes - the caller decides whether to fall back.
 
+# The management object classes of a VSX gateway or cluster (the container of
+# virtual systems) and of the virtual systems themselves
+# (docs/VIRTUAL_INSTANCES_PLAN.md, F-4). None of them answers
+# show-simple-gateway or show-simple-cluster: the wizard pins them from the
+# gateways-and-servers listing, the network read takes the generic object.
+_VSX_GATEWAY_TYPES = ("CpmiVsxNetobj", "CpmiVsxClusterNetobj")
+_VS_TYPES = ("CpmiVsNetobj", "CpmiVsClusterNetobj")
+
+
+def _is_vsx_type(gateway_type: str | None) -> bool:
+    """A VSX gateway, a VSX cluster or a virtual system."""
+    return (gateway_type or "") in _VSX_GATEWAY_TYPES + _VS_TYPES
+
+
+def _is_vs_type(gateway_type: str | None) -> bool:
+    """A virtual system (an instance scope of its VSX gateway)."""
+    return (gateway_type or "") in _VS_TYPES
+
+
+def _is_cluster_target(gateway_type: str | None) -> bool:
+    """A cluster whose network strand goes to its members' Gaia: a simple
+    cluster, never a VSX class (``CpmiVsClusterNetobj`` and
+    ``CpmiVsxClusterNetobj`` carry the word, their members' Gaia is VS0 of
+    the VSX, not the virtual system)."""
+    gt = (gateway_type or "").lower()
+    return "cluster" in gt and not _is_vsx_type(gateway_type)
+
+
+# The one sentence every reader of a virtual system's declared network strand
+# shows (docs/VSX_TARGET_PLAN.md, section 5): the build, the deploy tab, the
+# push route and push() itself.
+VS_NETWORK_DECLARED = (
+    "the network of a virtual system (interfaces, VLANs, routes) is provisioned "
+    "on the VSX, the management API of R81.20 carries no provisioning command: "
+    "only the policy is pushed"
+)
+
+
+def _cp_slot(device: dict) -> dict:
+    """The device's ``config.cp`` slot ({} when absent or unreadable)."""
+    cfg = device.get("config") or {}
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg or "{}")
+        except ValueError:
+            cfg = {}
+    return (cfg.get("cp") or {}) if isinstance(cfg, dict) else {}
+
+
+def _find_gateway_object(base_url: str, sid: str, gateway_uid: str) -> dict | None:
+    """The record of a gateway object in the paged gateways-and-servers
+    listing (full details: name, type, ipv4-address, installed policy),
+    None when no object carries the uid."""
+    offset = 0
+    for _ in range(50):
+        resp = _call(base_url, sid, "show-gateways-and-servers",
+                     {"limit": 200, "offset": offset, "details-level": "full"})
+        items = resp.get("objects") or []
+        if not isinstance(items, list) or not items:
+            return None
+        for o in items:
+            if isinstance(o, dict) and str(o.get("uid") or "") == gateway_uid:
+                return o
+        offset += len(items)
+        total = resp.get("total")
+        if isinstance(total, int) and offset >= total:
+            return None
+    return None
+
+
+def _mask_length(value) -> int | None:
+    """A mask length from a length or a dotted mask, None when neither."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return ipaddress.IPv4Network(f"0.0.0.0/{value}", strict=False).prefixlen
+    except ValueError:
+        return None
+
+
+def _vs_interface(iface: dict) -> dict:
+    """One interface of a virtual system object in the shape of a simple
+    gateway's ``interfaces[]`` entry (name, ipv4-address, ipv4-mask-length,
+    ipv6-address, ipv6-mask-length, topology, topology-settings), so the
+    collect's parse loop reads it unchanged. The gateways-and-servers listing
+    names the interface ``interface-name`` with ``topology`` as a dict, the
+    stored object (show-generic-object) uses the schema's names (officialname,
+    ipaddr, netmask, memberNetwork), a record in the simple-gateway shape
+    passes through."""
+    out = dict(iface)
+    out["name"] = iface.get("name") or iface.get("interface-name") or iface.get("officialname") or ""
+    topo = iface.get("topology")
+    if isinstance(topo, dict):
+        # the gateways-and-servers listing: topology as a dict (leads-to-internet,
+        # ip-address-behind-this-interface, leads-to-dmz), measured on the MDS lab
+        behind = str(topo.get("ip-address-behind-this-interface") or "")
+        if topo.get("leads-to-internet"):
+            out["topology"] = "external"
+        elif behind and behind != "not defined":
+            out["topology"] = "internal"
+        else:
+            out["topology"] = ""
+        settings = {}
+        if behind:
+            settings["ip-address-behind-this-interface"] = behind
+        if topo.get("leads-to-dmz") is not None:
+            settings["interface-leads-to-dmz"] = bool(topo.get("leads-to-dmz"))
+        if settings and not isinstance(out.get("topology-settings"), dict):
+            out["topology-settings"] = settings
+    v4 = iface.get("ipv4-address") or iface.get("ipaddr") or None
+    if iface.get("ipv4-mask-length") is not None:
+        m4 = _mask_length(iface.get("ipv4-mask-length"))
+    elif iface.get("netmask") not in (None, ""):
+        m4 = _mask_length(iface.get("netmask"))
+    else:
+        m4 = _mask_length(iface.get("ipv4-network-mask"))
+    v6 = iface.get("ipv6-address") or iface.get("ipaddr6") or None
+    m6 = _mask_length(iface.get("ipv6-mask-length") if iface.get("ipv6-mask-length") is not None
+                      else iface.get("netmask6"))
+    out["ipv4-address"] = v4
+    out["ipv4-mask-length"] = m4 if v4 else None
+    out["ipv6-address"] = v6
+    out["ipv6-mask-length"] = m6 if v6 else None
+    if "comments" not in out and iface.get("comment"):
+        out["comments"] = iface.get("comment")
+    member = iface.get("memberNetwork")
+    if (v4 and m4 is not None and isinstance(member, dict) and member.get("ipaddr")
+            and not isinstance(out.get("topology-settings"), dict)):
+        # the stored object: the network behind the interface is its own subnet
+        try:
+            own = ipaddress.ip_network(f"{v4}/{m4}", strict=False)
+            if str(member.get("ipaddr")) == str(own.network_address):
+                out["topology-settings"] = {"ip-address-behind-this-interface":
+                                            "network defined by the interface ip and net mask"}
+        except ValueError:
+            pass
+    return out
+
+
 def _fetch_gateway_topology(base_url: str, sid: str,
                              gateway_uid: str, gateway_type: str) -> dict:
     """Fetch the full gateway/cluster object including interfaces[].
@@ -4594,6 +4778,57 @@ def _fetch_gateway_topology(base_url: str, sid: str,
     name - the same 'one gateway per management' model resolve_gateway_name
     uses. Raises a clear error only when the management has zero or several
     gateways (genuinely ambiguous → re-pin via the Add-CP wizard)."""
+    if _is_vsx_type(gateway_type):
+        # A VSX gateway, a VSX cluster or a virtual system: the simple-gateway
+        # reads refuse the class, and the single-gateway discovery below would
+        # hand a virtual system the interfaces of an unrelated gateway. The
+        # generic object answers (R10 of docs/VIRTUAL_INSTANCES_PLAN.md), its
+        # interface list normalised, its absence declared.
+        if not gateway_uid:
+            raise RuntimeError(f"{gateway_type}: no gateway uid pinned. Re-add the device via the Add-CP wizard")
+        # the gateways-and-servers listing carries the object with its interface
+        # list and topology (measured on the R81.20 MDS lab), show-object the
+        # common fields only, show-generic-object the object as stored
+        try:
+            obj = _find_gateway_object(base_url, sid, gateway_uid)
+        except Exception as exc:
+            raise RuntimeError(f"{gateway_type} {gateway_uid}: show-gateways-and-servers: {exc}") from exc
+        if obj is None:
+            raise RuntimeError(f"{gateway_type} {gateway_uid}: no gateway object carries the uid in this "
+                               "management context. Re-add the device via the Add-CP wizard")
+        obj = dict(obj)
+        obj.setdefault("uid", gateway_uid)
+        obj.setdefault("type", gateway_type)
+        ifaces = obj.get("interfaces") if isinstance(obj.get("interfaces"), list) else None
+        source = "show-gateways-and-servers"
+        if ifaces is None:
+            try:
+                so = _call(base_url, sid, "show-object", {"uid": gateway_uid, "details-level": "full"})
+                so = so.get("object") if isinstance(so.get("object"), dict) else so
+            except Exception:
+                so = {}
+            if isinstance(so, dict) and isinstance(so.get("interfaces"), list):
+                ifaces, source = so["interfaces"], "show-object"
+        if ifaces is None:
+            try:
+                gen = _call(base_url, sid, "show-generic-object", {"uid": gateway_uid})
+                gen = gen.get("object") if isinstance(gen.get("object"), dict) else gen
+            except Exception:
+                gen = {}
+            if isinstance(gen, dict) and isinstance(gen.get("interfaces"), list):
+                ifaces, source = gen["interfaces"], "show-generic-object"
+                if not obj.get("ipv4-address"):
+                    obj["ipv4-address"] = gen.get("ipv4-address") or gen.get("ipaddr") or None
+        if ifaces is not None:
+            obj["interfaces"] = [_vs_interface(i) for i in ifaces if isinstance(i, dict)]
+            obj["_source"] = source
+        else:
+            obj["interfaces"] = []
+            obj["_declared"] = (f"{gateway_type} {obj.get('name') or gateway_uid}: the management object "
+                                "carries no interface list (show-gateways-and-servers, show-object, "
+                                "show-generic-object), the interfaces of this virtual system are not "
+                                "read through the management")
+        return obj
     is_cluster = "cluster" in (gateway_type or "").lower()
     show_cmd  = "show-simple-cluster"  if is_cluster else "show-simple-gateway"
     list_cmd  = "show-simple-clusters" if is_cluster else "show-simple-gateways"
@@ -4632,6 +4867,11 @@ def _check_tp_blade(
     Returns ``(True, detail)`` when verified on, ``(False, detail)`` when
     verifiably off, ``(None, detail)`` when we can't tell (no gateway_uid
     in config, or the show-* call failed - fail open in that case).
+
+    Two shapes: a simple gateway or cluster carries the blades as flat flags
+    of its object, a virtual system (read from the gateways-and-servers
+    listing) carries its enabled blades in ``network-security-blades``
+    under the same names (docs/VSX_TARGET_PLAN.md, D4).
     """
     try:
         cfg = json.loads(device.get("config") or "{}")
@@ -4646,7 +4886,9 @@ def _check_tp_blade(
         gw = _fetch_gateway_topology(base_url, sid, gw_uid, gw_type)
     except Exception as e:
         return None, f"show-gateway failed: {e}, proceeding anyway"
-    enabled = [b for b in _TP_BLADE_FLAGS if gw.get(b) is True]
+    listed = gw.get("network-security-blades")
+    listed = listed if isinstance(listed, dict) else {}
+    enabled = [b for b in _TP_BLADE_FLAGS if gw.get(b) is True or listed.get(b) is True]
     if enabled:
         return True, f"TP-blade(s) on: {', '.join(enabled)}"
     return False, (
@@ -4871,6 +5113,17 @@ class CheckpointDriver(DeployDriver):
         finally:
             _logout(base_url, sid)
 
+    def strand_unavailable(self, *, device: dict, strand: str) -> str | None:
+        """A virtual system takes the policy strand only: its network is
+        VSX provisioning (docs/VSX_TARGET_PLAN.md, D1 and D2). Every other
+        Check Point target takes both strands."""
+        if strand == "network" and _is_vs_type(_cp_slot(device).get("gateway_type")):
+            return VS_NETWORK_DECLARED
+        return None
+
+    def section_strand(self, section: str) -> str | None:
+        return self._SECTION_STRAND.get(section)
+
     def resolve_gateway_name(self, device: dict) -> str | None:
         """Discover the CP simple-gateway object name from the management.
 
@@ -4896,6 +5149,12 @@ class CheckpointDriver(DeployDriver):
             cp = cfg.get("cp") or {}
             uid = cp.get("gateway_uid")
             gtype = (cp.get("gateway_type") or "").lower()
+            if uid and _is_vsx_type(cp.get("gateway_type")):
+                # a virtual system or its VSX: the simple-gateway commands
+                # refuse the class, and the single-gateway fallback below
+                # would name another gateway of the domain (D5)
+                obj = _find_gateway_object(base_url, sid, uid)
+                return (obj or {}).get("name") or None
             if uid:
                 show_cmd = ("show-simple-cluster" if "cluster" in gtype
                             else "show-simple-gateway")
@@ -5049,7 +5308,28 @@ class CheckpointDriver(DeployDriver):
         finally:
             _logout(base_url, sid)
 
-        bond_map = _fetch_bond_membership_optional(device)
+        # The Gaia side channel (bonds, loopbacks, VLAN sub-interfaces without a
+        # binding) stays best effort, but a login that fails is said, not swallowed:
+        # the list is short without it and the network push fails at that very
+        # login (product finding 10, 2026-11-16). One probe, the optional reads
+        # are skipped after a failure instead of failing three times in silence.
+        gaia_ok = True
+        if device.get("gaia_user") and device.get("gaia_password"):
+            try:
+                _psid, _pburl = _gaia_login(device, retries=0)
+            except Exception:
+                gaia_ok = False
+                self.warn_discover(
+                    f"Gaia login failed on {device.get('mgmt_ip') or device.get('host_name')} for "
+                    f"{device.get('gaia_user')}: the gateway's bonds, loopbacks and VLAN interfaces "
+                    "without a binding are missing from the list, and the network push fails at "
+                    "that login. Check gaia_user and gaia_password on the Device.")
+            else:
+                try:
+                    _gaia_logout(_pburl, _psid)
+                except Exception:
+                    pass
+        bond_map = _fetch_bond_membership_optional(device) if gaia_ok else {}
         bond_ips = _fetch_bond_ips_optional(device) if bond_map else {}
 
         out: list[dict] = []
@@ -5109,7 +5389,7 @@ class CheckpointDriver(DeployDriver):
         # Gaia reports that we haven't seen yet. Best-effort; missing creds →
         # skip silently.
         rows_by_name = {r["name"]: r for r in out}
-        for extra in _fetch_all_gaia_interfaces_optional(device):
+        for extra in (_fetch_all_gaia_interfaces_optional(device) if gaia_ok else []):
             name = (extra.get("name") or "").strip()
             if not name:
                 continue
@@ -5390,6 +5670,10 @@ class CheckpointDriver(DeployDriver):
         legitimately returns ``[]`` (no error). The VRF tab then renders
         empty, exactly like a non-VR PANW box.
         """
+        if _is_vs_type(_cp_slot(device).get("gateway_type")):
+            # a virtual system is one routing domain of its own: the VS
+            # objects of the management are its siblings, not its VRFs (F-4)
+            return []
         sid, base_url = _login(device)
         try:
             out: list[dict] = []
@@ -6122,12 +6406,30 @@ class CheckpointDriver(DeployDriver):
         known_addrs: set[str] = {
             _safe_name(o.get("name") or "") for o in list(address_objects or []) + list(address_groups or [])
             if o.get("name")}
+        # The service side of the same invariant: the services and groups
+        # this push creates, plus the Check Point predefined services the
+        # object renderer leaves to the target's own catalog (reference-only,
+        # see _render_service_objects).
+        pushable_svcs: set[str] = {
+            (cmd.get("payload") or {}).get("name", "")
+            for sec in ("Services-TCP", "Services-UDP", "Services-ICMP",
+                        "Services-ICMP6", "Services-Other", "Service Groups")
+            for cmd in section_lists.get(sec) or []
+        }
+        pushable_svcs.discard("")
+        pushable_svcs |= {
+            _safe_name(o.get("name") or "") for o in list(service_objects or [])
+            if o.get("name") and (o.get("value") or {}).get("predefined")}
+        known_svcs: set[str] = {
+            _safe_name(o.get("name") or "") for o in list(service_objects or []) + list(service_groups or [])
+            if o.get("name")}
         section_lists["Access Rules"] = _render_security_rules(
             rules, settings, addr_lookup, svc_lookup, dropped,
             pushable_schedules=pushable_schedules,
             schedule_name_map=_sched_name_map,
             any_svc_names=any_svc_names, known_addrs=known_addrs,
             pushable_addrs=pushable_addrs,
+            pushable_svcs=pushable_svcs, known_svcs=known_svcs,
             ipv6_names=ipv6_names, group_ipv6=group_ipv6,
         )
 
@@ -6308,6 +6610,7 @@ class CheckpointDriver(DeployDriver):
         ("TP Rules",         "policy"),
         ("Decryption Rules", "policy"),
     )
+    _SECTION_STRAND = {_name: _strand for _name, _strand in _PUSH_ORDER}
 
     # UI-label → internal section names for per-section push toggles.
     # Network strand stays atomic in V1 (_gaia_wipe_network is whole-strand)
@@ -6376,6 +6679,13 @@ class CheckpointDriver(DeployDriver):
         skip_internal: set[str] = self._resolve_skip_internal(
             strand, skip_sections)
 
+        # A strand the target lacks by its nature (the network of a virtual
+        # system) is refused before any login: one failed step, no call.
+        declined = self.strand_unavailable(device=device, strand=strand)
+        if declined:
+            yield StepResult(step=f"{strand} strand", success=False, detail=declined)
+            return
+
         try:
             sid, base_url = _login(device)
         except Exception as e:
@@ -6438,7 +6748,7 @@ class CheckpointDriver(DeployDriver):
             _cp_cfg = json.loads(device.get("config") or "{}").get("cp") or {}
         except Exception:
             _cp_cfg = {}
-        is_cluster = "cluster" in (_cp_cfg.get("gateway_type") or "").lower()
+        is_cluster = _is_cluster_target(_cp_cfg.get("gateway_type"))
         cluster_members: list[dict] = []
         cluster_name: str | None = None
         cluster_iface_names: set[str] = set()
@@ -6516,11 +6826,13 @@ class CheckpointDriver(DeployDriver):
             # (App-Control / URL-Filtering / Content-Awareness stack) which
             # is V2 territory.
             resolved_layer: str | None = None
+            access_package: str | None = None
             if strand == "policy" and config.get("Access Rules"):
                 rule_cmds = json.loads(config["Access Rules"])
                 if rule_cmds:
                     package = (rule_cmds[0]["payload"].get("__package__")
                                or "Standard")
+                    access_package = package
                     try:
                         pkg_resp = _call(base_url, sid, "show-package",
                                          {"name": package, "details-level": "full"})
@@ -6567,6 +6879,7 @@ class CheckpointDriver(DeployDriver):
                             stripped_rules = 0
                             stripped_idents = 0
                             stripped_ident_rules = 0
+                            ident_refs = 0
                             for cmd in rule_cmds:
                                 pld = cmd["payload"]
                                 pld["layer"] = resolved_layer
@@ -6583,7 +6896,8 @@ class CheckpointDriver(DeployDriver):
                                 # Identity-refs: keep only roles that exist at
                                 # the target; remove the rest from `source`.
                                 idents = pld.pop("__identity_refs__", []) or []
-                                missing = [r for r in idents if r not in target_roles]
+                                ident_refs += len(idents)
+                                missing = [] if target_roles is None else [r for r in idents if r not in target_roles]
                                 if missing:
                                     src = pld.get("source") or []
                                     new_src = [s for s in src if s not in missing]
@@ -6610,6 +6924,15 @@ class CheckpointDriver(DeployDriver):
                                         f"ref(s) absent at target from "
                                         f"{stripped_ident_rules} rule(s): rule "
                                         "pushed without that identity constraint"
+                                    ),
+                                )
+                            if target_roles is None and ident_refs:
+                                yield StepResult(
+                                    step="gate identity refs", success=True,
+                                    detail=(
+                                        "warning: could not read the target's Access-Roles, "
+                                        f"{ident_refs} identity ref(s) pushed as imported: a role "
+                                        "missing at the target makes its rule fail"
                                     ),
                                 )
                             config["Access Rules"] = json.dumps(rule_cmds)
@@ -6641,22 +6964,22 @@ class CheckpointDriver(DeployDriver):
                         ok = False
                         break
 
-            if (ok and strand == "policy" and config.get("NAT Rules")
-                    and "NAT Rules" not in skip_internal):
-                nat_cmds = json.loads(config["NAT Rules"])
-                if nat_cmds:
-                    package = nat_cmds[0]["payload"].get("package") or "Standard"
-                    for step in _wipe_nat_rulebase(base_url, sid, package):
-                        yield step
-                        if not step.success:
-                            ok = False
-                            break
+            # every policy push that keeps NAT in scope wipes the NAT rulebase, also one
+            # whose source carries no NAT (product finding 4, 2026-11-15)
+            if ok and strand == "policy" and "NAT Rules" not in skip_internal:
+                for step in _wipe_nat_rulebase(base_url, sid,
+                                               _nat_wipe_package(config, access_package, device)):
+                    yield step
+                    if not step.success:
+                        ok = False
+                        break
 
-            # ── Wipe Gateshift-managed TP-rules per configured TP-Layer ────
+            # ── Wipe the TP-rules per configured TP-Layer ────
             # TP-Layer is global on CP (not tied to a package), so we
-            # wipe each layer independently. Marker-tag filter ensures
-            # user-authored TP-rules survive (analogous to NAT's
-            # ``auto-generated`` filter).
+            # wipe each layer independently. Gateshift owns the layer:
+            # the wipe empties it, user-authored rules in it are not
+            # preserved (_wipe_tp_layer; the old comment promised a
+            # marker filter that never existed here, corrected 2026-11-10).
             #
             # Pre-flight: TP-blade check on the gateway. Adding TP-rules
             # without any TP blade enabled on the GW is harmless on the
@@ -6920,7 +7243,8 @@ class CheckpointDriver(DeployDriver):
                                 yield StepResult(
                                     step=f"Push TP Rules [{layer}]",
                                     success=True,
-                                    detail="layer not present on target, skipped")
+                                    detail=("warning: the layer is not on the target, its rules "
+                                            "are skipped: re-apply them to a layer that exists"))
                                 continue
                             for step in _push_tp_rules_for_layer(
                                     base_url, sid, layer, rules,
@@ -6939,6 +7263,10 @@ class CheckpointDriver(DeployDriver):
                     pushed = 0
                     skipped_ro = 0
                     first_ro: str | None = None
+                    # Renames the ambiguity handler below decides inside THIS
+                    # section are named in the section's step line (the box
+                    # holds FF_<name>, the review shows the source name).
+                    _renamed_before: set[str] = set(late_rename)
                     # Count OBJECTS, not API commands: some entities render as
                     # an add-* followed by a set-* on the same name (e.g. the
                     # access-rule time attach) - counting both read like the
@@ -7023,6 +7351,18 @@ class CheckpointDriver(DeployDriver):
                     if skipped_ro:
                         detail += (f". Skipped {skipped_ro} read-only "
                                    f"(first: {first_ro!r})")
+                    _renamed_here = [n for n in late_rename
+                                     if n not in _renamed_before]
+                    if _renamed_here:
+                        _pairs = ", ".join(f"{n} to {late_rename[n]}"
+                                           for n in _renamed_here[:5])
+                        _more = (f" (+{len(_renamed_here) - 5} more)"
+                                 if len(_renamed_here) > 5 else "")
+                        detail += (f". Renamed {len(_renamed_here)} object(s) "
+                                   "whose name the management already holds "
+                                   f"for another object type: {_pairs}{_more}. "
+                                   "The rules of this push reference the new "
+                                   "names.")
                     yield StepResult(step=step, success=True, detail=detail)
 
             # ── Persist Gaia config (immediate writes already live) ──
@@ -7276,6 +7616,37 @@ def _wipe_access_layer(
     else:
         detail += " (undeletable / builtin)"
     yield StepResult(step=f"Wipe {layer!r}", success=True, detail=detail)
+
+
+def _pinned_package(device: dict | None) -> str | None:
+    """The policy package pinned on the Device row (config.cp.policy_package)."""
+    try:
+        cfg = (device or {}).get("config") or {}
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg or "{}")
+        return ((cfg.get("cp") or {}).get("policy_package")) or None
+    except Exception:
+        return None
+
+
+def _nat_wipe_package(config: dict, access_package: str | None, device: dict | None) -> str:
+    """The package whose NAT rulebase the policy push wipes (product finding 4,
+    2026-11-15): the one the NAT section names, else the one the access rules
+    resolved, else the package pinned on the Device, else Standard. The wipe
+    runs for every policy push that keeps NAT in scope, also when the source
+    carries no NAT: the NAT rules of an earlier push do not survive a project
+    without any (an Azure source left two seeded rules standing)."""
+    raw = config.get("NAT Rules")
+    if raw:
+        try:
+            cmds = json.loads(raw)
+        except Exception:
+            cmds = []
+        if cmds:
+            p = ((cmds[0] or {}).get("payload") or {}).get("package")
+            if p:
+                return p
+    return access_package or _pinned_package(device) or "Standard"
 
 
 def _wipe_nat_rulebase(

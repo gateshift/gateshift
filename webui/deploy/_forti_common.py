@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
+import time
 
 import requests
 
@@ -28,6 +30,48 @@ from .base import management_host, split_selectors_by_family, mixed_selector_dro
 # read path for import + discover + enrichment catalogs. Mirrors the
 # _CONNECT_TIMEOUT in checkpoint.py / panw.py / fortinet.py.
 _CONNECT_TIMEOUT = 5
+
+# A FortiGate drops an accepted connection now and then: FortiOS 7.6.7
+# and later rate-limit the admin HTTP interface per client IP (config
+# system global, admin-http-rate-limit-max-requests, default 100 a
+# second, authenticated sessions included unless
+# admin-http-rate-limit-exempt-auth is on) and are reported to reset a
+# connection over the limit instead of answering 429, and the admin
+# daemon drops connections under rapid config changes (fortinet.py,
+# _RETRY_BACKOFF). Seen live 2026-11-12 on a 7.6.8 box in AWS: one of
+# six parallel discovers right after a wipe 'Connection reset by peer',
+# not reproducible with 180 discovers in bursts of 18 an hour later. A
+# burst of reads (the Network tab's snapshot refresh, the import's
+# parallel GETs) loses one read that way, so a connection the box
+# accepted and then dropped is retried a few times after a short pause. A box that is not reachable (connect
+# timeout, connection refused) still fails on the first attempt: this is
+# the interactive read path, it keeps no push-grade backoff
+# (deploy/base.py, fail_fast_transport).
+_READ_RETRY_PAUSE = (1, 3)
+
+
+def _connection_dropped(exc: BaseException) -> bool:
+    """True when the box accepted the connection and then dropped it
+    (reset, aborted, closed without a reply), False for a connect failure
+    or a timeout. Walks the exception chain requests builds over urllib3
+    and http.client (ProtocolError('Connection aborted.', ConnectionResetError),
+    RemoteDisconnected is a ConnectionResetError itself)."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return False
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        e = stack.pop()
+        if id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return True
+        stack.extend(a for a in getattr(e, "args", ()) if isinstance(a, BaseException))
+        for link in (e.__cause__, e.__context__):
+            if link is not None:
+                stack.append(link)
+    return False
 
 
 # ── REST API ─────────────────────────────────────────────────────
@@ -126,7 +170,7 @@ CLOUD_NOT_MANAGED = ("FortiGate Cloud reports that management is not enabled for
                      "device ({state}). In that state the cloud proxies read calls and "
                      "answers every write with permission_deny. Enable Management for the "
                      "device in FortiGate Cloud (it needs a FortiGate Cloud subscription) "
-                     "or register the box with its management address and an API token.")
+                     "or register the Device with its management address and an API token.")
 
 
 def cloud_device_record(device: dict) -> dict | None:
@@ -202,8 +246,21 @@ def api_get(base_url: str, token: str, path: str, vdom: str = "root") -> dict:
     sep = "&" if "?" in path else "?"
     url = f"{base_url}{path}{sep}vdom={vdom}&count=2000"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    resp = requests.get(url, headers=headers, verify=False,
-                        timeout=(_CONNECT_TIMEOUT, 30))
+    attempt = 0
+    while True:
+        try:
+            resp = requests.get(url, headers=headers, verify=False,
+                                timeout=(_CONNECT_TIMEOUT, 30))
+            break
+        except requests.exceptions.ConnectionError as exc:
+            # the box dropped a connection it accepted (see
+            # _READ_RETRY_PAUSE); a dead box raises at once
+            if attempt >= len(_READ_RETRY_PAUSE) or not _connection_dropped(exc):
+                raise
+            logging.warning("forti read: the box dropped the connection on GET %s - "
+                            "retrying in %ss", path, _READ_RETRY_PAUSE[attempt])
+            time.sleep(_READ_RETRY_PAUSE[attempt])
+            attempt += 1
     resp.raise_for_status()
     return resp.json()
 
@@ -469,6 +526,7 @@ def parse_security_policies(payload: dict, app_names: dict | None = None) -> lis
         neg_src, neg_dst, neg_svc = _policy_negates(e)
         rules.append({
             "rule_name":      e.get("name") or f"security-policy-{e.get('policyid', i)}",
+            "source_vendor_id": str(e.get("policyid")) if e.get("policyid") is not None else None,
             "seq_num":        i,
             "action":         (e.get("action") or "deny").strip().lower(),
             "src_zones":      ref_names(e.get("srcintf")) or ["any"],
@@ -689,6 +747,7 @@ def parse_rules(payload: dict) -> list[dict]:
 
         rules.append({
             "rule_name":      e.get("name") or f"policy-{e.get('policyid', i)}",
+            "source_vendor_id": str(e.get("policyid")) if e.get("policyid") is not None else None,
             "seq_num":        i,
             "action":         action_raw,
             "src_zones":      ref_names(e.get("srcintf")) or ["any"],

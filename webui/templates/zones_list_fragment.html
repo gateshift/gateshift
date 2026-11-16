@@ -24,6 +24,12 @@
     <span style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">
       Zones <span class="mut">({{ zones_list | length }})</span>
     </span>
+    {# +Add Zone sits top right, above the table (D42, operator 2026-11-12): it reveals the
+       inline add-row at the table's foot and scrolls it into view. #}
+    <button type="button" onclick="zoneShowAddRow()" class="btn" style="margin-left:auto;"
+            {% if not source_device_id %}disabled title="No source device selected"{% endif %}>
+      +Add Zone
+    </button>
   </div>
 
   {# The table renders even when zones_list is empty so the inline
@@ -200,16 +206,6 @@
         </tr>
       </tbody>
     </table>
-  </div>
-
-  {# Add-zone sits under the list, left - clicking reveals the inline
-     add-row at the table's bottom, directly above this button. #}
-  <div style="margin-top:8px;">
-    <button type="button" onclick="zoneShowAddRow()"
-            class="btn"
-            {% if not source_device_id %}disabled title="No source device selected"{% endif %}>
-      +Add Zone
-    </button>
   </div>
 
   {# ── Interface-mapping summary + UNASSIGNED bucket. The per-zone Members column shows/edits the

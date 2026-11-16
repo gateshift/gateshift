@@ -33,6 +33,7 @@ from .base import (
     DropTagger,
     DeployDriver,
     DroppedField,
+    appdef_result,
     StepResult,
     transport_fail_fast,
     default_rule_disposition,
@@ -184,7 +185,7 @@ def _hint_identity_ref(ctx: dict) -> str:
                 if val in names:
                     return (f": the policy names {what} '{val}', which this FortiGate does "
                             f"not have. Identities migrate by reference: create it on the "
-                            f"target, or map or remove it in Target Settings, Firewall, "
+                            f"target, or map or remove it under Profiles & Settings > "
                             f"Source User.")
     return ""
 
@@ -199,7 +200,7 @@ def _hint_cloud_permission_deny(ctx: dict) -> str:
         return (": FortiGate Cloud refused the write (permission_deny). Without "
                 "a FortiGate Cloud subscription with Management enabled for the "
                 "device the cloud is read-only. Enable Management for the device "
-                "in FortiGate Cloud, or register the box with its management "
+                "in FortiGate Cloud, or register the Device with its management "
                 "address and an API token and push through that.")
     return ""
 
@@ -356,16 +357,16 @@ def _prune_group_members(entries: list[dict], created: set[str],
 _UNSUPPORTED_RULE_FIELDS = {
     "application": (
         "FortiOS matches applications through an application control profile, not per policy",
-        "not pushed: attach an application control profile under Target Settings > UTM Profiles"),
+        "not pushed: attach an application control profile under Profiles & Settings > UTM Profiles"),
     "url_category": (
         "FortiOS filters URL categories through a web filter profile, not per policy",
-        "not pushed: attach a web filter profile under Target Settings > UTM Profiles"),
+        "not pushed: attach a web filter profile under Profiles & Settings > UTM Profiles"),
     "user_identity": (
         "user identity is not rendered for FortiOS targets",
         "not pushed: set users or groups on the policy on the target"),
     "profile_group": (
         "FortiOS has no profile group. Profiles attach one by one",
-        "not pushed: attach the profiles under Target Settings > UTM Profiles"),
+        "not pushed: attach the profiles under Profiles & Settings > UTM Profiles"),
 }
 
 
@@ -392,6 +393,71 @@ def _mgmt_iface_name(device: dict) -> str:
         return ((cfg.get("fortigate") or {}).get("mgmt_iface") or "port1").strip() or "port1"
     except Exception:
         return "port1"
+
+
+def guard_default_routes(entries: list[dict], live_routes: list[dict], mgmt_iface: str,
+                         v6: bool = False) -> tuple[list[dict], list[str]]:
+    """The management route guard of the network strand (CE backlog 18, lab
+    finding fmc2fgt 2026-11-04): a pushed default route over another port
+    must not outrank the default route the box reaches its manager through.
+    A Management Center route carries its administrative distance as the
+    metric (1), the renderer writes a set metric as FortiOS `distance`, and
+    the pushed default route then beat the DHCP default route of the
+    management port (distance 5), so every reply left through the data port.
+
+    `live_routes` is the box's active routing table (monitor router/ipv4 or
+    ipv6: ip_mask, interface, distance, vrf). The guard takes the default
+    route over `mgmt_iface` per VRF as the management route and raises every
+    pushed default route of that VRF over a different device whose distance
+    (set, or the FortiOS default 10) is at or below it to the management
+    distance plus one. Other VRFs, other prefixes and routes over the
+    management port itself pass unchanged. Returns the adjusted entries and
+    one line per raised route."""
+    default_mask = "::/0" if v6 else "0.0.0.0/0"
+    mgmt_dist: dict[int, int] = {}
+    for r in live_routes or ():
+        if (str(r.get("ip_mask") or "") != default_mask
+                or str(r.get("interface") or "") != mgmt_iface):
+            continue
+        try:
+            d = int(r.get("distance"))
+            vrf = int(r.get("vrf") or 0)
+        except (TypeError, ValueError):
+            continue
+        mgmt_dist[vrf] = min(d, mgmt_dist.get(vrf, d))
+    if not mgmt_dist:
+        return entries, []
+
+    def _is_default(dst: str) -> bool:
+        parts = dst.replace("/", " ").split()
+        if v6:
+            return parts[:1] == ["::"] and parts[1:] in ([], ["0"])
+        return parts in (["0.0.0.0", "0.0.0.0"], ["0.0.0.0", "0"])
+
+    out: list[dict] = []
+    raised: list[str] = []
+    for e in entries:
+        dst = str(e.get("dst") or "")
+        device = str(e.get("device") or "")
+        try:
+            vrf = int(e.get("vrf") or 0)
+        except (TypeError, ValueError):
+            vrf = 0
+        if not _is_default(dst) or device == mgmt_iface or vrf not in mgmt_dist:
+            out.append(e)
+            continue
+        try:
+            dist = int(e.get("distance")) if e.get("distance") is not None else 10
+        except (TypeError, ValueError):
+            dist = 10
+        if dist > mgmt_dist[vrf]:
+            out.append(e)
+            continue
+        new = mgmt_dist[vrf] + 1
+        out.append({**e, "distance": new})
+        raised.append(f"{dst} via {device or 'blackhole'} from distance {dist} to {new} "
+                      f"(the management route over {mgmt_iface} has distance {mgmt_dist[vrf]})")
+    return out, raised
 
 
 def _parse_ha_reserved(ha: dict) -> set[str]:
@@ -579,9 +645,16 @@ def _request_retry(method: str, url: str, *, headers: dict, verify: bool,
             return requests.request(method, url, headers=headers, data=data,
                                     verify=verify, timeout=timeout)
         except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout):
+                requests.exceptions.Timeout) as exc:
             if transport_fail_fast():
                 raise          # interactive path - no push-grade backoff
+            # Nobody answers the connect (a box that is down, a wrong address):
+            # there is no daemon to wait for, the push fails at once and says so.
+            # The backoff is for a box that answers and drops (refused, reset, a
+            # read that hangs while httpsd respawns). Block E, 2026-11-16: a dead
+            # box held a push for 230 s per call, silently, step after step.
+            if isinstance(exc, requests.exceptions.ConnectTimeout):
+                raise
             if attempt >= len(_RETRY_BACKOFF):
                 raise
             logging.warning("forti push: connection failure on %s %s - "
@@ -641,6 +714,24 @@ class _PushStep:
 
 
 # ── Per-policy NAT folding (shared by renderer + enrichment preview) ──
+
+def expand_group_members(names, group_members: dict | None) -> set[str]:
+    """The names plus every member they carry through address groups, groups
+    in groups included (CE backlog 19, lab finding fmc2fgt 2026-11-04: a
+    Management Center auto-NAT names one network object per rule, the
+    outbound policy names their group, and a match by name alone found no
+    policy to fold onto). `group_members` maps a group name to its member
+    names. Unknown names and an empty map expand to themselves."""
+    out: set[str] = set(names or ())
+    todo = list(out)
+    while todo:
+        n = todo.pop()
+        for m in (group_members or {}).get(n) or ():
+            if m not in out:
+                out.add(m)
+                todo.append(m)
+    return out
+
 
 def resolve_snat_pool(nat_row: dict, addr_value_lookup: dict,
                       known_ippools: set[str]) -> dict:
@@ -717,7 +808,8 @@ def resolve_snat_pool(nat_row: dict, addr_value_lookup: dict,
 
 def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
                     addr_value_lookup: dict,
-                    known_ippools: set[str]) -> dict:
+                    known_ippools: set[str],
+                    group_members: dict[str, list[str]] | None = None) -> dict:
     """Per-policy NAT mode: which access rule gets ``nat enable`` from which
     source-NAT intent, and every NAT row's fate. Pure over its inputs - the
     fortinet renderer AND the enrichment preview call this same code, so
@@ -725,7 +817,10 @@ def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
 
     Matching (unchanged from the old inline code): permit policy, no
     negate_source, source-name intersection, src+dst zone overlap ('any'
-    matches everything). NEW: a service check for GENERIC (cross-vendor)
+    matches everything). The source names on both sides are expanded through
+    `group_members` first (expand_group_members), so a NAT intent on a
+    group member folds onto a policy that names the group and the other way
+    round. NEW: a service check for GENERIC (cross-vendor)
     intents - the nat flag NATs ALL traffic of the policy, so an intent
     scoped to specific services only folds when the policy's services are a
     name-subset of the intent's; otherwise folding would silently WIDEN the
@@ -821,7 +916,7 @@ def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
         if res["synth"] and res["synth"]["name"] not in synth_pool_names:
             synth_pool_names.add(res["synth"]["name"])
             pool_synths.append(res["synth"])
-        osrc = set(n.get("orig_src") or ["any"])
+        osrc = expand_group_members(n.get("orig_src") or ["any"], group_members)
         matched = []
         for r in rules or []:
             act = (r.get("action") or "permit").lower()
@@ -829,7 +924,7 @@ def fold_policy_nat(nat_rules: list[dict], rules: list[dict],
                 continue
             if r.get("negate_source"):
                 continue
-            if not (osrc & set(r.get("sources") or [])):
+            if not (osrc & expand_group_members(r.get("sources") or [], group_members)):
                 continue
             if not _zov(n.get("src_zones") or ["any"],
                         r.get("src_zones") or []):
@@ -2182,8 +2277,11 @@ class FortinetDriver(DeployDriver):
             if vrf:
                 entry["vrf"] = vrf
             # Admin distance - FortiOS default is 10. Emit only when the
-            # user has explicitly overridden so an unchanged-route stays
-            # at the factory default.
+            # source carries one (an operator's override, or a Management
+            # Center route whose metric IS its distance) so an unchanged
+            # route stays at the factory default. A default route that would
+            # outrank the target's management route is raised at push time
+            # (guard_default_routes, CE backlog 18).
             metric_val = r.get("metric")
             if metric_val is not None:
                 entry["distance"] = int(metric_val)
@@ -2276,7 +2374,10 @@ class FortinetDriver(DeployDriver):
         # the enrichment preview calls (display == push truth). None in
         # central mode (SNAT renders as central-snat-map rows below).
         nat_fold = (fold_policy_nat(nat_rules, rules, addr_value_lookup,
-                                    set(ippool_names))
+                                    set(ippool_names),
+                                    group_members={
+                                        g.get("name"): list((g.get("value") or {}).get("members") or [])
+                                        for g in address_groups if g.get("name")})
                     if nat_mode == "policy" else None)
         if nat_fold is not None:
             for _psyn in nat_fold["pool_synths"]:
@@ -2914,16 +3015,17 @@ class FortinetDriver(DeployDriver):
                         fallback="pushed without tags",
                     ))
 
-            # application-default App-IDs the resolver couldn't map to ports
-            # (icmp-only / unmapped) - surfaced so the ALL fallback is visible.
-            unresolved_app = rule.get("_appdef_unresolved")
-            if unresolved_app:
-                dropped.append(DroppedField(
-                    rule_id=rule_id, field="service",
-                    reason="application-default not resolvable for: "
-                           + ", ".join(unresolved_app),
-                    fallback="replaced by ALL: set the service on the target",
-                ))
+            # application-default on a target without App-ID (deploy.base.appdef_result,
+            # docs/APPDEF_WIDENING_PLAN.md): App-IDs the table does not know narrow
+            # the rule when others resolved, widen it to ALL when none did.
+            if rule.get("_appdef_unresolved"):
+                dropped.append(appdef_result(rule_id, rule.get("action"),
+                                             unresolved=rule["_appdef_unresolved"],
+                                             kept=[e["name"] for e in service], any_word="ALL"))
+            if "_appdef_widened" in rule:
+                dropped.append(appdef_result(rule_id, rule.get("action"),
+                                             unresolved=rule["_appdef_widened"],
+                                             kept=[], any_word="ALL"))
 
             base_name = rule.get("rule_name") or f"{prefix}{i+1:03d}"
             rule_name = _safe_name(f"{prefix}{base_name}" if not base_name.startswith(prefix) else base_name, _LIM_POLICY)
@@ -3029,7 +3131,13 @@ class FortinetDriver(DeployDriver):
             if _paired is None:
                 continue
             srcaddr, dstaddr, srcaddr6, dstaddr6 = _paired
-            service = [{"name": n} for n in _svc_side(rule.get("services"), rule_id)]
+            # The rule's service mode (the PA switch, honoured on every target
+            # since docs/APPDEF_WIDENING_PLAN.md D5): 'any' is the operator
+            # accepting every service, FortiOS's ALL, declared by nothing.
+            if str(rule.get("service_override") or "").strip().lower() == "any":
+                service = [{"name": "ALL"}]
+            else:
+                service = [{"name": n} for n in _svc_side(rule.get("services"), rule_id)]
 
             action_raw = (rule.get("action") or "permit").lower()
             if action_raw in ("permit", "allow", "accept", "pass"):
@@ -4098,6 +4206,29 @@ class FortinetDriver(DeployDriver):
                                     + ": the firewall has no interface of that name, and it "
                                       "refuses a zone that names one. Create the interface or "
                                       "take the member out of the zone, then push again."))
+            if s.label in ("Static Routes", "Static Routes v6") and strand == "network":
+                # The management route guard (guard_default_routes): the box's
+                # active table names the route it reaches its manager through,
+                # a pushed default route must not outrank it. An unreadable
+                # table leaves the entries as rendered (fail open, like the HA
+                # probe).
+                _v6 = s.label.endswith("v6")
+                try:
+                    _live_rt = _f.api_get(
+                        _f.base_url_for(device), token,
+                        "/api/v2/monitor/router/ipv6" if _v6 else "/api/v2/monitor/router/ipv4",
+                        vdom).get("results") or []
+                except Exception:
+                    _live_rt = []
+                entries, _raised = guard_default_routes(entries, _live_rt, mgmt_iface, v6=_v6)
+                if _raised:
+                    yield StepResult(
+                        step=f"{s.label}: management route kept ahead", success=True,
+                        detail=("distance raised on " + ", ".join(_raised)
+                                + ". The Device reaches its manager over that route, and a "
+                                  "pushed default route at or below its distance would carry "
+                                  "the replies away. Set a higher metric on the route in the "
+                                  "project to make this push silent."))
             if s.label == "Service Objects" and _svc_proto_enum:
                 entries = [
                     {**e, "protocol": _svc_proto_enum}
@@ -4333,7 +4464,7 @@ class FortinetDriver(DeployDriver):
                         step=mstep, success=True,
                         detail=(f"{mgmt_iface} reconfigured (force): API session "
                                 "dropped as expected (its IP changed). Gateshift can no "
-                                "longer reach the box at the old address. Update the "
+                                "longer reach the Device at the old address. Update the "
                                 "device's mgmt IP to the new one to re-attach."))
 
     # ── Target discovery (Discover-as-Verarbeitung) ──────────────

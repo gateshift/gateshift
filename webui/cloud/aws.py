@@ -1392,6 +1392,15 @@ def _parse_network(net: _Net) -> tuple[list[dict], list[dict], list[dict], list[
                       "properties": {"aws_vpc": s["vpc"], "aws_subnet_id": s["id"],
                                      "aws_cidr": s["cidr"], "aws_cidr6": s["cidr6"], "aws_az": s["az"]}})
         members_by_vr.setdefault(vr, []).append(s["zone"])
+        # the subnet itself as a route of its VR (2026-11-15): the network behind the
+        # interface, no next hop, what a firewall synthesises from its interface address.
+        # The zone derivation and the routing view take it like a connected route,
+        # the targets re-derive it from the interface address once that is set.
+        for c in (s["cidr"], s["cidr6"]):
+            n = _cidr(c) if c else None
+            if n is not None:
+                routes.append({"prefix": str(n.network_address), "plen": n.prefixlen,
+                               "iface": s["zone"], "next_hop": None, "vr": vr})
     for rt in sorted(net.rts.values(), key=lambda r: r["name"]):
         if not rt["subnets"]:
             net.drop("route_table_unassociated", rt["name"])

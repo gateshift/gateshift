@@ -2,9 +2,12 @@
 
 {# ── The app's navigation tree (U13/U14), shared by the workspace (rules.html,
    nav_mode='workspace') and the project list (projects.html,
-   nav_mode='landing'). The top entry "Projects & Devices" is the one global
-   item; a project's tree follows it in the workspace. The fold, rail and
-   hint helpers live here; wsNav()/_wsNavSync() stay in the workspace. ── #}
+   nav_mode='landing'). The top entry "Projects" is the one global item, the
+   project picker sits under it (docs/UI_USABILITY_PLAN.md, D3), a project's
+   tree follows. The entries that map to a step of the step model carry its
+   marker (D2, ov_progress.marks), groups are folded unless opened (D4). The
+   fold, rail and hint helpers live here; wsNav()/_wsNavSync() stay in the
+   workspace. ── #}
   {# ── Workspace navigation (U13): ONE vertical tree instead of stacked tab
        strips. Every item keeps the id and the switch function of the strip
        button it replaces (primary-btn-*, main-btn-*, enr-rb-btn-*,
@@ -13,222 +16,365 @@
        _wsNavSync() marks the active path and unfolds it. The old strips
        stay only where they carry actions (fetch bar, re-generate). ── #}
   <style>
+    /* The panel's type grid (docs/UI_USABILITY_PLAN.md, D32, 2026-11-10): one size
+       (fs-small, the counts fs-caption as meta), the weights 400 and 500 only (the
+       panel's bold is 500 by design, the typeface carries the whole axis since the
+       declaration of 2026-11-10, D34), no letter-spacing
+       and no underline. One grid: the gutter at 8..22px, the text column from 30px,
+       the right edge 14px in: the picker's box, the Collapse row, the version and
+       Logout follow it. */
     .ws-layout { display:flex; align-items:stretch; }
     /* the tree stays in view while long tables scroll: sticky, with its own scroll when taller than the window */
     /* sticky makes the aside a stacking context: lift it above the content's sticky table heads (z 2), below dialogs (50) */
-    #ws-nav { flex:0 0 236px; position:sticky; top:0; z-index:35; align-self:flex-start; min-height:calc(100vh - 56px); max-height:calc(100vh - 56px); overflow-y:auto; /* header height off: the foot stays on screen at page top; after a scroll the tree sticks at 0 and leaves 56px below */ border-right:1px solid var(--line); background:var(--surface); display:flex; flex-direction:column; }
-    #ws-nav .ws-panel { flex:1 1 auto; }
-    #ws-nav .ws-panel { padding:10px 0 48px; }
+    #ws-nav { flex:0 0 248px; position:sticky; top:0; z-index:35; align-self:flex-start; min-height:100vh; max-height:100vh; overflow-y:auto; /* the full height since the header bar went (D33): the brand at the top, the foot at the bottom, the tree between */ border-right:1px solid var(--line); background:var(--surface); display:flex; flex-direction:column; }
+    /* the panel is a column: the top block (Projects, the picker) at the top, the
+       project's tree floating in the middle of the remaining height (D23) */
+    /* the panel is a grid of three rows (operator, 2026-11-10 evening): the brand, the stack of
+       the three menus, a spacer. The first and the last row share the free height, so the
+       stack's middle is the column's middle. The bottom block (Collapse, the foot) sits outside
+       the grid and stays sticky, the stack's top margin mirrors its height so the centre is the
+       window's, not the panel's. When the window is short the first row keeps the brand and
+       the stack moves down, nothing overlaps. */
+    #ws-nav { --ws-bottom-h:68px; }   /* the Collapse row and the foot as rendered at fs-small (measured 2026-11-10) */
+    #ws-nav .ws-panel { flex:1 1 auto; display:grid; grid-template-rows:minmax(auto, 1fr) auto minmax(auto, 1fr); align-items:start; }
+    /* the quiet headings (operator, 2026-11-10): on the text column, the picker's above its box */
+    /* the heading of a block sits in its line (operator, 2026-11-10): a short piece of the line
+       across the gutter, the word on the text column, the line on to the right edge. The entries
+       follow 6px below. */
+    #ws-nav li.gs-cap { display:flex; align-items:center; gap:8px; padding:4px 0; margin-bottom:6px; white-space:nowrap; }
+    #ws-nav li.gs-cap::before { content:''; flex:0 0 22px; height:1px; background:var(--line); }
+    #ws-nav li.gs-cap::after { content:''; flex:1 1 auto; height:1px; background:var(--line); }
+    /* a line above and below the tree (operator, 2026-11-10 evening): the block reads as the
+       project's menu between the global entries and the controls, floating in the middle */
+    #ws-nav .ws-middle { grid-row:2; margin-top:var(--ws-bottom-h); }
+    #ws-nav .ws-picker { margin-bottom:18px; }
+    #ws-nav .ws-tree { margin:0; padding:0; }   /* no line under the tree (operator, 2026-11-10) */
+    /* the brand at the top of the column (D33): the wordmark on the text column with the claim in
+       one line below it, no rule under it since the evening of 2026-11-10. The rail shows
+       the mark alone. Both use the symbol gs-brand-mark of the sprite (base.html). */
+    #ws-nav .ws-brand { grid-row:1; display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:16px 14px 12px 30px; text-decoration:none; }   /* no line under the brand (operator, 2026-11-10) */
+    #ws-nav .ws-brand .brand-claim { white-space:nowrap; }
+    /* the lockup a fifth larger in the tree (operator, 2026-11-13, D64): the wordmark 31px, the
+       claim 10.8px, which still ends inside the column's right edge (measured 233 of 234 px);
+       the lockup of the pages without the tree keeps the token sizes */
+    #ws-nav .ws-brand .brand { font-size:31px; }
+    #ws-nav .ws-brand .brand-claim { font-size:10.8px; }
+    /* the global block (Projects, Devices, the picker) sits a step below the brand, framed by a
+       line above it and the picker's line below, like the tree (operator, 2026-11-10 evening) */
+    #ws-nav .ws-global { margin-bottom:18px; }   /* the gap between the menus of the stack */
+    #ws-nav .ws-rail-brand { display:flex; justify-content:center; padding:17px 0 13px; margin-bottom:8px; border-bottom:1px solid var(--line); }
+    #ws-nav .ws-rail-brand svg { width:14px; height:22px; fill:var(--accent); }
     #ws-nav ul { list-style:none; margin:0; padding:0; }
     #ws-nav li.folded > ul { display:none; }
     #ws-nav .ws-row { display:flex; align-items:stretch; }
-    #ws-nav .ws-item { flex:1 1 auto; min-width:0; text-align:left; background:none; border:none; border-left:2px solid transparent; color:var(--tx2); font-family:var(--sans); font-size:var(--fs-small); padding:5px 10px 5px var(--ind, 14px); cursor:pointer; display:flex; align-items:center; gap:8px; }
+    #ws-nav .ws-item { flex:1 1 auto; min-width:0; text-align:left; background:none; border:none; color:var(--tx2); font-family:var(--sans); font-size:var(--fs-small); font-weight:400; padding:5px 10px 5px var(--ind, 8px); cursor:pointer; display:flex; align-items:center; gap:8px; }
     #ws-nav .ws-item .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     #ws-nav .ws-item .lk { color:var(--tx3); }
     #ws-nav .ws-item .c { margin-left:auto; color:var(--tx3); font-size:var(--fs-caption); font-variant-numeric:tabular-nums; padding-right:4px; }
-    #ws-nav li.l1 > .ws-row > .ws-item { --ind:14px; color:var(--tx); font-weight:600; }
+    /* the gutter column (docs/UI_USABILITY_PLAN.md, D13): a 14px slot before every
+       label. A done entry shows the check, the next entry the arrow with an accent
+       label and the Hint tag at the right edge, the home entry its back arrow. The
+       marks are the SVG symbols of the sprite at the top of the aside, so they
+       render alike on every platform. */
+    #ws-nav .ws-item .mk, #ws-nav .ws-rail-toggle .mk { flex:0 0 14px; width:14px; height:14px; display:inline-flex; align-items:center; justify-content:center; color:var(--accent); }
+    #ws-nav .ws-item .mk .ic { width:14px; height:14px; display:none; }
+    #ws-nav li.ws-done > .ws-row > .ws-item .mk .ic-done { display:block; }
+    #ws-nav li.ws-next > .ws-row > .ws-item .mk .ic-next { display:block; }
+    #ws-nav li.ws-next > .ws-row > .ws-item .lbl { color:var(--accent); }
+    /* the tag of the next entry is the light bulb emoticon of the next-step box (D24), at the right edge */
+    #ws-nav .ws-item .nx { display:none; margin-left:auto; font-size:13px; line-height:1; }
+    #ws-nav .ws-item .nx + .c { margin-left:6px; }
+    #ws-nav li.ws-next > .ws-row > .ws-item .nx { display:inline-flex; }
+    /* the header sentence points here: hovering it lights the entry (D14) */
+    #ws-nav li.ws-glow > .ws-row > .ws-item { background:var(--selection); color:var(--tx); }
+    /* the next step changed after an action: the new entry pulses twice and stops (D15) */
+    #ws-nav li.ws-pulse > .ws-row > .ws-item { outline:2px solid transparent; outline-offset:-2px; animation:gs-nav-pulse .7s ease-in-out 2; }
+    @keyframes gs-nav-pulse { 0%, 100% { outline-color:transparent; } 50% { outline-color:var(--accent); } }
+    @media (prefers-reduced-motion: reduce) { #ws-nav li.ws-pulse > .ws-row > .ws-item { animation:none; } }
+    #ws-nav .ws-rail-btn.next { color:var(--accent); font-weight:500; }
+    /* the project picker under the top entry (D3): every tenant's projects, grouped */
+    #ws-nav li.pick { padding:0 14px 0 30px; }   /* the box on the text column (D32) */
+    #ws-nav li.pick select { width:100%; font-size:var(--fs-small); padding:5px 10px; }   /* the row height of an entry */
+    #ws-nav .ws-rail-btn.locked { color:var(--tx3); cursor:not-allowed; }
+    /* the indents carry the gutter slot (D13): 8 + 14 + 8 puts the first label at 30px;
+       the sub-levels step 20px since D81 (operator, 2026-11-15: more indent), 14px until then */
+    #ws-nav li.l1 > .ws-row > .ws-item { --ind:8px; }
     #ws-nav li.l2 > .ws-row > .ws-item { --ind:28px; }
-    #ws-nav li.l3 > .ws-row > .ws-item { --ind:42px; }
-    #ws-nav li.l4 > .ws-row > .ws-item { --ind:56px; }
+    #ws-nav li.l3 > .ws-row > .ws-item { --ind:48px; }
+    #ws-nav li.l4 > .ws-row > .ws-item { --ind:68px; }
     #ws-nav .ws-item:hover { color:var(--tx); }
     #ws-nav .ws-item[data-locked="true"] { color:var(--tx3); cursor:not-allowed; }
-    #ws-nav li.ws-cur > .ws-row > .ws-item { color:var(--tx); background:var(--selection); border-left-color:var(--accent); }
+    /* the active path reads in brighter, bolder type (D23, 500 is the bold of this typeface,
+       D32); the entry of the shown panel, the deepest marked one, sits on the selection ground
+       again (operator, 2026-11-10 evening), the accent bar stays gone */
+    #ws-nav li.ws-cur > .ws-row > .ws-item { color:var(--tx); font-weight:500; }
+    #ws-nav li.ws-cur:not(:has(li.ws-cur)) > .ws-row > .ws-item { background:var(--selection); }
     #ws-nav a.ws-item { text-decoration:none; }
-    /* The home entry is the way OUT of the project, not one of its tabs: inside a
-       workspace it carries a back arrow and a rule, so the project's own tree
-       starts visibly below it (user request 2026-10-05, supersedes the flush
-       treatment of 2026-10-04). On the landing it IS the current page and stays
-       flush, like every other top-level item. */
+    /* The home entry is the way OUT of the project, not one of its tabs. Its back arrow
+       (2026-10-05) went on 2026-11-10 (operator): the Workflow heading in its line sets the
+       project's tree apart. On the landing it IS the current page. */
     #ws-nav li.home { margin-bottom:0; }
-    /* the rule whenever a project's tree follows - also on the landing, where the
-       entry is the current page but the tree below is a different project */
-    #ws-nav li.home.sep { border-bottom:1px solid var(--line); padding-bottom:7px; margin-bottom:9px; }
-    #ws-nav li.home.back > .ws-row > .ws-item { color:var(--tx2); font-weight:400; }
-    #ws-nav li.home.back > .ws-row > .ws-item:hover { color:var(--tx); }
-    #ws-nav li.home.back .bk { color:var(--tx3); margin-right:5px; }
-    #ws-nav li.home.back > .ws-row > .ws-item:hover .bk { color:var(--accent); }
-    #ws-nav .ws-fold { flex:0 0 24px; background:none; border:none; color:var(--tx3); cursor:pointer; padding:0; font-size:10px; }
-    #ws-nav .ws-fold:hover { color:var(--tx); }
-    #ws-nav li.folded > .ws-row > .ws-fold { transform:rotate(-90deg); }
+    /* the chevron of the Collapse row (D32) */
+    #ws-nav .mk .bk { color:var(--tx3); font-size:15px; line-height:1; }
+    #ws-nav .ws-item:hover .bk, #ws-nav .ws-rail-toggle:hover .bk { color:var(--tx); }
     /* the sticky bottom block: collapse toggle, then the foot (version + logout) - one block, so a long tree never hides one behind the other */
     #ws-nav .ws-bottom { position:sticky; bottom:0; z-index:31; margin-top:auto; flex:0 0 auto; background:var(--surface); }
-    #ws-nav .ws-foot { display:flex; align-items:center; justify-content:space-between; padding:8px 14px 10px; border-top:1px solid var(--line); }
+    #ws-nav .ws-foot { display:flex; align-items:center; justify-content:space-between; padding:5px 14px 6px 30px; border-top:1px solid var(--line); }
     #ws-nav.rail .ws-foot { display:none; }
-    #ws-nav .ws-rail-toggle { display:block; width:100%; height:34px; border:none; border-top:1px solid var(--line); background:none; color:var(--tx3); cursor:pointer; font-family:var(--sans); font-size:var(--fs-caption); }
+    /* the Collapse row in the panel's type (D32), centred again (operator, 2026-11-10 evening) */
+    #ws-nav .ws-rail-toggle { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:5px 10px; border:none; border-top:1px solid var(--line); background:none; color:var(--tx3); cursor:pointer; font-family:var(--sans); font-size:var(--fs-small); font-weight:400; }
     #ws-nav .ws-rail-toggle:hover { color:var(--tx); }
     #ws-nav .ws-rail { display:none; }
     /* rail mode: a slim column of the main areas; hovering it opens the full tree as an overlay */
     #ws-nav.rail { flex-basis:40px; overflow:visible; }
     /* the overlay opens while the rail or the overlay itself is hovered - the toggle below stays free */
-    #ws-nav.rail .ws-panel { display:none; position:absolute; left:0; top:0; height:calc(100vh - 56px); width:236px; background:var(--surface); border-right:1px solid var(--line); z-index:30; overflow:auto; box-shadow:var(--shadow-pop); }
-    #ws-nav.rail .ws-rail:hover ~ .ws-panel, #ws-nav.rail .ws-panel:hover { display:block; }
-    #ws-nav.rail .ws-rail { display:flex; flex-direction:column; padding:10px 0 48px; }
-    #ws-nav .ws-rail-btn { background:none; border:none; border-left:2px solid transparent; color:var(--tx2); font-family:var(--sans); font-size:var(--fs-caption); letter-spacing:.04em; padding:7px 0; cursor:pointer; }
-    #ws-nav .ws-rail-btn.active { color:var(--tx); border-left-color:var(--accent); background:var(--selection); }
+    #ws-nav.rail .ws-panel { display:none; position:absolute; left:0; top:0; height:100vh; width:248px; background:var(--surface); border-right:1px solid var(--line); z-index:30; overflow:auto; box-shadow:var(--shadow-pop); }
+    #ws-nav.rail .ws-rail:hover ~ .ws-panel, #ws-nav.rail .ws-panel:hover { display:grid; }
+    #ws-nav.rail .ws-rail { display:flex; flex-direction:column; padding:0 0 48px; }
+    #ws-nav.rail .ws-rail-toggle { padding:5px 0; }
+    #ws-nav.rail .ws-rail-toggle .lbl { display:none; }
+    #ws-nav .ws-rail-btn { background:none; border:none; color:var(--tx2); font-family:var(--sans); font-size:var(--fs-small); font-weight:400; padding:6px 0; cursor:pointer; }
+    #ws-nav .ws-rail-btn.active { color:var(--tx); font-weight:500; }
     #ws-main { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; }
-    /* top row: the view hint and the snapshot button; the right edge lines up with the header's version chip (38px) */
+    /* the page head (D33): the menu path on the left, the next step of the project in its box on
+       the right (from the header bar, which pages with the tree no longer have), the manager
+       scope row below it. The box keeps the right edge when the path is empty, it wraps under
+       the title when the window is narrow. Both edges sit 20px in, flush with the page content
+       below (operator, 2026-11-10). */
+    .ws-head { display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px; margin:18px 20px 0; }
+    .ws-head .ws-crumb { margin:0; flex:1 1 auto; min-width:0; }
+    .ws-head .ws-next-box { margin-left:auto; }
+    .ws-scopes { margin:10px 20px 0; align-self:auto; flex-wrap:wrap; row-gap:6px; }
     /* Page head (user request 2026-10-05): the active view's full menu path.
        One line - leading segments muted, the last one is the page title - so it
        reads as a header and as a breadcrumb without competing with the hero
-       title on the Overview. */
-    .ws-crumb { margin:18px 38px 0 20px; font-size:var(--fs-title); line-height:1.3; }
+       title on the Dashboard. */
+    .ws-crumb { margin:18px 20px 0; font-size:var(--fs-title); line-height:1.3; }
     .ws-crumb .up { color:var(--tx3); }
     .ws-crumb .sep { color:var(--line2); margin:0 7px; }
     .ws-crumb .cur { color:var(--tx); font-weight:600; }
-    .ws-top { display:flex; align-items:flex-start; gap:14px; margin:10px 38px 0 20px; }
+    .ws-top { display:flex; align-items:flex-start; gap:14px; margin:10px 20px 0; }
     .ws-top .ws-hint { flex:1 1 auto; min-width:0; margin:0; }
     .ws-top #ws-snapshot-btn { flex:0 0 auto; margin-top:4px; }
-    .ws-hint { display:flex; align-items:flex-start; gap:12px; margin:14px 20px 0; padding:9px 12px; border-left:3px solid var(--accent); background:var(--bg2); font-size:var(--fs-small); color:var(--tx2); line-height:1.5; }
+    /* the view hint box reads like the next-step box above it: a line, the page ground, no accent bar (operator, 2026-11-10, D33) */
+    .ws-hint { display:flex; flex-direction:column; gap:3px; margin:14px 20px 0; padding:9px 12px; border:1px solid var(--line); background:var(--bg2); font-size:var(--fs-small); color:var(--tx2); line-height:1.5; }
     .ws-hint .ws-hint-body { flex:1 1 auto; min-width:0; }
-    .ws-hint .ws-hint-cap { font-size:var(--fs-caption); color:var(--tx3); margin-right:10px; white-space:nowrap; }
-    .ws-hint .ws-hint-x, .ws-hint .ws-hint-show { flex:0 0 auto; background:none; border:none; color:var(--tx3) !important; cursor:pointer; font-family:var(--sans); font-size:var(--fs-caption); padding:0; }
-    .ws-hint .ws-hint-x:hover, .ws-hint .ws-hint-show:hover { color:var(--tx) !important; }
-    .ws-hint .ws-hint-show { display:none; }
-    .ws-hint.off { padding:4px 12px; border-left-color:var(--line2); background:none; }
-    .ws-hint.off .ws-hint-body, .ws-hint.off .ws-hint-x { display:none; }
-    .ws-hint.off .ws-hint-show { display:inline; }
+    /* the caption is the light bulb of the next-step box (D25), the box is always shown */
+    .ws-hint .ws-hint-cap { font-size:15px; line-height:1; margin-right:10px; white-space:nowrap; }
     /* the strips that carried only tabs are gone; the ones with actions show only while those actions do */
-    #enrichment-rulebase-bar, #ruleset-subtab-bar, #organization-subtab-bar, #configuration-subtab-bar { display:none !important; }
+    #enrichment-rulebase-bar, #ruleset-subtab-bar, #organization-subtab-bar { display:none !important; }
     #network-subtab-bar { display:none !important; } /* its fetch/reset actions sit in the Interfaces toolbar since 2026-10-04 */
     #enrichment-subtab-bar:has(#regen-pending-dot.hidden) { display:none !important; } /* row = only the pending marker since 2026-10-04 */
   </style>
   {% set _oc = {} %}{% for c in (ov_src_counters or []) %}{% set _ = _oc.update({c.key: c.n}) %}{% endfor %}
   {% set _show_organization = false %}
-  {% macro ws_leaf(id, onclick, label, level, count=None, locked=False, tooltip='', hidden=False, on=False) -%}
-      <li class="l{{ level }}"><div class="ws-row">
-        <button type="button" id="{{ id }}" class="ws-item{% if on %} on{% endif %}" onclick="{{ onclick }}" data-locked="{{ 'true' if locked else 'false' }}"{% if hidden %} style="display:none;"{% endif %}{% if tooltip %} title="{{ tooltip }}"{% endif %}>
-          <span class="lbl">{{ label }}{% if locked %} <span class="lk">(Locked)</span>{% endif %}</span>{% if count is not none %}<span class="c">{{ count }}</span>{% endif %}
+  {% set _mk = (ov_progress.marks if ov_progress else none) or {} %}
+  {# the gutter slot (D13): the check and the arrow as symbols, shown by the
+     entry's ws-done / ws-next class, never printed as text (printed as a Jinja
+     expression, the entity code showed on fresh loads until 2026-11-10, F1) #}
+  {% macro ws_slot() -%}
+    <span class="mk" aria-hidden="true"><svg class="ic ic-done"><use href="#gs-ic-check"/></svg><svg class="ic ic-next"><use href="#gs-ic-arrow"/></svg></span>
+  {%- endmacro %}
+  {% macro ws_mark_cls(mark) -%}
+    {%- if mark and mark.state in ('done', 'next') %} ws-{{ mark.state }}{% endif -%}
+  {%- endmacro %}
+  {% macro ws_leaf(id, onclick, label, level, count=None, locked=False, tooltip='', hidden=False, on=False, mark=None) -%}
+      <li class="l{{ level }}{{ ws_mark_cls(mark) }}"><div class="ws-row">
+        <button type="button" id="{{ id }}" class="ws-item{% if on %} on{% endif %}" onclick="{{ onclick }}" data-locked="{{ 'true' if locked else 'false' }}"{% if hidden %} style="display:none;"{% endif %}{% if tooltip %} title="{{ tooltip }}"{% elif mark and mark.title %} title="{{ mark.title }}"{% endif %}>
+          {{ ws_slot() }}<span class="lbl">{{ label }}{% if locked %} <span class="lk">(Locked)</span>{% endif %}</span><span class="nx gs-info">&#128161;</span>{% if count is not none %}<span class="c">{{ count }}</span>{% endif %}
         </button>
       </div></li>
   {%- endmacro %}
-  {% macro ws_group_head(id, onclick, label, level, locked=False, tooltip='', hidden=False) -%}
+  {% macro ws_group_head(id, onclick, label, level, locked=False, tooltip='', hidden=False, mark=None) -%}
       <div class="ws-row">
-        <button type="button" id="{{ id }}" class="ws-item" onclick="{{ onclick }}" data-locked="{{ 'true' if locked else 'false' }}"{% if hidden %} style="display:none;"{% endif %}{% if tooltip %} title="{{ tooltip }}"{% endif %}>
-          <span class="lbl">{{ label }}{% if locked %} <span class="lk">(Locked)</span>{% endif %}</span>
+        <button type="button" id="{{ id }}" class="ws-item" onclick="{{ onclick }}" data-locked="{{ 'true' if locked else 'false' }}"{% if hidden %} style="display:none;"{% endif %}{% if tooltip %} title="{{ tooltip }}"{% elif mark and mark.title %} title="{{ mark.title }}"{% endif %}>
+          {{ ws_slot() }}<span class="lbl">{{ label }}{% if locked %} <span class="lk">(Locked)</span>{% endif %}</span><span class="nx gs-info">&#128161;</span>
         </button>
-        <button type="button" class="ws-fold" onclick="wsFold(this)" title="Fold / unfold" aria-label="Fold">&#9662;</button>
       </div>
   {%- endmacro %}
   {% set _tp = selected_target.platform if selected_target else '' %}
+  {# the landing template's view: 'projects' or 'devices' (D30), empty in the workspace #}
+  {% set _np = page_view if page_view is defined else '' %}
   {# the tree shows in the workspace, and on the landing for the picked project (U16) #}
   {% set _show_tree = (nav_mode != 'landing') or ov_project %}
-  {% set _lock_src = 'Register a source and a target device first' %}
-  {% set _lock_tgt = (_lock_src if _source_gate else 'Pick a target device first') %}
+  {% set _lock_src = 'Register a source and a target Device first' %}
+  {% set _lock_tgt = (_lock_src if _source_gate else 'The target Device needs an API key and a supported platform') %}
   <aside id="ws-nav">
+    {# the symbols of the gutter column and the path dialog (check, arrow) live in the
+       sprite at the top of the body (base.html, since D24) #}
     <div class="ws-rail">
-      <a class="ws-rail-btn{% if nav_mode == 'landing' %} active{% endif %}" href="/projects" onclick="showNavOverlay()" title="Projects &amp; Devices">P&amp;D</a>
+      <a class="ws-rail-brand" href="/projects" onclick="showNavOverlay()" title="Gateshift: back to the projects"><svg aria-hidden="true"><use href="#gs-brand-mark"/></svg></a>
+      {# Devices before Projects (D35): the operator registers Devices first, a project pairs a source and a target Device (one Device for an optimization) #}
+      <a class="ws-rail-btn{% if _np == 'devices' %} active{% endif %}{% if landing_next and landing_next.href == '/devices' %} next{% endif %}" href="/devices" onclick="showNavOverlay()" title="Devices">Dv</a>
+      <a class="ws-rail-btn{% if nav_mode == 'landing' and _np != 'devices' %} active{% endif %}{% if landing_next and landing_next.href == '/projects' %} next{% endif %}" href="/projects" onclick="showNavOverlay()" title="Projects">Pr</a>
       {% if _show_tree %}
-      {% if ov_project %}<button type="button" class="ws-rail-btn" data-rail="overview" onclick="wsNav('overview')" title="Overview">Ov</button>{% endif %}
-      <button type="button" class="ws-rail-btn" data-rail="configuration" onclick="switchConfiguration()" title="Configure">Cf</button>
-      {% if not _right_locked %}
-      <button type="button" class="ws-rail-btn" data-rail="deploy" onclick="wsNav('deploy')" title="Review &amp; Deploy">RD</button>
-      {% endif %}
+      {# one pair of letters per area (D26), the active one follows the primary view #}
+      {% if ov_project %}<button type="button" class="ws-rail-btn" data-rail="overview" onclick="wsNav('overview')" title="Dashboard">Da</button>{% endif %}
+      <button type="button" class="ws-rail-btn{% if _gate_locked %} locked{% endif %}" data-rail="network" onclick="wsNav('network')" title="Network{% if _gate_locked %}: {{ _lock_src }}{% endif %}">Nw</button>
+      <button type="button" class="ws-rail-btn{% if _gate_locked %} locked{% endif %}" data-rail="ruleset" onclick="wsNav('ruleset')" title="Policies{% if _gate_locked %}: {{ _lock_src }}{% endif %}">Po</button>
+      <button type="button" class="ws-rail-btn{% if _gate_locked %} locked{% endif %}" data-rail="objects" onclick="wsNav('objects')" title="Objects{% if _gate_locked %}: {{ _lock_src }}{% endif %}">Ob</button>
+      <button type="button" class="ws-rail-btn{% if _right_locked %} locked{% endif %}" data-rail="enrichment" onclick="wsNav('enrichment')" title="Profiles &amp; Settings{% if _right_locked %}: {{ _lock_tgt }}{% endif %}">PS</button>
+      <button type="button" class="ws-rail-btn{% if _right_locked %} locked{% endif %}" data-rail="deploy" onclick="wsNav('deploy')" title="Review &amp; Deploy{% if _right_locked %}: {{ _lock_tgt }}{% endif %}">RD</button>
+      {% if ov_project %}<button type="button" class="ws-rail-btn" data-rail="log" onclick="wsNav('log')" title="Logs">Lg</button>{% endif %}
       {% endif %}
     </div>
     <div class="ws-panel">
-    <ul>
-      {# the app's one global entry: the project list with the device inventory (U14) #}
-      <li class="l1 home{% if _show_tree %} sep{% endif %}{% if nav_mode == 'landing' %} ws-cur{% else %} back{% endif %}"><div class="ws-row">
-        <a id="ws-nav-home" class="ws-item" href="/projects" onclick="showNavOverlay()"
-           title="{% if nav_mode == 'landing' %}Projects and devices of the tenant{% else %}Leave this project: back to the projects and devices of the tenant{% endif %}"><span class="lbl">{% if nav_mode != 'landing' %}<span class="bk" aria-hidden="true">&lsaquo;</span>{% endif %}Projects &amp; Devices</span></a>
+    {# the brand lockup (D33): the wordmark with the Lambda mark, the claim in one line #}
+    <a class="ws-brand" href="/projects" onclick="showNavOverlay()" title="Gateshift: back to the projects">
+      <span class="brand">g<svg class="brand-a" aria-hidden="true"><use href="#gs-brand-mark"/></svg>teshift</span>
+      <span class="brand-claim">The firewall migration tool</span>
+    </a>
+    {# the three menus as one stack (operator, 2026-11-10): Manage, Active Project and
+       Migrate & Optimize directly under each other, centred on the column #}
+    <div class="ws-middle">
+    <ul class="ws-global">
+      <li class="gs-cap">Manage</li>
+      {# the global entries (U14, D30), Devices first (D35): the operator registers and imports
+         Devices before a project can pair a source and a target (one Device for an optimization). The entry
+         of the tenant's next step carries the arrow and the light bulb like a step of the tree (D67):
+         Devices until a source Device is imported, Projects until the first project exists #}
+      <li class="l1 dev{% if _np == 'devices' %} ws-cur{% endif %}{% if landing_next and landing_next.href == '/devices' %} ws-next{% endif %}"><div class="ws-row">
+        <a id="ws-nav-devices" class="ws-item" href="/devices" onclick="showNavOverlay()" title="The tenant's Devices: register, import, API keys"><span class="mk" aria-hidden="true"><svg class="ic ic-next"><use href="#gs-ic-arrow"/></svg></span><span class="lbl">Devices</span><span class="nx gs-info">&#128161;</span></a>
       </div></li>
-      {# the project picker lives in the header since 2026-10-04 (base.html, all tenants) #}
-      {% if _show_tree %}
-      {# no project-name caption here (user request 2026-10-04) - the name lives in the Overview head #}
-      {% if ov_project %}{{ ws_leaf('primary-btn-overview', "wsNav('overview')", 'Overview', 1) }}{% endif %}
-      <li class="l1 grp">
-        {# the tree reads as the sequence of what you do: Overview, Configure, Review & Deploy (user decision 2026-10-05) #}
-        {{ ws_group_head('primary-btn-configuration', 'switchConfiguration()', 'Configure', 1, _gate_locked, _lock_src if _gate_locked else '') }}
+      <li class="l1 home{% if nav_mode == 'landing' and _np != 'devices' %} ws-cur{% endif %}{% if landing_next and landing_next.href == '/projects' %} ws-next{% endif %}"><div class="ws-row">
+        <a id="ws-nav-home" class="ws-item" href="/projects" onclick="showNavOverlay()"
+           title="{% if nav_mode == 'landing' %}The tenant's projects{% else %}Leave this project: back to the Projects page{% endif %}"><span class="mk" aria-hidden="true"><svg class="ic ic-next"><use href="#gs-ic-arrow"/></svg></span><span class="lbl">Projects</span><span class="nx gs-info">&#128161;</span></a>
+      </div></li>
+    </ul>
+      {# the tenant picker (D66): the estate the landing shows, a menu of its own once a
+         second tenant exists; with the default alone nothing of it shows #}
+      {% if nav_mode == 'landing' and tenants is defined and tenants|length > 1 %}
+      <ul class="ws-picker">
+      <li class="gs-cap">Tenant</li>
+      <li class="l1 pick"><div class="ws-pick">
+        {% include "_tenant_switcher.html" %}
+      </div></li>
+      </ul>
+      {% endif %}
+      {# the project picker (docs/UI_USABILITY_PLAN.md, D3): every tenant's projects,
+         grouped, a menu of its own above the tree since 2026-11-10; picking one switches the tenant cookie and
+         opens the project's Overview (wsProjectPick, base.html). Pages that pass
+         no nav_projects show no picker. #}
+      {% if nav_projects %}
+      <ul class="ws-picker">
+      <li class="gs-cap">Active Project</li>
+      <li class="l1 pick"><div class="ws-pick">
+        <select id="ws-project-select" class="inp" onchange="wsProjectPick(this)" title="Switch to another project, any tenant">
+          {% if not ov_project %}<option value="" selected>- Pick a project -</option>{% endif %}
+          {% for tn, grp in nav_projects | groupby('tenant_name') %}
+          <optgroup label="{{ tn or 'default' }}">
+            {% for p in grp %}<option value="/projects/{{ p.id }}" data-tenant="{{ p.tenant_id }}"{% if ov_project and p.id == ov_project.id %} selected{% endif %}>{{ p.name }}</option>{% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+      </div></li>
+      </ul>
+      {% endif %}
+    {% if _show_tree %}
+    <ul class="ws-tree">
+      <li class="gs-cap">Migrate &amp; Optimize</li>
+      {# The tree reads as the way through a firewall's setup (D26, 2026-11-10): the
+         project's card, then Network, Policies, Objects, Profiles & Settings, then Review &
+         Deploy. The labels are the words of firewall menus, the ids are the switch
+         targets and never change (D27): primary-btn-ruleset reads Policies,
+         main-btn-security reads Security, primary-btn-overview reads Dashboard. #}
+      {% if ov_project %}{{ ws_leaf('primary-btn-overview', "wsNav('overview')", 'Dashboard', 1, mark=_mk.get('primary-btn-overview')) }}{% endif %}
+      <li class="l1 grp{{ ws_mark_cls(_mk.get('primary-btn-network')) }}">
+        {{ ws_group_head('primary-btn-network', "wsNav('network')", 'Network', 1, _gate_locked, _lock_src if _gate_locked else '', mark=_mk.get('primary-btn-network')) }}
         <ul>
-          <li class="l2 grp">
-            {{ ws_group_head('primary-btn-network', "wsNav('network')", 'Network', 2, _gate_locked, _lock_src if _gate_locked else '') }}
-            <ul>
-              {{ ws_leaf('main-btn-interfaces', "wsNav('network', null, 'interfaces')", 'Interfaces', 3, _oc.get('interfaces')) }}
-              {{ ws_leaf('main-btn-routing', "wsNav('network', null, 'routing')", 'Routing', 3, _oc.get('routes')) }}
-              {{ ws_leaf('main-btn-policy-routing', "wsNav('network', null, 'policy-routing')", 'Policy Routing', 3, _oc.get('pbf'), tooltip='Policy-Based Forwarding (PA: PBF, Fortinet: Policy Routes)') }}
-              {# VPN tunnels are network configuration, not fields on existing
-                 rules (CE backlog 6, 2026-10-12). Target-gated like the
-                 Decryption leaf under Rules. #}
-              {% if not _right_locked and _tp in ('panw', 'fortigate', 'checkpoint') %}{{ ws_leaf('main-btn-vpn', "wsNav('network', null, 'vpn')", 'VPN', 3, _oc.get('vpn')) }}{% endif %}
-            </ul>
-          </li>
-          <li class="l2 grp">
-            {{ ws_group_head('primary-btn-ruleset', "wsNav('ruleset')", 'Rules', 2, _gate_locked, _lock_src if _gate_locked else '') }}
-            <ul>
-              {{ ws_leaf('main-btn-security', "wsNav('ruleset', null, 'security')", 'Firewall', 3, _oc.get('rules'), ruleset_locked) }}
-              {{ ws_leaf('main-btn-nat', "wsNav('ruleset', null, 'nat')", 'NAT', 3, _oc.get('nat')) }}
-              {# Decryption and Threat Prevention are rulesets of their own, so
-                 they belong here and not under Target Settings (CE backlog 6,
-                 2026-10-12). They need a target like the Target Settings
-                 branch does: the platform condition carries that gate, and
-                 _right_locked keeps them away while no target is usable. #}
-              {% if not _right_locked and _tp in ('panw', 'checkpoint') %}{{ ws_leaf('main-btn-decryption', "wsNav('ruleset', null, 'decryption')", 'Decryption', 3, _oc.get('ssl')) }}{% endif %}
-              {% if not _right_locked and _tp == 'checkpoint' %}{{ ws_leaf('main-btn-tp', "wsNav('ruleset', null, 'tp')", 'Threat Prevention', 3, _oc.get('tp')) }}{% endif %}
-            </ul>
-          </li>
-          <li class="l2 grp">
-            {{ ws_group_head('primary-btn-objects', "wsNav('objects')", 'Objects', 2, _gate_locked, _lock_src if _gate_locked else '') }}
-            <ul>
-              {{ ws_leaf('obj-btn-address_group', "wsNav('objects', null, null, 'address_group')", 'Address Groups', 3, object_totals.address_group, on=True) }}
-              {{ ws_leaf('obj-btn-address', "wsNav('objects', null, null, 'address')", 'Addresses', 3, object_totals.address) }}
-              {{ ws_leaf('obj-btn-service_group', "wsNav('objects', null, null, 'service_group')", 'Service Groups', 3, object_totals.service_group) }}
-              {{ ws_leaf('obj-btn-service', "wsNav('objects', null, null, 'service')", 'Services', 3, object_totals.service) }}
-              {{ ws_leaf('obj-btn-url_category', "wsNav('objects', null, null, 'url_category')", 'URL Categories', 3, object_totals.url_category) }}
-              {{ ws_leaf('obj-btn-schedule', "wsNav('objects', null, null, 'schedule')", 'Schedules', 3, object_totals.schedule) }}
-            </ul>
-          </li>
-          <li class="l2 grp"{% if _right_locked %} style="display:none;"{% endif %}>
-            {# labelled 'Target Settings' since 2026-10-05 (user decision): the branch
-               is target-gated and holds what the target platform needs, which the
-               internal term 'enrichment' does not say to an operator. The ids,
-               routes and modules keep the internal name - same split as
-               primary-btn-ruleset / 'Rules'. #}
-            {{ ws_group_head('primary-btn-enrichment', "wsNav('enrichment')", 'Target Settings', 2, _right_locked, _lock_tgt if _right_locked else '', _right_locked) }}
-            <ul>
-              {% if _tp in ('panw', 'checkpoint', 'fortigate') %}
-              <li class="l3 grp">
-                {{ ws_group_head('enr-rb-btn-access', "wsNav('enrichment', 'access')", 'Firewall', 3) }}
-                <ul>
-                  {% if target_zone_native %}{{ ws_leaf('main-btn-zones-enrichment', "wsNav('enrichment', 'access', 'zones-enrichment')", ('Zone/Interface Mapping' if _tp == 'fortigate' else 'Zone Mapping'), 4) }}{% endif %}
-                  {% if _tp == 'panw' %}{{ ws_leaf('main-btn-security-profiles', "wsNav('enrichment', 'access', 'security-profiles')", 'Security Profiles', 4) }}{% endif %}
-                  {# a FortiGate matches applications per policy only in NGFW policy-based
-                     mode (docs/FGT_POLICY_MODE_PLAN.md): the leaf follows the target's mode #}
-                  {% if _tp in ('panw', 'checkpoint') or (_tp == 'fortigate' and selected_target and selected_target.get('ngfw_mode') == 'policy-based') %}{{ ws_leaf('main-btn-applications', "wsNav('enrichment', 'access', 'applications')", 'Applications', 4) }}{% endif %}
-                  {% if _tp == 'fortigate' %}{{ ws_leaf('main-btn-utm-profiles', "wsNav('enrichment', 'access', 'utm-profiles')", 'UTM Profiles', 4) }}{% endif %}
-                  {{ ws_leaf('main-btn-logging', "wsNav('enrichment', 'access', 'logging')", 'Logging', 4) }}
-                  {{ ws_leaf('main-btn-schedule-enrichment', "wsNav('enrichment', 'access', 'schedule-enrichment')", 'Schedule', 4) }}
-                  {{ ws_leaf('main-btn-identity-enrichment', "wsNav('enrichment', 'access', 'identity-enrichment')", 'Source User', 4) }}
-                  {% if _tp == 'panw' %}{{ ws_leaf('main-btn-tags-enrichment', "wsNav('enrichment', 'access', 'tags-enrichment')", 'Tags', 4) }}{% endif %}
-                </ul>
-              </li>
-              {{ ws_leaf('enr-rb-btn-nat', "wsNav('enrichment', 'nat')", 'NAT', 3) }}
-              {% endif %}
-              {# one term for one concept (user decision 2026-10-05): the rules live
-                 under Network > Policy Routing, their target fields here - the pair
-                 reads like Firewall and NAT. 'PBF' stays in the tooltip. #}
-              {% if _tp == 'panw' %}{{ ws_leaf('enr-rb-btn-routing', "wsNav('enrichment', 'routing')", 'Policy Routing', 3, tooltip='Policy-Based Forwarding (PA): vendor L7-match fields for the policy routing rules') }}{% endif %}
-              {# Threat Prevention, Decryption and VPN moved out of this branch
-                 on 2026-10-12: they are under Rules and Network now. #}
-              {% if _show_organization %}
-              <li class="l3 grp">
-                {{ ws_group_head('enr-rb-btn-organization', "wsNav('enrichment', 'organization')", 'Organization', 3) }}
-                <ul>
-                  {{ ws_leaf('main-btn-org-access', "wsNav('enrichment', 'organization'); switchOrgSub('org-access')", 'Firewall', 4) }}
-                  {% if _tp in ('panw', 'checkpoint') %}{{ ws_leaf('main-btn-org-nat', "wsNav('enrichment', 'organization'); switchOrgSub('org-nat')", 'NAT', 4) }}{% endif %}
-                  {% if _tp == 'checkpoint' %}{{ ws_leaf('main-btn-org-tp', "wsNav('enrichment', 'organization'); switchOrgSub('org-tp')", 'Threat Prevention', 4) }}{% endif %}
-                </ul>
-              </li>
-              {% endif %}
-            </ul>
-          </li>
+          {{ ws_leaf('main-btn-interfaces', "wsNav('network', null, 'interfaces')", 'Interfaces', 2, _oc.get('interfaces'), mark=_mk.get('main-btn-interfaces')) }}
+          {# the zone binding sits where firewall menus keep zones (D28): under Network,
+             while the entry opens the zones panel of Profiles & Settings. Shown for a target
+             that uses zones, like that panel. #}
+          {{ ws_leaf('main-btn-routing', "wsNav('network', null, 'routing')", 'Routing', 2, _oc.get('routes'), mark=_mk.get('main-btn-routing')) }}
+          {# Zones after Routing (D90): the derived zones and the rule mapping follow the routes #}
+          {% if not _right_locked and target_zone_native %}{{ ws_leaf('main-btn-zones-enrichment', "wsNav('enrichment', 'access', 'zones-enrichment')", 'Zones', 2, mark=_mk.get('main-btn-zones-enrichment')) }}{% endif %}
+          {{ ws_leaf('main-btn-policy-routing', "wsNav('network', null, 'policy-routing')", 'Policy Routing', 2, _oc.get('pbf'), tooltip='Policy-Based Forwarding (PA: PBF, Fortinet: Policy Routes)', mark=_mk.get('main-btn-policy-routing')) }}
+          {# VPN tunnels are network configuration, not fields on existing
+             rules (CE backlog 6, 2026-10-12). Target-gated like the
+             Decryption leaf under Policies. #}
+          {% if not _right_locked and _tp in ('panw', 'fortigate', 'checkpoint') %}{{ ws_leaf('main-btn-vpn', "wsNav('network', null, 'vpn')", 'VPN', 2, _oc.get('vpn'), mark=_mk.get('main-btn-vpn')) }}{% endif %}
         </ul>
       </li>
-      {{ ws_leaf('primary-btn-deploy', "wsNav('deploy')", 'Review & Deploy', 1, None, _right_locked, _lock_tgt if _right_locked else '', _right_locked) }}
-      {% endif %}
+      <li class="l1 grp{{ ws_mark_cls(_mk.get('primary-btn-ruleset')) }}">
+        {{ ws_group_head('primary-btn-ruleset', "wsNav('ruleset')", 'Policies', 1, _gate_locked, _lock_src if _gate_locked else '', mark=_mk.get('primary-btn-ruleset')) }}
+        <ul>
+          {{ ws_leaf('main-btn-security', "wsNav('ruleset', null, 'security')", 'Security', 2, _oc.get('rules'), ruleset_locked, mark=_mk.get('main-btn-security')) }}
+          {{ ws_leaf('main-btn-nat', "wsNav('ruleset', null, 'nat')", 'NAT', 2, _oc.get('nat'), mark=_mk.get('main-btn-nat')) }}
+          {# Decryption and Threat Prevention are rulesets of their own, so
+             they belong here and not under Profiles & Settings (CE backlog 6,
+             2026-10-12). They need a target like the Profiles & Settings
+             branch does: the platform condition carries that gate, and
+             _right_locked keeps them away while no target is usable. #}
+          {% if not _right_locked and _tp in ('panw', 'checkpoint') %}{{ ws_leaf('main-btn-decryption', "wsNav('ruleset', null, 'decryption')", 'Decryption', 2, _oc.get('ssl'), mark=_mk.get('main-btn-decryption')) }}{% endif %}
+          {% if not _right_locked and _tp == 'checkpoint' %}{{ ws_leaf('main-btn-tp', "wsNav('ruleset', null, 'tp')", 'Threat Prevention', 2, _oc.get('tp'), mark=_mk.get('main-btn-tp')) }}{% endif %}
+        </ul>
+      </li>
+      <li class="l1 grp{{ ws_mark_cls(_mk.get('primary-btn-objects')) }}">
+        {{ ws_group_head('primary-btn-objects', "wsNav('objects')", 'Objects', 1, _gate_locked, _lock_src if _gate_locked else '', mark=_mk.get('primary-btn-objects')) }}
+        <ul>
+          {{ ws_leaf('obj-btn-address_group', "wsNav('objects', null, null, 'address_group')", 'Address Groups', 2, object_totals.address_group, on=True) }}
+          {{ ws_leaf('obj-btn-address', "wsNav('objects', null, null, 'address')", 'Addresses', 2, object_totals.address) }}
+          {{ ws_leaf('obj-btn-service_group', "wsNav('objects', null, null, 'service_group')", 'Service Groups', 2, object_totals.service_group) }}
+          {{ ws_leaf('obj-btn-service', "wsNav('objects', null, null, 'service')", 'Services', 2, object_totals.service) }}
+          {{ ws_leaf('obj-btn-url_category', "wsNav('objects', null, null, 'url_category')", 'URL Categories', 2, object_totals.url_category) }}
+          {{ ws_leaf('obj-btn-schedule', "wsNav('objects', null, null, 'schedule')", 'Schedules', 2, object_totals.schedule) }}
+        </ul>
+      </li>
+      <li class="l1 grp{{ ws_mark_cls(_mk.get('primary-btn-enrichment')) }}">
+        {# labelled 'Profiles & Settings' since 2026-11-10 (user decision, 'Target Settings' from 2026-10-05 to then,
+           no firewall menu has a word for it): the branch is target-gated and holds
+           what the target platform needs per rule. The ids, routes and modules keep
+           the internal name 'enrichment'. Flat since D26: the entries of its firewall
+           rulebase stand next to NAT and Policy Routing. #}
+        {{ ws_group_head('primary-btn-enrichment', "wsNav('enrichment')", 'Profiles & Settings', 1, _right_locked, _lock_tgt if _right_locked else '', mark=_mk.get('primary-btn-enrichment')) }}
+        {% if not _right_locked %}
+        <ul>
+          {% if _tp in ('panw', 'checkpoint', 'fortigate') %}
+          {# the firewall rulebase has no head of its own since D26, its button stays in the
+             DOM hidden: switchEnrichmentRulebase picks the rulebase by it #}
+          {{ ws_leaf('enr-rb-btn-access', "wsNav('enrichment', 'access')", 'Firewall', 2, hidden=True) }}
+          {% if _tp == 'panw' %}{{ ws_leaf('main-btn-security-profiles', "wsNav('enrichment', 'access', 'security-profiles')", 'Security Profiles', 2, mark=_mk.get('main-btn-security-profiles')) }}{% endif %}
+          {% if _tp == 'fortigate' %}{{ ws_leaf('main-btn-utm-profiles', "wsNav('enrichment', 'access', 'utm-profiles')", 'UTM Profiles', 2, mark=_mk.get('main-btn-utm-profiles')) }}{% endif %}
+          {# a FortiGate matches applications per policy only in NGFW policy-based
+             mode (docs/FGT_POLICY_MODE_PLAN.md): the leaf follows the target's mode #}
+          {% if _tp in ('panw', 'checkpoint') or (_tp == 'fortigate' and selected_target and selected_target.get('ngfw_mode') == 'policy-based') %}{{ ws_leaf('main-btn-applications', "wsNav('enrichment', 'access', 'applications')", 'Applications', 2, mark=_mk.get('main-btn-applications')) }}{% endif %}
+          {{ ws_leaf('main-btn-logging', "wsNav('enrichment', 'access', 'logging')", 'Logging', 2, mark=_mk.get('main-btn-logging')) }}
+          {{ ws_leaf('main-btn-schedule-enrichment', "wsNav('enrichment', 'access', 'schedule-enrichment')", 'Schedule', 2, mark=_mk.get('main-btn-schedule-enrichment')) }}
+          {{ ws_leaf('main-btn-identity-enrichment', "wsNav('enrichment', 'access', 'identity-enrichment')", 'Source User', 2, mark=_mk.get('main-btn-identity-enrichment')) }}
+          {% if _tp == 'panw' %}{{ ws_leaf('main-btn-tags-enrichment', "wsNav('enrichment', 'access', 'tags-enrichment')", 'Tags', 2, mark=_mk.get('main-btn-tags-enrichment')) }}{% endif %}
+          {# the NAT settings sit with the NAT ruleset since 2026-11-13 (D57): Policies > NAT switches
+             between Rules and Target Settings. The leaf stays hidden because switchEnrichmentRulebase
+             and the tree sync key on its button, like the Firewall head above. #}
+          {{ ws_leaf('enr-rb-btn-nat', "wsNav('enrichment', 'nat')", 'NAT', 2, hidden=True) }}
+          {% endif %}
+          {# one term for one concept (user decision 2026-10-05, kept 2026-11-10 over the
+             drawing's 'Policy Routes'): the rules live under Network > Policy Routing, their
+             target fields behind its Target Settings button since 2026-11-13 (D57). The leaf
+             stays hidden for the same reason as the NAT one. #}
+          {% if _tp == 'panw' %}{{ ws_leaf('enr-rb-btn-routing', "wsNav('enrichment', 'routing')", 'Policy Routing', 2, hidden=True) }}{% endif %}
+          {% if _show_organization %}
+          <li class="l2 grp">
+            {{ ws_group_head('enr-rb-btn-organization', "wsNav('enrichment', 'organization')", 'Organization', 2) }}
+            <ul>
+              {{ ws_leaf('main-btn-org-access', "wsNav('enrichment', 'organization'); switchOrgSub('org-access')", 'Firewall', 3) }}
+              {% if _tp in ('panw', 'checkpoint') %}{{ ws_leaf('main-btn-org-nat', "wsNav('enrichment', 'organization'); switchOrgSub('org-nat')", 'NAT', 3) }}{% endif %}
+              {% if _tp == 'checkpoint' %}{{ ws_leaf('main-btn-org-tp', "wsNav('enrichment', 'organization'); switchOrgSub('org-tp')", 'Threat Prevention', 3) }}{% endif %}
+            </ul>
+          </li>
+          {% endif %}
+        </ul>
+        {% endif %}
+      </li>
+      {{ ws_leaf('primary-btn-deploy', "wsNav('deploy')", 'Review & Deploy', 1, None, _right_locked, _lock_tgt if _right_locked else '', False, False, _mk.get('primary-btn-deploy')) }}
+      {# the project's log as the last entry (D31): what happened, after the push #}
+      {% if ov_project %}{{ ws_leaf('primary-btn-log', "wsNav('log')", 'Logs', 1, tooltip='Every import, build, push and collect of this project with its record') }}{% endif %}
     </ul>
+    {% endif %}
+    </div>{# end ws-middle #}
     </div>
     <div class="ws-bottom">
-    <button type="button" class="ws-rail-toggle" onclick="wsRail()" title="Collapse or expand the navigation">&#8249; Collapse</button>
+    <button type="button" class="ws-rail-toggle" onclick="wsRail()" title="Collapse or expand the navigation"><span class="mk" aria-hidden="true"><span class="bk">&#8249;</span></span><span class="lbl">Collapse</span></button>
     {# the foot: version chip (About dialog) and Logout, same controls as the header had (user decision 2026-10-04) #}
     <div class="ws-foot">
       <button type="button" id="about-open" title="About Gateshift"
@@ -242,45 +388,64 @@
     </div>
   </aside>
   <script>
-    function wsFold(btn) {
-      var li = btn.closest('li'); if (!li) return;
-      li.classList.toggle('folded');
-      var head = li.querySelector('.ws-item');
-      // Configure's fold is derived from the view you are in, so a click on its
-      // caret is for right now and is not remembered (user request 2026-10-05)
-      if (!head || head.id === 'primary-btn-configuration') return;
-      try { localStorage.setItem('ws-fold:' + head.id, li.classList.contains('folded') ? '1' : '0'); } catch (e) {}
+    // Every group folds unless the view is inside it (D12, D23): the folds are
+    // derived from the active view and the next step, nothing folds by hand,
+    // the heads have no caret since 2026-11-10.
+    // The branch of the recommended next step stays open, so the entry with
+    // the Hint tag is never hidden. The rail mirrors the next step on its button.
+    function wsNavNextOpen() {
+      var nav = document.getElementById('ws-nav'); if (!nav) return;
+      var nx = nav.querySelector('li.ws-next'); var p = nx ? nx.parentElement : null;
+      while (p && p !== nav) { if (p.tagName === 'LI') p.classList.remove('folded'); p = p.parentElement; }
+      // the rail letter of the next step: the top-level entry above it (D26)
+      var rail = ''; var q = nx;
+      while (q && q !== nav) {
+        if (q.tagName === 'LI') { var it = q.querySelector(':scope > .ws-row > .ws-item'); if (it && it.id.indexOf('primary-btn-') === 0) rail = it.id.slice(12); }
+        q = q.parentElement;
+      }
+      nav.querySelectorAll('.ws-rail-btn[data-rail]').forEach(function (r) { r.classList.toggle('next', r.getAttribute('data-rail') === rail); });
+    }
+    // The markers from the progress route (gsProgressRefresh): one class per
+    // entry, its sentence as the tooltip unless the entry is locked.
+    function wsNavMarks(marks) {
+      var nav = document.getElementById('ws-nav'); if (!nav) return;
+      nav.querySelectorAll('li.ws-done, li.ws-next').forEach(function (li) { li.classList.remove('ws-done', 'ws-next'); });
+      Object.keys(marks || {}).forEach(function (id) {
+        var m = marks[id]; if (!m) return;
+        var b = document.getElementById(id); var li = b ? b.closest('li') : null; if (!li) return;
+        if (b.getAttribute('data-locked') !== 'true') b.title = m.title || '';
+        if (m.state === 'done' || m.state === 'next') li.classList.add('ws-' + m.state);
+      });
+      wsNavNextOpen();
+    }
+    // The next step changed after an action: the new entry pulses twice (D15).
+    function wsNavPulse() {
+      var nav = document.getElementById('ws-nav'); var nx = nav ? nav.querySelector('li.ws-next') : null; if (!nx) return;
+      nx.classList.remove('ws-pulse'); void nx.offsetWidth; nx.classList.add('ws-pulse');
+      setTimeout(function () { nx.classList.remove('ws-pulse'); }, 1600);
     }
     function wsRail() {
       var nav = document.getElementById('ws-nav'); if (!nav) return;
       var on = nav.classList.toggle('rail');
-      var t = nav.querySelector('.ws-rail-toggle'); if (t) t.innerHTML = on ? '&#8250;' : '&#8249; Collapse';
+      var k = nav.querySelector('.ws-rail-toggle .bk'); if (k) k.textContent = on ? '\u203A' : '\u2039';   // the chevron turns, the label hides by CSS (D32)
       try { localStorage.setItem('ws-nav-rail', on ? '1' : '0'); } catch (e) {}
     }
-    function wsHints(on) {
-      try { localStorage.setItem('ws-hints', on ? 'on' : 'off'); } catch (e) {}
-      if (typeof _wsHintSync === 'function') { _wsHintSync(); return; }
-      var b = document.getElementById('ws-hint'); if (b) b.classList.toggle('off', !on);
-    }
-    window.wsFold = wsFold; window.wsRail = wsRail; window.wsHints = wsHints;
-    // folds, rail mode and the hint state come back from storage
+    window.wsRail = wsRail;
+    window.wsNavNextOpen = wsNavNextOpen; window.wsNavMarks = wsNavMarks; window.wsNavPulse = wsNavPulse;
+    // rail mode comes back from storage, the folds are derived (D12), the hint box is
+    // always shown (D25, the stale ws-hints key is dropped)
     (function () {
       try {
         var nav = document.getElementById('ws-nav');
         if (nav) {
-          nav.querySelectorAll('li.grp').forEach(function (li) {
-            var head = li.querySelector('.ws-item');
-            // Configure is not remembered: it is open while you work in it and
-            // folded everywhere else (_wsNavSync drives it, user request 2026-10-05)
-            if (!head || head.id === 'primary-btn-configuration') return;
-            if (localStorage.getItem('ws-fold:' + head.id) === '1') li.classList.add('folded');
-          });
-          var _cfg = document.getElementById('primary-btn-configuration');
-          if (_cfg && _cfg.closest('li')) _cfg.closest('li').classList.add('folded');
-          if (localStorage.getItem('ws-nav-rail') === '1') { nav.classList.add('rail'); var t = nav.querySelector('.ws-rail-toggle'); if (t) t.innerHTML = '&#8250;'; }
+          // every group folded (D12): _wsNavSync opens the active branch, the
+          // branch of the next step opens here and after every refresh
+          nav.querySelectorAll('li.grp').forEach(function (li) { li.classList.add('folded'); });
+          try { Object.keys(localStorage).filter(function (k) { return k.indexOf('ws-fold:') === 0; }).forEach(function (k) { localStorage.removeItem(k); }); } catch (e) {}
+          wsNavNextOpen();
+          if (localStorage.getItem('ws-nav-rail') === '1') { nav.classList.add('rail'); var k = nav.querySelector('.ws-rail-toggle .bk'); if (k) k.textContent = '\u203A'; }
         }
-        var b = document.getElementById('ws-hint');
-        if (b && localStorage.getItem('ws-hints') === 'off') b.classList.add('off');
+        try { localStorage.removeItem('ws-hints'); } catch (e) {}
       } catch (e) {}
     })();
   </script>

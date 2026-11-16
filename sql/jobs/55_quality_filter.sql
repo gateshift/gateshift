@@ -1,8 +1,6 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
-USE gateshift;
-
 -- Module: Quality filter
 -- Filters rules from the highest active upstream module.
 -- Source table is determined by db_jobs.py via @quality_filter_src variable.

@@ -51,7 +51,10 @@ def _identity_migration(engine) -> str | None:
 
 
 def main():
-    db_name = "gateshift"
+    # the database the compose stack names (DB_NAME, the webapp reads the same variable);
+    # it was the literal "gateshift" until 2026-11-15, so a stack on another name ran
+    # its pipeline into the wrong schema (product finding 3)
+    db_name = os.getenv("DB_NAME", "gateshift")
     log_pattern = "/logs/*.log"
     schema_dir = "/sql/init"
     jobs_dir = "/sql/jobs"

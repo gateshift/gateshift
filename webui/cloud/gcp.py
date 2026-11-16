@@ -906,6 +906,15 @@ def _parse_network(net: _Net) -> tuple[list[dict], list[dict], list[dict], list[
                       "properties": {"gcp_network": s["network"], "gcp_subnetwork": s["link"],
                                      "gcp_cidrs": s["cidrs"], "gcp_region": s["region"]}})
         members_by_vr.setdefault(s["network"], []).append(s["zone"])
+        # the subnet itself as a route of its VR (2026-11-15): the network behind the
+        # interface, no next hop, what a firewall synthesises from its interface address.
+        # The zone derivation and the routing view take it like a connected route,
+        # the targets re-derive it from the interface address once that is set.
+        for c in s["cidrs"]:
+            n = _cidr(c)
+            if n is not None:
+                routes.append({"prefix": str(n.network_address), "plen": n.prefixlen,
+                               "iface": s["zone"], "next_hop": None, "vr": s["network"]})
     for name in sorted(net.networks):
         if name != "default":
             vrfs.append({"name": name, "interface_members": members_by_vr.get(name, []),

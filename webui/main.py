@@ -31,6 +31,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool   # the live-read handlers (product finding 2, 2026-11-13)
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.exc import IntegrityError
 
@@ -43,6 +44,9 @@ from deploy.base import (DeployDriver, fail_fast_transport, parse_iface_name,
 from deploy import base as _deploy_base   # the on-link rule (CE backlog 1)
 import refmodel  # central reference model/engine (refint refactor); lazy-imports main
 import namemap   # project name map (rename model A) - applied to loaded dicts at read time
+import instancesource   # virtual instances of a firewall as scopes (docs/VIRTUAL_INSTANCES_PLAN.md)
+import hitcounts   # hit counts from the box (docs/HIT_COUNTS_PLAN.md)
+import progress    # the step model of a project (docs/UI_USABILITY_PLAN.md)
 import projview  # the project view: exclusions and the other edit classes (docs/PROJECT_VIEW_DESIGN.md)
 from deploy import integrity as _integrity   # I4: the project view's net on the render
 from deploy import artifact as _artifact     # E4: when the stored build is outdated
@@ -53,6 +57,7 @@ import devicebackup  # device configuration backup / restore - nothing persisted
 import deploy.checkpoint  # noqa: F401 - registers the checkpoint driver
 from zone_schemas import schema_for as zone_schema_for, field_keys as zone_field_keys, coerce_value as zone_coerce_value
 from nat_schemas import schema_for as nat_schema_for, field_keys as nat_field_keys, coerce_value as nat_coerce_value
+from nat_schemas import effective_props as nat_effective_props, override_props_merge as nat_override_props_merge
 import deploy.fortinet  # noqa: F401 - registers the fortinet driver
 import deploy.opnsense  # noqa: F401 - registers the opnsense driver
 import secrets_util  # encrypted-at-rest VPN PSK storage (Fernet)
@@ -118,20 +123,23 @@ def _inject_push_secrets(config: dict, source_id: int, platform: str) -> dict:
     }
 
 
-def _detached_push_secrets(config: dict, source_id: int) -> list[str]:
-    """The tunnels in a push whose pre-shared key this Device holds under
-    ANOTHER tunnel: the __GATESHIFT_PSK_<hash>__ tokens with no stored secret
-    while the Device does have secrets stored. The secrets key on the tunnel's
-    name, so that is a key left behind by a tunnel renamed on the source and
-    re-imported under the new name, and the former behaviour, substituting
-    the placeholder, pushed a tunnel that would never come up and said
-    nothing (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2). A Device with no
-    stored secret at all keeps the placeholder path: the operator never
-    entered one. Returns the names of the tunnels without a key."""
+def _push_secret_gaps(config: dict, source_id: int) -> tuple[list[str], list[str]]:
+    """The pre-shared keys a push lacks (docs/DEVICE_IDENTITY_PLAN.md, one-way
+    door 2): the names of the tunnels in the configuration with no stored key,
+    and the names this Device holds a key under that no tunnel carries any
+    more (orphan keys, left behind by a rename on the source and a re-import
+    under the new name, the secrets key on the tunnel's name). Both empty
+    when the configuration carries no tunnel. The tunnels without a key go
+    out with the placeholder and the push record names them; with an orphan
+    key stored the push is refused, because the renamed tunnel is one of them
+    and which one is not knowable (secrets_util.detached_tokens). Until
+    2026-11-11 every stored key made the tunnels without one a detachment,
+    which refused a push with the keys of 7 of 21 tunnels entered (the 0.9.5
+    rc matrix, cp2cp)."""
     if not isinstance(config, dict) or not config:
-        return []
+        return [], []
     if not secrets_util.psk_tokens(config.values()):
-        return []
+        return [], []
     with get_engine().connect() as conn:
         rows = conn.execute(text(
             "SELECT s.tunnel_name, HEX(v.vpn_hash) FROM fw_vpn_tunnel_secrets s "
@@ -141,9 +149,9 @@ def _detached_push_secrets(config: dict, source_id: int) -> list[str]:
         names = {h.lower(): n for h, n in conn.execute(text(
             "SELECT HEX(vpn_hash), name FROM fw_vpn_tunnels WHERE device_id = :d AND vpn_hash IS NOT NULL"
         ), {"d": source_id}).fetchall()}
-    detached = secrets_util.detached_tokens(
-        config.values(), [h for _n, h in rows if h], has_secrets=bool(rows))
-    return [names.get(h, h) for h in detached]
+    orphans = sorted(n for n, h in rows if not h)
+    unkeyed = secrets_util.unkeyed_tokens(config.values(), [h for _n, h in rows if h])
+    return [names.get(h, h) for h in unkeyed], orphans
 
 
 def _load_push_certs(source_id: int) -> dict:
@@ -238,6 +246,8 @@ async def lifespan(_app):
     _ensure_active_routes_table()
     _ensure_negate_columns()
     _ensure_seq_num_columns()
+    _ensure_box_hits_columns()
+    _ensure_progress_columns()
     _ensure_schedule_columns()
     _ensure_schedule_overrides_table()
     _ensure_disable_overrides_table()
@@ -252,6 +262,7 @@ async def lifespan(_app):
     _ensure_aggregate_device_id_columns()
     _ensure_pipeline_device_id()
     _retire_name_orphans()
+    _migrate_ip_zone_cache_key()         # phase 5 for the zone cache, before phase 7 drops the name (2026-11-11)
     _rebuild_pipeline_keys()
     _backfill_rule_aggregates_if_empty()   # through the senders: after they exist and the keys are on the id
     _drop_host_name_unique()
@@ -271,6 +282,7 @@ async def lifespan(_app):
     _ensure_deploy_jobs_table()
     _ensure_projects_tables()
     _ensure_project_exclusions_table()   # the project view (docs/PROJECT_VIEW_DESIGN.md) - before the register loop below
+    _ensure_project_views_table()        # the step model's tables key on fw_projects: after it exists (2026-11-11)
     _ensure_network_project_columns()    # P3b: additions' project_id, the zone edit table, edit-table indexes
     _ensure_project_scoped_overrides()
     _migrate_endpoint_pairs_schema()
@@ -357,7 +369,9 @@ def _login_url(request: Request) -> str:
 
 
 def _safe_next(nxt: str) -> str:
-    return nxt if (nxt.startswith("/") and not nxt.startswith("//")) else "/projects"
+    """A local path, else the root: the root sends the operator to the page of the
+    tenant's next step (_landing_path, D67)."""
+    return nxt if (nxt.startswith("/") and not nxt.startswith("//")) else "/"
 
 
 def _set_session_cookie(response, token: str, request: Request):
@@ -466,7 +480,7 @@ def setup_submit(request: Request, password: str = Form(""), password2: str = Fo
         _refresh_users_exist()
         return RedirectResponse("/login", status_code=303)
     _refresh_users_exist()
-    resp = RedirectResponse("/projects", status_code=303)
+    resp = RedirectResponse("/", status_code=303)   # the page of the first step (D67)
     _set_session_cookie(resp, auth.make_session(uid), request)
     return resp
 
@@ -759,7 +773,10 @@ def _load_nat_rules(conn, device_id: int | None = None,
     properties) are decoded to Python lists/dicts. Order is by `position`.
     `zone_override_source` says whether the zone slots come from the
     project's override row (project space, never mapped) or the import.
-    `name_map` (model A): imported names come back in project space.
+    `name_map` (model A): imported names come back in project space, the
+    rule's own name included (kind nat_rule). description, disabled and
+    properties are the project's where its override row has them
+    (*_override_source says so), the imported values otherwise.
 
     negate_{source,destination,service} are COALESCE'd against the matching
     JSON slot in fw_nat_rule_overrides.properties so user-toggled values
@@ -767,7 +784,11 @@ def _load_nat_rules(conn, device_id: int | None = None,
     overlay source marker ('manual' / 'auto' / NULL).
     """
     sql = (
-        "SELECT n.id, n.device_id, n.position, n.name, n.nat_type, n.disabled, "
+        "SELECT n.id, n.device_id, n.position, n.name, n.nat_type, "
+        # the project's own description, disabled flag and properties (2026-11-10):
+        # the override row shadows the imported values, a marker says so
+        "COALESCE(novr.disabled, n.disabled) AS disabled, "
+        "CASE WHEN novr.disabled IS NOT NULL THEN novr.source ELSE NULL END AS disabled_override_source, "
         "LOWER(HEX(n.nat_hash)) AS nat_hash, "
         # Route-derive overlay (Auto-derive button): the stored interface-mode
         # zones (port1) win over the raw imported zones (trust) so the Forti
@@ -779,7 +800,9 @@ def _load_nat_rules(conn, device_id: int | None = None,
         "n.interface_name, "
         "n.orig_src, n.orig_dst, n.orig_service, "
         "n.trans_src, n.trans_src_type, n.trans_dst, n.trans_dst_port, "
-        "n.description, n.properties, "
+        "COALESCE(novr.description, n.description) AS description, "
+        "CASE WHEN novr.description IS NOT NULL THEN novr.source ELSE NULL END AS description_override_source, "
+        "n.properties, novr.properties AS override_properties, novr.source AS override_row_source, "
         "COALESCE("
         "  CAST(JSON_UNQUOTE(JSON_EXTRACT(novr.properties, '$.negate_source')) AS UNSIGNED),"
         "  n.negate_source) AS negate_source, "
@@ -799,6 +822,8 @@ def _load_nat_rules(conn, device_id: int | None = None,
     )
     params: dict = _overlay_project_params(project_id)
     if device_id is not None:
+        # a Management Center policy scope carries its NAT on its device scope (D8)
+        device_id = _nat_source_device_id(conn, device_id)
         sql += " WHERE n.device_id = :did"
         params["did"] = device_id
     # the project view (D5): a NAT rule another project added is not this
@@ -833,6 +858,13 @@ def _load_nat_rules(conn, device_id: int | None = None,
                 d["properties"] = {}
         elif p is None:
             d["properties"] = {}
+        # the project's property override (2026-11-10): the imported properties
+        # overlaid by what this project set under Profiles & Settings > NAT
+        ovp = _decode_nat_props(d.pop("override_properties", None))
+        rowsrc = d.pop("override_row_source", None)
+        eff = nat_effective_props(d["properties"], ovp)
+        d["properties_override_source"] = rowsrc if eff != d["properties"] else None
+        d["properties"] = eff
         out.append(d)
     if _pv_project(project_id) and device_id:
         # the project view: NAT rules deleted in this project leave, as do
@@ -1097,6 +1129,22 @@ def _load_vpn_tunnels(conn, device_id: int | None = None,
     return out
 
 
+def _vpn_orphan_key_names(conn, device_id: int) -> list[str]:
+    """The names this Device holds a pre-shared key under that no tunnel of
+    it carries any more (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2): left
+    behind by a rename on the source and a re-import under the new name. The
+    VPN view lists them for discarding, because a network push with a tunnel
+    without a key is refused while one exists (_push_secret_gaps)."""
+    try:
+        return sorted(r[0] for r in conn.execute(text(
+            "SELECT s.tunnel_name FROM fw_vpn_tunnel_secrets s "
+            "LEFT JOIN fw_vpn_tunnels v ON v.device_id = s.device_id AND v.name = s.tunnel_name "
+            "WHERE s.device_id = :d AND v.name IS NULL"
+        ), {"d": device_id}).fetchall())
+    except Exception:
+        return []
+
+
 def _filter_pushable_interfaces(
     interfaces: list[dict],
 ) -> tuple[list[dict], list[str]]:
@@ -1224,7 +1272,12 @@ def _validate_deploy_source(
     # (deep-fill zone/ip) exactly as the deploy render does. Without this, an interface whose IP lives
     # in a member template while its zone binds in the stack (e.g. ae2.x) reads as "zoned but no IP"
     # on the stack-own layer and falsely blocks the push, even though the rendered config has the IP.
-    _lids = [l[0] for l in _stack_layers(conn, source_id)] or [source_id]
+    # The network strand of a policy scope lives in its bound network scope (a Panorama
+    # device group's stack, a Management Center access policy's device, D8/D9 of
+    # docs/FMC_SOURCE_PLAN.md): validate what the build renders. A firewall or a network
+    # scope resolves to itself, byte-identical to before.
+    _net_sid = _pano_net_device_id(conn, source_id) or source_id
+    _lids = [l[0] for l in _stack_layers(conn, _net_sid)] or [_net_sid]
     _view = projview.load(conn, project_id)
     # The effective interface set through the one loader (the project view:
     # exclusions, other projects' additions, field edits, VR / zone fallbacks).
@@ -1895,7 +1948,7 @@ def _ensure_scopes_table(conn):
     # the scope Device on instead of deleting and re-inserting it
     # (docs/DEVICE_IDENTITY_PLAN.md, phase 3). NULL = never learned, a row
     # from before the column: the import matches it by name once and writes
-    # the id (enterprise.scopeidentity).
+    # the id (scopeidentity).
     conn.execute(text(
         "ALTER TABLE fw_scopes ADD COLUMN IF NOT EXISTS vendor_id VARCHAR(255) NULL "
         "AFTER scope_name"))
@@ -2848,12 +2901,16 @@ def _migrate_flows_to_senders():
                     last_seen = GREATEST(COALESCE(last_seen, VALUES(last_seen)), VALUES(last_seen))"""))
             # import senders: one per Device whose name resolves, named by the
             # Device's host_name; an import row under a name no Device answers
-            # to keeps its name and points nowhere (phase 5 clears those)
+            # to keeps its name and points nowhere (phase 5 clears those).
+            # The sender's serial is the Device's row id: two Devices can carry
+            # one host name (a gateway registered again after a reinstall), and
+            # the unique key must tell their imports apart.
             conn.execute(text("""
                 INSERT INTO fw_log_senders
                     (source_type, header_host, source_addr, vendor_serial, vendor, device_id,
                      first_seen, last_seen, line_count)
-                SELECT 'api_import', COALESCE(d.host_name, f.device_host, ''), '', '',
+                SELECT 'api_import', COALESCE(d.host_name, f.device_host, ''), '',
+                       COALESCE(CAST(d.id AS CHAR), ''),
                        COALESCE(MIN(d.platform), MIN(f.vendor), ''), d.id,
                        MIN(f.event_ts), MAX(f.event_ts), COUNT(*)
                 FROM fw_flows f
@@ -3086,6 +3143,59 @@ _PIPELINE_KEY_SPECS = (
                          "src_ip", "dst_ip", "dst_port", "nat_src_ip", "nat_dst_ip",
                          "nat_dst_port")),
 )
+
+
+def _migrate_ip_zone_cache_key():
+    """Phase 5 for fw_ip_zone_cache (docs/DEVICE_IDENTITY_PLAN.md): the cache
+    keys on the Device's id. The key had moved from (ip) to (ip, device_host)
+    before; here the id column is added, the rows are mapped by name where
+    exactly one Device answers to it, the rest are dropped (the cache is
+    derived, _rebuild_ip_zone_cache fills it on every generate), and ONE
+    ALTER rebuilds the key. Decided from the schema, not by catching the
+    failure: a duplicate key (ERROR 1062) is the collision detector. Sits
+    BEFORE _migrate_drop_device_host in the lifespan: phase 7 refuses a
+    primary key that still carries the name, and until 2026-11-11 this
+    rebuild lived in _ensure_interface_tables, which runs after it, so a
+    0.9.2 or 0.9.3 database jumping to this release in one start never came
+    up (found by the upgrade smoke of the 0.9.5 release prepare)."""
+    eng = get_engine()
+    with eng.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS fw_ip_zone_cache (
+                ip          VARCHAR(43)  NOT NULL,
+                device_id   INT          NOT NULL,
+                zone_name   VARCHAR(128) NOT NULL,
+                PRIMARY KEY (ip, device_id),
+                KEY idx_device_id (device_id),
+                FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """))
+    with eng.connect() as conn:
+        if _has_index(conn, "fw_ip_zone_cache", "PRIMARY", "device_id"):
+            return
+    with eng.begin() as conn:
+        conn.execute(text("ALTER TABLE fw_ip_zone_cache ADD COLUMN IF NOT EXISTS device_id INT NULL"))
+    with eng.begin() as conn:
+        if _has_column(conn, "fw_ip_zone_cache", "device_host"):
+            conn.execute(text("""
+                UPDATE fw_ip_zone_cache z
+                JOIN (SELECT n.name, MIN(n.id) AS id FROM (
+                          SELECT host_name AS name, id FROM fw_devices
+                          UNION ALL
+                          SELECT display_name, id FROM fw_devices
+                          WHERE display_name IS NOT NULL AND display_name <> ''
+                      ) n GROUP BY n.name HAVING COUNT(DISTINCT n.id) = 1) m
+                  ON m.name = z.device_host
+                SET z.device_id = m.id
+                WHERE z.device_id IS NULL"""))
+        _dropped = conn.execute(text(
+            "DELETE FROM fw_ip_zone_cache WHERE device_id IS NULL")).rowcount
+    with eng.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE fw_ip_zone_cache MODIFY device_id INT NOT NULL, "
+            "DROP PRIMARY KEY, ADD PRIMARY KEY (ip, device_id)"))
+    print(f"[pipeline] fw_ip_zone_cache: primary key rebuilt on the Device's id, "
+          f"{_dropped} row(s) under a name no Device answers to dropped", flush=True)
 
 
 def _rebuild_pipeline_keys():
@@ -3369,6 +3479,77 @@ def _ensure_seq_num_columns():
         "fw_rules_endpoint_pairs",
     )
     _safe_add_columns(tables, {"seq_num": "INT NULL"})
+
+
+def _ensure_box_hits_columns():
+    """The box's own rule counters (docs/HIT_COUNTS_PLAN.md, D2): five NULLable
+    columns on the imported rules and on the NAT rules, beside the log-derived
+    usage and never mixed with it. NULL = not read, 0 = read as zero. A fresh
+    install carries them in the base DDL of both tables; this adds them to an
+    existing database, one ALTER per table in its own transaction."""
+    _safe_add_columns(("fw_imported_rules", "fw_nat_rules"), {
+        "box_hits": "BIGINT UNSIGNED NULL",
+        "box_first_hit": "DATETIME NULL",
+        "box_last_hit": "DATETIME NULL",
+        "box_hits_since": "DATETIME NULL",
+        "box_hits_read_at": "DATETIME NULL",
+    })
+
+
+def _ensure_project_views_table():
+    """The sections of a project the operator opened (docs/UI_USABILITY_PLAN.md,
+    D16): one row per project and view with the latest visit, the step model
+    counts a visit after the import. Created here for a fresh and for an
+    existing database alike, the project's deletion cascades. Runs after
+    _ensure_projects_tables: the keys reference fw_projects, and until
+    2026-11-11 the call sat before it, so a 0.9.2 database jumping to this
+    release got errno 150 and no tables (found by the upgrade smoke of the
+    0.9.5 release prepare). A failing CREATE fails the start, nothing is
+    swallowed."""
+    with get_engine().begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS fw_project_views (
+              project_id INT         NOT NULL,
+              view       VARCHAR(32) NOT NULL,
+              seen_at    DATETIME    NOT NULL,
+              PRIMARY KEY (project_id, view),
+              CONSTRAINT fk_project_views_project FOREIGN KEY (project_id)
+                REFERENCES fw_projects(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci
+        """))
+    # the operator's skips (D20): one row per project and step, cascade alike
+    with get_engine().begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS fw_project_skips (
+              project_id INT         NOT NULL,
+              step       VARCHAR(64) NOT NULL,
+              skipped_at DATETIME    NOT NULL,
+              PRIMARY KEY (project_id, step),
+              CONSTRAINT fk_project_skips_project FOREIGN KEY (project_id)
+                REFERENCES fw_projects(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci
+        """))
+
+
+def _ensure_progress_columns():
+    """The step model's evidence (docs/UI_USABILITY_PLAN.md, D1): when the
+    Review of a build was seen, which build each strand was pushed from, and
+    when the operator marked the project verified. NULL = never. A fresh
+    install carries the columns in the base DDL of both tables; this adds
+    them to an existing database, one ALTER per column in its own
+    transaction."""
+    _safe_add_columns(("fw_target_configs",), {
+        "reviewed_job_id": "CHAR(32) NULL",
+        "reviewed_at": "DATETIME NULL",
+        "pushed_policy_job_id": "CHAR(32) NULL",
+        "pushed_policy_at": "DATETIME NULL",
+        "pushed_network_job_id": "CHAR(32) NULL",
+        "pushed_network_at": "DATETIME NULL",
+    })
+    _safe_add_columns(("fw_projects",), {
+        "verified_at": "DATETIME NULL",
+        "verified_job_id": "CHAR(32) NULL",
+    })
 
 
 def _ensure_tags_tables():
@@ -4732,8 +4913,8 @@ def _migrate_network_edits_to_projects():
 # A rename of an interface, zone, VRF, object or service is a row of the
 # project's name map (fw_project_name_map; namemap.py, _name_map_set): the
 # imported data keeps its source names and is never rewritten, every reader
-# applies the map. The one mutating rename left is the object MERGE
-# (object_merge -> refmodel.cascade_rename), a device-level cleanup. The
+# applies the map. The object MERGE (object_merge) maps the losing object
+# to the kept one in the same map and excludes it, project-own as well. The
 # migration projects_names_v1 (_migrate_names_to_projects) moved the earlier
 # in-place renames (fw_interface_overrides.interface_name, fw_name_overrides)
 # into the maps and dropped both.
@@ -5117,6 +5298,8 @@ _PROJECTS_DDL = (
           created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
                                          ON UPDATE CURRENT_TIMESTAMP,
+          verified_at     DATETIME     NULL,
+          verified_job_id CHAR(32)     NULL,
           UNIQUE KEY uq_project_name (tenant_id, name),
           KEY ix_project_source (source_ref_id),
           KEY ix_project_target (target_ref_id),
@@ -5161,7 +5344,7 @@ _PROJECTS_DDL = (
     ("fw_project_name_map", """
         CREATE TABLE IF NOT EXISTS fw_project_name_map (
           project_id   INT          NOT NULL,
-          kind         ENUM('interface','zone','vrf','object','service') NOT NULL,
+          kind         ENUM('interface','zone','vrf','object','service','nat_rule') NOT NULL,
           source_name  VARCHAR(255) NOT NULL,
           target_name  VARCHAR(255) NOT NULL,
           updated_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -5170,6 +5353,12 @@ _PROJECTS_DDL = (
           KEY ix_name_map_target (project_id, kind, target_name),
           FOREIGN KEY (project_id) REFERENCES fw_projects(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_unicode_ci
+    """),
+    # the NAT rule's rename joined the map on 2026-11-10 (docs/NAT_PROJECT_OVERLAY_PLAN.md, D1):
+    # the live table's enum grows, MODIFY is idempotent
+    ("fw_project_name_map.kind nat_rule", """
+        ALTER TABLE fw_project_name_map
+          MODIFY kind ENUM('interface','zone','vrf','object','service','nat_rule') NOT NULL
     """),
 )
 
@@ -5222,8 +5411,9 @@ def _project_for_pair(conn, source_id: int, target_id: int, create: bool = False
 def _create_project(conn, source_id: int, target_id: int, name: str | None = None,
                     labels: tuple[str, str] | None = None) -> int | None:
     """A new project for the pair - always a new one, a pair may carry
-    several - in the source's tenant, named `name` or '<source> -> <target>'
-    (suffixed with the ids on a clash). It comes into being complete (P1.3):
+    several - in the source's tenant, named `name` or '<source> to <target>
+    migration' ('<Device> optimization' for the same Device on both ends,
+    operator 2026-11-15), suffixed with the ids on a clash. It comes into being complete (P1.3):
     decisions that predate projects for this pair's devices move in, and
     the source's own settings are lifted into its auto rows. None when a
     device is unknown."""
@@ -5235,7 +5425,8 @@ def _create_project(conn, source_id: int, target_id: int, name: str | None = Non
             return None
         labels = (names[source_id], names[target_id])
     tenant = _device_tenant(conn, source_id)
-    base = (name or f"{labels[0]} -> {labels[1]}").strip()[:120]
+    default = f"{labels[0]} optimization" if source_id == target_id else f"{labels[0]} to {labels[1]} migration"
+    base = (name or default).strip()[:120]
     for name in (base, f"{base} #{source_id}/{target_id}"):
         try:
             res = conn.execute(text(
@@ -5440,7 +5631,7 @@ def _ctx_project_required(conn, request: Request | None) -> int:
     pid = _ctx_project(conn, request, create=True)
     if pid is None:
         raise HTTPException(status_code=400,
-                            detail="no project context: select a source and a target first")
+                            detail="no project context: open a project first")
     _mark_curated(conn, pid)
     return pid
 
@@ -5500,12 +5691,59 @@ def _ui_tenant(request: Request | None, conn) -> int:
     return tid
 
 
-def _add_done_url(form, device_id: int | None, default: str = "/projects") -> str:
+def _landing_next(n_devices: int, has_source_capable: bool, has_target_capable: bool,
+                  projects_exist: bool) -> dict | None:
+    """The tenant's next step on the landing (D35, D67, D73): the sentence of the
+    next-step box and the page it lives on, which the login, the setup and the
+    root redirect enter and whose Manage entry carries the mark. The chain counts
+    Devices, because most operators migrate: the source, then the target (an
+    optimization needs only the one), then the first project, then nothing. A
+    source is a Device whose role allows it, a target one whose role, platform
+    and API key allow a push (the project wizard's own rules)."""
+    if not n_devices:
+        return {"text": "Register your first Device.", "href": "/devices"}
+    if not has_source_capable:
+        return {"text": "Give one Device the source role.", "href": "/devices"}
+    if not has_target_capable:
+        return {"text": "Register the target Device.", "href": "/devices"}
+    if projects_exist:
+        return None
+    if n_devices < 2:
+        return {"text": "Register a second Device for a migration project, or create an optimization project.",
+                "href": "/devices"}
+    return {"text": "Create your first migration or optimization project.", "href": "/projects"}
+
+
+def _landing_path(request: Request | None) -> str:
+    """Where the operator enters: the page of the tenant's next step, /projects
+    once the tenant has what a project needs (D67, D73). The flags mirror
+    _inventory_rows and the project wizard: a Device's role makes a source, its
+    role, platform and API key make a target."""
+    try:
+        with get_engine().connect() as conn:
+            tid = _ui_tenant(request, conn)
+            rows = conn.execute(text(
+                "SELECT role, platform, (api_key IS NOT NULL AND api_key != '') AS has_api "
+                "FROM fw_devices WHERE tenant_id = :t AND COALESCE(device_kind, '') <> 'scope'"),
+                {"t": tid}).fetchall()
+            has_project = conn.execute(text(
+                "SELECT 1 FROM fw_projects WHERE tenant_id = :t LIMIT 1"), {"t": tid}).fetchone() is not None
+    except Exception:
+        return "/projects"
+    offered = _target_platforms()
+    src = any((r[0] or "both") in ("source", "both") for r in rows)
+    tgt = any((r[0] or "both") in ("target", "both") and r[1] in offered and r[2] for r in rows)
+    nxt = _landing_next(len(rows), src, tgt, has_project)
+    return nxt["href"] if nxt else "/projects"
+
+
+def _add_done_url(form, device_id: int | None, default: str = "/devices") -> str:
     """Where an add flow returns to. The add dialog is shared: opened from
     the project wizard it carries `next` (a local path), and the wizard
     wants the new row back - appended as `picked=<id>` so the pane the add
     came from can select it (docs/PROJECTS_UI_DESIGN.md, D8). Without
-    `next` (the inventory page) the flow lands on /devices as before."""
+    `next` (the inventory page) the flow lands on /devices, where the row now
+    sits (D30, the default said /projects until D70)."""
     try:
         nxt = str((form.get("next") if form is not None else "") or "").strip()
     except Exception:
@@ -5561,6 +5799,40 @@ def _device_tenant(conn, device_id: int) -> int:
         return tid
     except Exception:
         return 1
+
+
+def _move_device_tenant(conn, device_id: int, tenant_id: int) -> tuple[bool, str | None]:
+    """A Device no project binds may move to another tenant (D66, 2026-11-13):
+    the row's tenant_id and its instance scopes' follow. (moved, error): a bound
+    Device, a scope, an unknown tenant and a host name the other tenant already
+    carries are refused with the sentence the form shows."""
+    row = conn.execute(text(
+        "SELECT tenant_id, host_name, COALESCE(device_kind, '') FROM fw_devices WHERE id = :d"),
+        {"d": device_id}).fetchone()
+    if not row:
+        return False, "Device not found"
+    cur, host, kind = int(row[0] or 1), row[1], row[2]
+    if tenant_id == cur:
+        return False, None
+    if kind == "scope":
+        return False, "A scope follows its manager's tenant"
+    if not conn.execute(text("SELECT 1 FROM fw_tenants WHERE id = :t"), {"t": tenant_id}).fetchone():
+        return False, "Unknown tenant"
+    bound = int(conn.execute(text(
+        "SELECT COUNT(*) FROM fw_projects p WHERE p.source_ref_id = :d OR p.target_ref_id = :d "
+        "OR p.source_ref_id IN (SELECT scope_device_id FROM fw_scopes WHERE manager_device_id = :d) "
+        "OR p.target_ref_id IN (SELECT scope_device_id FROM fw_scopes WHERE manager_device_id = :d)"),
+        {"d": device_id}).scalar() or 0)
+    if bound:
+        return False, f"The Device is bound by {bound} project(s), it stays in its tenant"
+    if conn.execute(text("SELECT 1 FROM fw_devices WHERE host_name = :hn AND tenant_id = :tn AND id <> :d"),
+                    {"hn": host, "tn": tenant_id, "d": device_id}).fetchone():
+        return False, f"A Device named {host} exists in that tenant"
+    conn.execute(text("UPDATE fw_devices SET tenant_id = :tn WHERE id = :d"), {"tn": tenant_id, "d": device_id})
+    conn.execute(text(
+        "UPDATE fw_devices d JOIN fw_scopes sc ON sc.scope_device_id = d.id "
+        "SET d.tenant_id = :tn WHERE sc.manager_device_id = :d"), {"tn": tenant_id, "d": device_id})
+    return True, None
 
 
 def _tenants(conn) -> list[dict]:
@@ -5753,7 +6025,7 @@ def _ctx_project_for_rename(conn, request: Request):
     pid = _ctx_project(conn, request)
     if not pid:
         return None, JSONResponse(
-            {"error": "A rename belongs to a project: pick a target first."},
+            {"error": "A rename belongs to a project: open a project first."},
             status_code=400)
     return pid, None
 
@@ -5769,6 +6041,8 @@ def _source_names_of_kind(conn, device_id: int, kind: str) -> set[str]:
         sql = ["SELECT name FROM fw_zones WHERE device_id = :d"]
     elif kind == "vrf":
         sql = ["SELECT name FROM fw_vrfs WHERE device_id = :d"]
+    elif kind == "nat_rule":
+        sql = ["SELECT name FROM fw_nat_rules WHERE device_id = :d"]
     else:
         sql = ["SELECT name FROM fw_address_objects WHERE device_id = :d",
                "SELECT name FROM fw_service_objects WHERE device_id = :d",
@@ -6235,25 +6509,66 @@ def _project_candidates(conn, tenant_id: int) -> tuple[list[dict], list[dict]]:
     can be its target (the rules page's target rule: target role, API key,
     platform on offer; managers as egress targets)."""
     devs = [dict(d) for d in conn.execute(text(
-        "SELECT id, host_name, display_name, platform, role, device_kind, "
+        "SELECT id, host_name, display_name, platform, role, device_kind, config, "
         "       (api_key IS NOT NULL AND api_key != '') AS has_api "
         "FROM fw_devices WHERE tenant_id = :tn AND COALESCE(device_kind, '') <> 'scope' "
         "ORDER BY display_name, host_name"), {"tn": tenant_id}).mappings().all()]
     offered = _target_platforms()
+    # A box that runs several instances is their container: the instances are offered,
+    # the box is not (docs/VIRTUAL_INSTANCES_PLAN.md, D7).
+    devs = [d for d in devs if not instancesource.has_instances(d.get("config"))]
     for d in devs:
         d["name"] = d["display_name"] or d["host_name"]
     sources = [d for d in devs if (d["role"] or "both") in ("source", "both")
                and (d["device_kind"] or "") != "manager-source"]
+    # A registered manager's scopes as sources (docs/FMC_SOURCE_PLAN.md,
+    # D16): the policy and rulebase scopes that carry rules, labelled by
+    # their manager. A scope's tenant is its manager's (_device_tenant).
+    for r in conn.execute(text(
+            "SELECT s.scope_device_id AS id, d.host_name, d.display_name, d.platform, s.scope_name, "
+            "       COALESCE(m.display_name, m.host_name) AS manager_name "
+            "FROM fw_scopes s JOIN fw_devices d ON d.id = s.scope_device_id "
+            "JOIN fw_devices m ON m.id = s.manager_device_id "
+            "WHERE m.tenant_id = :tn AND s.scope_role IN ('policy', 'rulebase') "
+            "  AND EXISTS (SELECT 1 FROM fw_imported_rules r WHERE r.device_id = s.scope_device_id) "
+            "ORDER BY m.id, s.position, s.id"), {"tn": tenant_id}).mappings():
+        sources.append({"id": int(r["id"]), "host_name": r["host_name"], "display_name": r["display_name"],
+                        "platform": r["platform"], "role": "source", "device_kind": "scope", "has_api": 0,
+                        "name": f"{r['manager_name']} / {r['scope_name']}"})
     targets = [d for d in devs if d["has_api"] and (
         ((d["role"] or "both") in ("target", "both") and d["platform"] in offered
          and (d["device_kind"] or "") != "manager-source")
         or ((d["device_kind"] or "") == "manager-source" and d["platform"] in ("panw", "checkpoint")))]
+    # The instances of a box (docs/VIRTUAL_INSTANCES_PLAN.md, D7): sources when they carry
+    # rules, targets when the box has an API key and the platform is on offer. Their rows
+    # carry the box's credentials and role (D3), labelled by the box.
+    for r in conn.execute(text(
+            "SELECT s.scope_device_id AS id, d.host_name, d.display_name, d.platform, d.role, s.scope_name, "
+            "       (d.api_key IS NOT NULL AND d.api_key != '') AS has_api, "
+            "       COALESCE(m.display_name, m.host_name) AS box_name, "
+            "       EXISTS (SELECT 1 FROM fw_imported_rules r WHERE r.device_id = s.scope_device_id) AS has_rules "
+            "FROM fw_scopes s JOIN fw_devices d ON d.id = s.scope_device_id "
+            "JOIN fw_devices m ON m.id = s.manager_device_id "
+            "WHERE m.tenant_id = :tn AND s.scope_role = 'instance' "
+            "ORDER BY m.id, s.position, s.id"), {"tn": tenant_id}).mappings():
+        entry = {"id": int(r["id"]), "host_name": r["host_name"], "display_name": r["display_name"],
+                 "platform": r["platform"], "role": r["role"] or "both", "device_kind": "scope",
+                 "has_api": int(r["has_api"] or 0), "name": f"{r['box_name']} / {r['scope_name']}"}
+        if r["has_rules"] and (r["role"] or "both") in ("source", "both"):
+            sources.append(dict(entry, role="source"))
+        # a Check Point virtual system is a target of its policy strand like every
+        # other instance (docs/VSX_TARGET_PLAN.md, D6): the driver declares the strand
+        # it lacks, the box with the API key makes the instance a target (D7)
+        if r["has_api"] and (r["role"] or "both") in ("target", "both") and r["platform"] in offered:
+            targets.append(dict(entry, role="target"))
     return sources, targets
 
 
-@app.get("/projects", response_class=HTMLResponse)
-def projects_page(request: Request, form_error: str = "", discovered: str = "",
-                  no_data: str = "", discover_empty: str = "", uploaded: str = ""):
+def _landing_page(request: Request, view: str, form_error: str = "", discovered: str = "",
+                  no_data: str = "", uploaded: str = ""):
+    """The landing template in one of its two views (docs/UI_USABILITY_PLAN.md, D30):
+    "projects" lists the tenant's projects, "devices" its Devices (the inventory).
+    Both carry the tenant row, the filter and the picked project's tree."""
     with get_engine().connect() as conn:
         _ensure_devices_table(conn)
         tenant_id = _ui_tenant(request, conn)
@@ -6286,6 +6601,7 @@ def projects_page(request: Request, form_error: str = "", discovered: str = "",
         pair_projects.setdefault(f"{p['source_ref_id']}:{p['target_ref_id']}", []).append(
             {"id": p["id"], "name": p["name"]})
     return templates.TemplateResponse(request, "projects.html", {
+        "page_view": view,
         "projects":  projects,
         "tenants":   tenants,
         "tenant_id": tenant_id,
@@ -6295,17 +6611,16 @@ def projects_page(request: Request, form_error: str = "", discovered: str = "",
         "devices":            devices,
         "has_logs":           has_logs,
         "has_source_capable": has_source_capable,
+        "landing_next":       _landing_next(len(devices), has_source_capable, has_target_capable, bool(projects)),   # D67, D73
         "has_target_capable": has_target_capable,
         "form_error":         form_error,
         "discovered":         discovered,
         "uploaded":           uploaded,
         "no_data":            no_data,
-        "discover_empty":     discover_empty if discover_empty in ("nolog", "nodev") else "",
         # The log senders not attributed to a Device: the candidate list of
-        # the add dialog's "from the log stream" route and the counter in
-        # the device column (docs/DEVICE_IDENTITY_PLAN.md, phase 4).
+        # the add dialog's "from the log stream" route (docs/DEVICE_IDENTITY_PLAN.md,
+        # phase 4). The Devices page itself shows no count of them since D37.
         "log_senders":        log_senders,
-        "unattributed_senders": len(log_senders),
         "scanned":            request.query_params.get("scanned", ""),
         "scan_unattributed":  request.query_params.get("unattributed", ""),
         # The shared add-device modal (_add_device_modal.html) needs the
@@ -6602,8 +6917,23 @@ def _ov_device_import(conn, device_id: int) -> dict:
             kind, title = "logs", "Read this sender's traffic logs"
     else:
         kind, title = "logs", "Read this sender's traffic logs"
+    # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3): the refresh is offered
+    # where a reader exists and the row has credentials, its time is the latest
+    # read over the box and its instances
+    _hits_ids = [int(row["id"])]
+    try:
+        _hits_ids += [int(i["id"]) for i in instancesource.instance_rows(conn, int(row["id"]))]
+    except Exception:
+        pass
+    hits_kind = ("form" if (kind == "form" and row["device_kind"] != "manager-source"
+                            and platform in HITS_REFRESH_PLATFORMS and has_api) else None)
+    try:
+        hits_ts = hitcounts.last_read_at(conn, _hits_ids)
+    except Exception:
+        hits_ts = None
     return {"id": int(row["id"]), "host": host, "kind": kind, "title": title, "busy": busy,
-            "imported_ts": _device_last_import_ts(conn, device_id, platform, has_api)}
+            "imported_ts": _device_last_import_ts(conn, device_id, platform, has_api),
+            "hits_kind": hits_kind, "hits_ts": hits_ts}
 
 
 # ── Review tab (R1): severity and the kind vocabulary of the generate report ──
@@ -6625,7 +6955,42 @@ BLOCKING_VALIDATION_KINDS = frozenset({
     # carry yet (deploy.base.IPV6_DENY_LOSS, docs/IPV6_PLAN.md D6): the
     # migrated rule would let through what the source denied
     "ipv6_deny_loss",
+    # an allow rule whose application-default service the target cannot
+    # resolve goes out matching every service (deploy.base.APPDEF_WIDENED,
+    # docs/APPDEF_WIDENING_PLAN.md): wider than the source, so the operator
+    # sets the rule's service mode to any or excludes the rule
+    "appdef_widened",
 })
+
+# Which push a blocking kind holds back (docs/APPDEF_WIDENING_PLAN.md, D4).
+# The network strand carries no rule, so a rule-level kind must not stop it,
+# and an interface-level kind must not stop a policy push. Every blocking
+# kind is listed, none falls through to a default: a kind added to the
+# register without a strand here is a startup error, not a silent pass.
+VALIDATION_KIND_STRAND: dict[str, frozenset] = {
+    "excluded_leak":         frozenset({"policy", "network"}),
+    "no_interfaces":         frozenset({"network"}),
+    "bond_unsupported":      frozenset({"network"}),
+    "vlan_no_parent":        frozenset({"network"}),
+    "vlan_no_tag":           frozenset({"network"}),
+    "vlan_orphan_parent":    frozenset({"network"}),
+    "cp_multi_vr":           frozenset({"network"}),
+    "vr_orphan":             frozenset({"network"}),
+    "forti_loopback_in_zone": frozenset({"network"}),
+    "reserved_target_iface": frozenset({"network"}),
+    "cp_iface_unmatched":    frozenset({"network"}),
+    "unresolved_reference":  frozenset({"policy"}),
+    "ipv6_deny_loss":        frozenset({"policy"}),
+    "appdef_widened":        frozenset({"policy"}),
+}
+_unmapped = BLOCKING_VALIDATION_KINDS - set(VALIDATION_KIND_STRAND)
+if _unmapped:
+    raise RuntimeError(f"blocking validation kinds without a strand: {sorted(_unmapped)}")
+
+
+def blocking_kinds_for(strand: str) -> frozenset:
+    """The blocking kinds that hold back one push strand."""
+    return frozenset(k for k, s in VALIDATION_KIND_STRAND.items() if strand in s)
 
 # Push options: the push dialog's opt-ins that reach beyond the estate
 # (docs/PUSH_OPTIONS_PLAN.md, D4). Each is a boolean the operator sets per
@@ -6699,6 +7064,8 @@ _REVIEW_KIND_NOTES = {
 # DroppedField.field -> kind, for fields that mean "this item is not pushed".
 # What the importers drop, in operator words (import results page + Review findings).
 _IMPORT_DROP_LABELS = {
+    # hit counts from the box (docs/HIT_COUNTS_PLAN.md, D8): the source's counters were not read, the sample is the reason
+    'hit_counts': 'Device hit counts not read',
     'user_identity': 'User-ID / source-user',
     'schedule': 'Schedule',
     'security_profile_group': 'Security profile group',
@@ -6714,7 +7081,7 @@ _IMPORT_DROP_LABELS = {
     'l4_envelope': 'FortiOS policy-based mode: layer 3/4 firewall policies are the envelope, not rules (a narrower one narrows the security policies it covers)',
     'app_category': 'FortiOS application category on the policy, not translated',
     'application_unknown_id': 'FortiOS application id missing from the catalog',
-    'dnat_post_nat_dst': 'FortiOS central NAT: the destination is a VIP mapped address (matched after translation); targets matching before translation need the external address',
+    'dnat_post_nat_dst': 'FortiOS central NAT: the destination is a VIP mapped address (matched after translation). Targets matching before translation need the external address',
     # IPv6 (docs/IPV6_PLAN.md, phase 4)
     'ipv6_scope': 'FortiOS names a dual-stack object on one address family only, the model references the whole object (the target matches both families)',
     'unbound_acl': 'ASA: ACL not bound (no access-group in)',
@@ -7017,14 +7384,268 @@ def _nav_project_ctx(conn, project: dict) -> dict:
             "GROUP BY obj_type"), {"d": src_id}).fetchall():
         totals[r[0]] = int(r[1])
     tp = project.get("target_platform") or ""
+    try:
+        _prog = _project_progress(conn, project)   # the markers of the landing's tree (D2)
+    except Exception as e:
+        logging.warning("project %s: step model for the landing failed: %s", project.get("id"), e)
+        _prog = None
     return {
         "ov_src_counters":    _ov_source_counters(conn, src_id, project.get("source_platform") or "",
                                                   project.get("source_host") or ""),
         "object_totals":      totals,
         "selected_target":    {"id": project["target_ref_id"], "platform": tp},
         "target_zone_native": tp in _ZONE_NATIVE_PLATFORMS,
-        "ruleset_locked":     not _has_data_for_device(conn, project.get("source_host") or ""),
+        "ruleset_locked":     not _has_data_for_device(conn, src_id),
+        "ov_progress":        _prog,
     }
+
+
+def _target_iface_names(conn, target_id: int) -> list[str] | None:
+    """The interface names of the target's last fetch (fw_target_discover,
+    kind interfaces), None when never fetched."""
+    row = conn.execute(text(
+        "SELECT payload FROM fw_target_discover WHERE device_id = :d AND kind = 'interfaces'"),
+        {"d": target_id}).fetchone()
+    if not row or not row[0]:
+        return None
+    payload = row[0]
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError):
+            return None
+    return sorted({e.get("name") for e in (payload if isinstance(payload, list) else [])
+                   if isinstance(e, dict) and e.get("name")})
+
+
+def _project_iface_rows(conn, project: dict) -> list[dict]:
+    """The project's interfaces as the Network tab reads them (the one loader
+    through the project view), for the step model outside the rules page."""
+    src_id = int(project["source_ref_id"])
+    net_did = _pano_net_device_id(conn, src_id) or src_id
+    layers = _stack_layers(conn, net_did)
+    view = projview.load(conn, _pv_project(project["id"]))
+    return _load_interfaces(conn, layers, net_did, view=view, zone_sentinel_none=True)
+
+
+def _target_fetch_error(conn, target_id: int | None) -> dict | None:
+    """The target's newest failed read of a network kind (interfaces, zones, vrfs,
+    routes): {"at": datetime, "text": sentence} when the latest attempt of one of them
+    failed, else None. Product finding 9 (2026-11-16): a project whose target refused
+    every fetch showed 0 blockers and nothing named the refusal. The kind of a discover
+    job is the head of its event line ("interfaces: ...")."""
+    if not target_id:
+        return None
+    try:
+        rows = conn.execute(text(
+            "SELECT j.created_at, j.status, j.error_text, e.detail FROM fw_deploy_jobs j "
+            "JOIN fw_deploy_job_events e ON e.job_id = j.job_id "
+            "WHERE j.kind = 'discover' AND j.source_id = :t ORDER BY j.created_at DESC, e.seq LIMIT 60"),
+            {"t": int(target_id)}).fetchall()
+    except Exception as e:
+        logging.warning("target %s: the fetch log for the step model failed: %s", target_id, e)
+        return None
+    newest: dict = {}
+    for created, status, err, detail in rows:
+        kind = (detail or "").split(":", 1)[0].strip()
+        if kind in ("interfaces", "zones", "vrfs", "routes") and kind not in newest:
+            newest[kind] = (created, status, err)
+    failed = [(c, e) for c, s, e in newest.values() if s == "failed"]
+    if not failed:
+        return None
+    at, err = max(failed, key=lambda x: x[0].timestamp() if x[0] else 0.0)
+    return {"at": at, "text": (err or "the read failed").strip()}
+
+
+def _project_facts(conn, project: dict, *, iface_rows=None, target_ifaces=None, name_map=None,
+                   with_mapping: bool = True) -> dict:
+    """The facts the step model reads (docs/UI_USABILITY_PLAN.md, D1 and
+    section 3): the two Devices, the source import, the target fetch, the
+    mapping gaps, the edits, the artefact with its blockers and stamps, the
+    operator's verification. The rules page hands in its interface rows and
+    target names, every other caller lets this load them (`with_mapping`
+    False skips the loader, enough for the status)."""
+    pid = int(project["id"])
+    src_id = int(project["source_ref_id"])
+    tgt_id = int(project["target_ref_id"])
+    rows = {int(r["id"]): dict(r) for r in conn.execute(text(
+        "SELECT id, host_name, display_name, platform, role, device_kind, config, "
+        "       (api_key IS NOT NULL AND api_key != '') AS has_api "
+        "FROM fw_devices WHERE id IN (:s, :t)"), {"s": src_id, "t": tgt_id}).mappings()}
+    src, tgt = rows.get(src_id) or {}, rows.get(tgt_id) or {}
+    tp = (tgt.get("platform") or "").lower()
+    # a target is reachable with a key of its own, or through its manager
+    # (a scope or instance row); the platform must be one the push offers
+    capable = bool(tgt) and tp in _target_platforms() and (bool(tgt.get("has_api")) or bool(tgt.get("device_kind")))
+    is_opt = src_id == tgt_id
+    # the strands this target takes: the driver declares the one it lacks by
+    # nature (a Check Point virtual system's network, docs/VSX_TARGET_PLAN.md)
+    strands = {"policy": True, "network": tp in progress.NETWORK_TARGETS}
+    if strands["network"]:
+        try:
+            _drv_cls = DEPLOY_DRIVERS.get(tp)
+            if _drv_cls is not None and _drv_cls().strand_unavailable(
+                    device={"id": tgt_id, "platform": tp, "config": tgt.get("config")}, strand="network"):
+                strands["network"] = False
+        except Exception:
+            pass
+    try:
+        import_ts = _device_last_import_ts(conn, src_id, src.get("platform"), bool(src.get("has_api")), strict=True)
+    except Exception:
+        import_ts = None
+    try:
+        fetch_ts = _ov_target_counters(conn, tgt_id)[1]
+    except Exception:
+        fetch_ts = None
+    build = _target_config_state(conn, pid)
+    summary = build.get("summary") if isinstance(build.get("summary"), dict) else {}
+    blockers = int(summary.get("blockers") or 0) + int(summary.get("blockers_policy") or 0)
+    stamps = conn.execute(text(
+        "SELECT reviewed_job_id, reviewed_at, pushed_policy_job_id, pushed_policy_at, "
+        "       pushed_network_job_id, pushed_network_at, stale_policy_at, stale_network_at "
+        "FROM fw_target_configs WHERE project_id = :p"),
+        {"p": pid}).mappings().fetchone() or {}
+    prow = conn.execute(text(
+        "SELECT status, verified_at, verified_job_id FROM fw_projects WHERE id = :p"),
+        {"p": pid}).mappings().fetchone() or {}
+    edits = sum(int(v or 0) for v in (_project_decisions(conn, [pid]).get(pid) or {}).values())
+    mapping = None
+    if with_mapping and not is_opt and capable:
+        if iface_rows is None:
+            try:
+                iface_rows = _project_iface_rows(conn, project)
+            except Exception as e:
+                logging.warning("project %s: interface rows for the step model failed: %s", pid, e)
+                iface_rows = None
+        if target_ifaces is None:
+            try:
+                target_ifaces = _target_iface_names(conn, tgt_id)
+            except Exception:
+                target_ifaces = None
+        if iface_rows is not None:
+            nm = name_map if name_map is not None else namemap.load_name_map(conn, pid)
+            mapping = progress.mapping_gaps(
+                iface_rows, tp, target_ifaces,
+                name_of=lambda r: namemap.map_name(nm, "interface", r.get("interface_name")))
+    # the sections of the project (D16) and the blocking findings per kind
+    # (D18): the full evaluation only, the project list wants the status
+    counts = seen = vpn = skips = identities = None
+    blocker_kinds: dict = {}
+    if with_mapping:
+        try:
+            skips = {r[0]: r[1] for r in conn.execute(text(
+                "SELECT step, skipped_at FROM fw_project_skips WHERE project_id = :p"), {"p": pid}).fetchall()}
+        except Exception as e:
+            logging.warning("project %s: skips for the step model failed: %s", pid, e)
+            skips = {}
+        try:
+            counts = {c["key"]: int(c.get("n") or 0)
+                      for c in _ov_source_counters(conn, src_id, src.get("platform") or "", "", pid)}
+        except Exception as e:
+            logging.warning("project %s: section counts for the step model failed: %s", pid, e)
+            counts = None
+        try:
+            seen = {r[0]: r[1] for r in conn.execute(text(
+                "SELECT view, seen_at FROM fw_project_views WHERE project_id = :p"), {"p": pid}).fetchall()}
+        except Exception as e:
+            logging.warning("project %s: seen views for the step model failed: %s", pid, e)
+            seen = {}
+        if counts and counts.get("vpn"):
+            try:
+                tun = [t for t in _load_vpn_tunnels(conn, device_id=src_id, project_id=pid) if not t.get("disabled")]
+                vpn = {"total": len(tun),
+                       "psk_missing": sum(1 for t in tun if (t.get("auth_type") or "psk") == "psk" and not t.get("psk_set")),
+                       "cert_missing": sum(1 for t in tun if t.get("auth_type") == "cert" and not t.get("cert_set"))}
+            except Exception as e:
+                logging.warning("project %s: VPN secrets for the step model failed: %s", pid, e)
+                vpn = None
+        if build.get("state") == "current" and blockers:
+            bk = summary.get("blocker_kinds")
+            blocker_kinds = bk if isinstance(bk, dict) else _blocker_kinds_of_report(conn, pid)
+        # the firewall rules of the latest import that carry source users (D62, the
+        # Source User step applies to them)
+        try:
+            identities = int(conn.execute(text(
+                "SELECT COUNT(*) FROM fw_imported_rules WHERE device_id = :d "
+                "AND import_ts = (SELECT MAX(import_ts) FROM fw_imported_rules WHERE device_id = :d) "
+                "AND source_identities IS NOT NULL AND source_identities NOT IN ('', '[]', 'null')"),
+                {"d": src_id}).scalar() or 0)
+        except Exception as e:
+            logging.warning("project %s: identity count for the step model failed: %s", pid, e)
+            identities = 0
+    # a FortiGate target's effective NGFW mode (pin or last probe, never a probe here):
+    # the Applications step applies in policy-based mode only (D62)
+    ngfw_mode = None
+    if tp == "fortigate":
+        try:
+            ngfw_mode = _forti_effective_ngfw_mode(json.loads(tgt.get("config") or "{}"))[0]
+        except Exception:
+            ngfw_mode = None
+    return {
+        "project_id": pid, "status": prow.get("status"),
+        "source_name": src.get("display_name") or src.get("host_name"),
+        "target_name": tgt.get("display_name") or tgt.get("host_name"),
+        "target_platform": tp, "target_capable": capable, "is_optimization": is_opt, "strands": strands,
+        "source_import_ts": import_ts, "fetch_ts": fetch_ts, "mapping": mapping, "edits": edits,
+        "build": {"state": build.get("state"), "job_id": build.get("job_id"),
+                  "built_at": build.get("built_at"), "blockers": blockers},
+        "reviewed_job_id": stamps.get("reviewed_job_id"), "reviewed_at": stamps.get("reviewed_at"),
+        "pushed_policy_job_id": stamps.get("pushed_policy_job_id"), "pushed_policy_at": stamps.get("pushed_policy_at"),
+        "pushed_network_job_id": stamps.get("pushed_network_job_id"), "pushed_network_at": stamps.get("pushed_network_at"),
+        # the last edit of each strand (D88): a strand pushed since its last edit stays pushed across a rebuild
+        "edit_stamps": {"policy": stamps.get("stale_policy_at"), "network": stamps.get("stale_network_at")},
+        "verified_job_id": prow.get("verified_job_id"), "verified_at": prow.get("verified_at"),
+        "counts": counts, "seen": seen, "vpn": vpn, "blocker_kinds": blocker_kinds, "skips": skips,
+        "identities": identities, "target_ngfw_mode": ngfw_mode,
+        # the zone bindings want one look when the target uses zones (D78, narrowed by D82:
+        # a target without zones has no bindings to look at, whatever the source)
+        "zones_review": tp in _ZONE_NATIVE_PLATFORMS,
+        # the target's newest failed read, the fetch step and the Review name it (product finding 9)
+        "target_fetch_error": _target_fetch_error(conn, tgt_id),
+    }
+
+
+def _project_progress(conn, project: dict, **kw) -> dict:
+    """The evaluated step model of one project plus its derived status."""
+    facts = _project_facts(conn, project, **kw)
+    out = progress.evaluate(facts)
+    out["status"] = progress.status_of(out, facts)
+    out["project_id"] = int(project["id"])
+    return out
+
+
+def _project_progress_ctx(project: dict | None, iface_rows=None, target_ifaces=None, name_map=None) -> dict | None:
+    """The rules page's `ov_progress`: never fails the page."""
+    if not project:
+        return None
+    try:
+        with get_engine().connect() as conn:
+            return _project_progress(conn, project, iface_rows=iface_rows,
+                                     target_ifaces=target_ifaces, name_map=name_map)
+    except Exception as e:
+        logging.warning("project %s: step model failed: %s", project.get("id"), e)
+        return None
+
+
+def _sync_project_status(conn, project_id: int | None) -> None:
+    """fw_projects.status from the step model (docs/UI_USABILITY_PLAN.md, D7):
+    called after a build, a push, a review and the operator's verification.
+    `closed` is the operator's and stays."""
+    if not project_id:
+        return
+    try:
+        row = conn.execute(text(
+            "SELECT id, name, source_ref_id, target_ref_id, status FROM fw_projects WHERE id = :p"),
+            {"p": int(project_id)}).mappings().fetchone()
+        if not row or row["status"] == "closed":
+            return
+        facts = _project_facts(conn, dict(row), with_mapping=False)
+        new = progress.status_of(progress.evaluate(facts), facts)
+        if new != row["status"]:
+            conn.execute(text("UPDATE fw_projects SET status = :st WHERE id = :p"),
+                         {"st": new, "p": int(project_id)})
+    except Exception as e:
+        logging.warning("project %s: status not derived: %s", project_id, e)
 
 
 def _project_overview_ctx(conn, project: dict) -> dict:
@@ -7138,11 +7759,113 @@ async def project_status(project_id: int, request: Request):
     if status not in ("draft", "verified", "closed"):
         return JSONResponse({"error": "status must be draft, verified or closed"}, status_code=400)
     with get_engine().begin() as conn:
-        n = conn.execute(text("UPDATE fw_projects SET status = :st WHERE id = :p"),
-                         {"st": status, "p": project_id}).rowcount
+        if status == "verified":
+            # step 8 of the step model (docs/UI_USABILITY_PLAN.md, D1): the
+            # operator's word, tied to the build that was pushed
+            n = conn.execute(text(
+                "UPDATE fw_projects p LEFT JOIN fw_target_configs t ON t.project_id = p.id "
+                "SET p.status = 'verified', p.verified_at = NOW(), p.verified_job_id = t.job_id "
+                "WHERE p.id = :p"), {"p": project_id}).rowcount
+        else:
+            # closed keeps the stamps, a reopen (draft) clears them
+            n = conn.execute(text(
+                "UPDATE fw_projects SET status = :st"
+                + (", verified_at = NULL, verified_job_id = NULL" if status == "draft" else "")
+                + " WHERE id = :p"), {"st": status, "p": project_id}).rowcount
+        if not n:
+            n = conn.execute(text("SELECT 1 FROM fw_projects WHERE id = :p"), {"p": project_id}).scalar() or 0
+        if n and status != "closed":
+            # the step model has the last word (D7): verified only with a pushed
+            # build, a reopen withdraws the verification and the truth returns
+            _sync_project_status(conn, project_id)
+        final = conn.execute(text("SELECT status FROM fw_projects WHERE id = :p"), {"p": project_id}).scalar() if n else None
     if not n:
         return JSONResponse({"error": "project not found"}, status_code=404)
-    return JSONResponse({"ok": True, "status": status})
+    return JSONResponse({"ok": True, "status": final or status, "requested": status})
+
+
+@app.post("/projects/{project_id}/reviewed", response_class=JSONResponse)
+async def project_reviewed(project_id: int, request: Request):
+    """Step 6 of the step model (docs/UI_USABILITY_PLAN.md, D1): the Review &
+    Deploy page reports that the operator saw the findings of the build
+    `job_id`. Stamped only while it is the artefact's current build, so a
+    rebuild reopens the step."""
+    try:
+        job_id = str((await request.json()).get("job_id") or "").strip()
+    except Exception:
+        job_id = ""
+    if not job_id:
+        return JSONResponse({"error": "job_id required"}, status_code=400)
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "UPDATE fw_target_configs SET reviewed_job_id = :j, reviewed_at = NOW() "
+            "WHERE project_id = :p AND job_id = :j"), {"j": job_id, "p": project_id})
+        reviewed = conn.execute(text(
+            "SELECT reviewed_job_id = :j FROM fw_target_configs WHERE project_id = :p"),
+            {"j": job_id, "p": project_id}).scalar()
+        if reviewed:
+            _sync_project_status(conn, project_id)
+    return JSONResponse({"ok": True, "reviewed": bool(reviewed)})
+
+
+@app.post("/projects/{project_id}/seen", response_class=JSONResponse)
+async def project_seen(project_id: int, request: Request):
+    """A section of the project was opened (docs/UI_USABILITY_PLAN.md, D16):
+    the step model counts the section as gone through when the visit is
+    later than the import. The client reports once per view and page, the
+    row keeps the latest visit. A user action, never a page render."""
+    try:
+        view = str((await request.json()).get("view") or "").strip()
+    except Exception:
+        view = ""
+    if view not in progress.SEEN_VIEWS:
+        return JSONResponse({"error": "unknown view"}, status_code=400)
+    with get_engine().begin() as conn:
+        if not conn.execute(text("SELECT 1 FROM fw_projects WHERE id = :p"), {"p": project_id}).scalar():
+            return JSONResponse({"error": "project not found"}, status_code=404)
+        conn.execute(text(
+            "INSERT INTO fw_project_views (project_id, view, seen_at) VALUES (:p, :v, NOW()) "
+            "ON DUPLICATE KEY UPDATE seen_at = NOW()"), {"p": project_id, "v": view})
+    return JSONResponse({"ok": True, "view": view})
+
+
+@app.post("/projects/{project_id}/skip", response_class=JSONResponse)
+async def project_skip(project_id: int, request: Request):
+    """The operator puts the recommended step aside, or takes it up again
+    (docs/UI_USABILITY_PLAN.md, D20): the step reads skipped, the path moves
+    on, evidence still closes it. Never the import, the review or the push."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    step = str((body or {}).get("step") or "").strip()
+    undo = bool((body or {}).get("undo"))
+    if not step or len(step) > 64 or not progress.skippable(step):
+        return JSONResponse({"error": "this step cannot be skipped"}, status_code=400)
+    with get_engine().begin() as conn:
+        if not conn.execute(text("SELECT 1 FROM fw_projects WHERE id = :p"), {"p": project_id}).scalar():
+            return JSONResponse({"error": "project not found"}, status_code=404)
+        if undo:
+            conn.execute(text("DELETE FROM fw_project_skips WHERE project_id = :p AND step = :s"), {"p": project_id, "s": step})
+        else:
+            conn.execute(text(
+                "INSERT INTO fw_project_skips (project_id, step, skipped_at) VALUES (:p, :s, NOW()) "
+                "ON DUPLICATE KEY UPDATE skipped_at = NOW()"), {"p": project_id, "s": step})
+    return JSONResponse({"ok": True, "step": step, "skipped": not undo})
+
+
+@app.get("/projects/{project_id}/progress", response_class=JSONResponse)
+async def project_progress_json(project_id: int):
+    """The step model of one project (docs/UI_USABILITY_PLAN.md, D1), for the
+    header sentence and the Overview strip without a page reload."""
+    with get_engine().connect() as conn:
+        row = conn.execute(text(
+            "SELECT id, name, source_ref_id, target_ref_id, status FROM fw_projects WHERE id = :p"),
+            {"p": project_id}).mappings().fetchone()
+        if not row:
+            return JSONResponse({"error": "project not found"}, status_code=404)
+        out = _project_progress(conn, dict(row))
+    return JSONResponse(out)
 
 
 @app.post("/projects/{project_id}/delete", response_class=JSONResponse)
@@ -7901,7 +8624,7 @@ def _self_heal_normalize(conn, device_id: int | None) -> bool:
         return False
 
 
-def _device_last_import_ts(conn, device_id, platform, has_api):
+def _device_last_import_ts(conn, device_id, platform, has_api, strict: bool = False):
     """Most-recent import timestamp for a device, or None if it was never
     imported. API devices (panw/checkpoint/fortigate with creds, or asa)
     read across the raw import tables; syslog devices read fw_flows.
@@ -7970,7 +8693,9 @@ def _device_last_import_ts(conn, device_id, platform, has_api):
         try:
             if conn.execute(text("SELECT 1 FROM fw_interfaces WHERE device_id = :id LIMIT 1"),
                             {"id": device_id}).scalar():
-                return datetime.datetime.utcnow().replace(microsecond=0)
+                # the step model (progress.py) asks with strict=True and takes
+                # None over an opener's stand-in time
+                return None if strict else datetime.datetime.utcnow().replace(microsecond=0)
         except Exception:
             pass
         # POLICY scope-devices (Panorama shared / device-groups) are platform=panw but
@@ -8206,6 +8931,12 @@ def _ensure_target_configs_table(conn):
             report_json      LONGTEXT     NULL,
             config_zlib      LONGBLOB     NULL,
             built_version    VARCHAR(32)  NULL,
+            reviewed_job_id       CHAR(32)     NULL,
+            reviewed_at           DATETIME     NULL,
+            pushed_policy_job_id  CHAR(32)     NULL,
+            pushed_policy_at      DATETIME     NULL,
+            pushed_network_job_id CHAR(32)     NULL,
+            pushed_network_at     DATETIME     NULL,
             KEY ix_tc_source (source_id),
             KEY ix_tc_target (target_id),
             FOREIGN KEY (project_id) REFERENCES fw_projects(id) ON DELETE CASCADE
@@ -8293,6 +9024,12 @@ def _ensure_imported_tables(conn):
             negate_service     TINYINT(1) NOT NULL DEFAULT 0,
             schedule           VARCHAR(255) NULL,
             source_identities  JSON NULL,
+            -- the box's own counters (docs/HIT_COUNTS_PLAN.md, D2), NULL = not read
+            box_hits           BIGINT UNSIGNED NULL,
+            box_first_hit      DATETIME NULL,
+            box_last_hit       DATETIME NULL,
+            box_hits_since     DATETIME NULL,
+            box_hits_read_at   DATETIME NULL,
             FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
         )
     """))
@@ -8732,49 +9469,6 @@ def _ensure_interface_tables(conn):
     except Exception:
         pass
     conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS fw_ip_zone_cache (
-            ip          VARCHAR(43)  NOT NULL,
-            device_id   INT          NOT NULL,
-            zone_name   VARCHAR(128) NOT NULL,
-            PRIMARY KEY (ip, device_id),
-            KEY idx_device_id (device_id),
-            FOREIGN KEY (device_id) REFERENCES fw_devices(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    """))
-    # Migrate fw_ip_zone_cache onto the Device's id (docs/DEVICE_IDENTITY_PLAN.md,
-    # phase 5; the key had moved from (ip) to (ip, device_host) before, and
-    # phase 7 drops the name column in its own migration). The cache is
-    # derived, rebuilt by _rebuild_ip_zone_cache on every generate, so a row
-    # whose name is no single Device's is dropped, not guessed. One ALTER
-    # rebuilds the table once. Decided from the schema, not by catching the
-    # failure: a duplicate key (ERROR 1062) is the collision detector.
-    conn.execute(text(
-        "ALTER TABLE fw_ip_zone_cache ADD COLUMN IF NOT EXISTS device_id INT NULL"))
-    _pk_has_id = conn.execute(text(
-        "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() "
-        "AND TABLE_NAME = 'fw_ip_zone_cache' AND INDEX_NAME = 'PRIMARY' "
-        "AND COLUMN_NAME = 'device_id'")).scalar()
-    if not _pk_has_id:
-        if _has_column(conn, "fw_ip_zone_cache", "device_host"):
-            conn.execute(text("""
-                UPDATE fw_ip_zone_cache z
-                JOIN (SELECT n.name, MIN(n.id) AS id FROM (
-                          SELECT host_name AS name, id FROM fw_devices
-                          UNION ALL
-                          SELECT display_name, id FROM fw_devices
-                          WHERE display_name IS NOT NULL AND display_name <> ''
-                      ) n GROUP BY n.name HAVING COUNT(DISTINCT n.id) = 1) m
-                  ON m.name = z.device_host
-                SET z.device_id = m.id
-                WHERE z.device_id IS NULL"""))
-        _dropped = conn.execute(text(
-            "DELETE FROM fw_ip_zone_cache WHERE device_id IS NULL")).rowcount
-        conn.execute(text(
-            "ALTER TABLE fw_ip_zone_cache MODIFY device_id INT NOT NULL, "
-            "DROP PRIMARY KEY, ADD PRIMARY KEY (ip, device_id)"))
-        print(f"[pipeline] fw_ip_zone_cache: primary key rebuilt on the Device's id, "
-              f"{_dropped} row(s) under a name no Device answers to dropped", flush=True)
-    conn.execute(text("""
         CREATE TABLE IF NOT EXISTS fw_zones (
             id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
             device_id  INT NULL,
@@ -9007,6 +9701,11 @@ def _ensure_interface_tables(conn):
             description     TEXT NULL,
             properties      JSON NULL,
             nat_hash        BINARY(20) NULL,
+            box_hits        BIGINT UNSIGNED NULL,
+            box_first_hit   DATETIME NULL,
+            box_last_hit    DATETIME NULL,
+            box_hits_since  DATETIME NULL,
+            box_hits_read_at DATETIME NULL,
             created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
@@ -9161,7 +9860,7 @@ def _compute_empty_state(conn, source_id: int | None) -> str:
                 # so the NAT sub-tab is rendered instead of the hero.
                 has_nat = bool(conn.execute(text(
                     "SELECT 1 FROM fw_nat_rules WHERE device_id = :sid LIMIT 1"
-                ), {"sid": source_id}).fetchone())
+                ), {"sid": _nat_source_device_id(conn, source_id)}).fetchone())
                 if not has_nat:
                     # Generate is only pending if there's a rule source it can
                     # consume. Imported-but-rule-less devices (interfaces/objects
@@ -9506,7 +10205,8 @@ def _cleanup_override_drift(conn, tail_table: str = "fw_rules_consolidated_1"
     return deleted
 
 
-def rules_query_consolidated1(internet_public: bool, auto_name: bool = False, limit: int = 1000, offset: int = 0) -> text:
+def rules_query_consolidated1(internet_public: bool, auto_name: bool = False, limit: int = 1000, offset: int = 0,
+                              box_sort: str | None = None) -> text:
     """Query fw_rules_consolidated_1 - raw view, always shows individual IPs (internet_public not applied here)."""
     # internet_public is a pipeline operation (accumulate) - not applied to this raw view.
     name_expr = ("COALESCE(NULLIF(r.rule_name, ''), sig.app_name, "
@@ -9525,6 +10225,7 @@ def rules_query_consolidated1(internet_public: bool, auto_name: bool = False, li
             r.hit_count, 1 AS src_count, 1 AS dst_count,
             r.first_seen, r.last_seen,
             r.vendor, COALESCE(_dev.display_name, _dev.host_name) AS device_name,
+            _ir.box_hits, _ir.box_first_hit, _ir.box_last_hit, _ir.box_hits_since, _ir.box_hits_read_at,
             LOWER(HEX(r.content_hash)) AS rhash,
             lovr.log_forwarding AS log_forwarding,
             lovr.log_start      AS log_start,
@@ -9613,12 +10314,13 @@ def rules_query_consolidated1(internet_public: bool, auto_name: bool = False, li
               WHERE x.project_id = :project AND x.kind = 'rule'
                 AND x.item_key = LOWER(HEX(r.content_hash))
                 AND x.device_id = r.device_id)
-        ORDER BY COALESCE(r.`sequence`, r.seq_num, 99999), r.action DESC, r.proto, r.dst_port
+        ORDER BY {hitcounts.order_prefix(box_sort)}COALESCE(r.`sequence`, r.seq_num, 99999), r.action DESC, r.proto, r.dst_port
         LIMIT {limit} OFFSET {offset}
     """)
 
 
-def rules_query(table: str, internet_public: bool, ip_threshold: int = 1, auto_name: bool = False, limit: int = 1000, offset: int = 0, can_reorder: bool = False) -> text:
+def rules_query(table: str, internet_public: bool, ip_threshold: int = 1, auto_name: bool = False, limit: int = 1000, offset: int = 0, can_reorder: bool = False,
+                box_sort: str | None = None) -> text:
     # dst_ip is already pipeline-substituted (internet_public + threshold applied at accumulate time)
     # Sources are collapsed at display time using a window function for threshold-aware grouping.
     priv_src = _PRIVATE.format(col="s.src_ip")
@@ -9674,6 +10376,8 @@ def rules_query(table: str, internet_public: bool, ip_threshold: int = 1, auto_n
     order_by  = ("COALESCE(r.`sequence`, r.seq_num, 99999), r.action DESC, r.proto, r.dst_port"
                  if can_reorder
                  else "COALESCE(r.seq_num, 99999), r.action DESC, r.proto, r.dst_port")
+    # the Box hits and Last hit columns sort on request (docs/HIT_COUNTS_PLAN.md, D7), rows without a counter last
+    order_by = hitcounts.order_prefix(box_sort) + order_by
 
     # Per-rule overrides (apps, zones, log-forwarding, …) bind on r.content_hash.
     # Same hash formula on every pipeline stage (consolidated_1, accumulated,
@@ -9746,6 +10450,7 @@ def rules_query(table: str, internet_public: bool, ip_threshold: int = 1, auto_n
             r.hit_count, r.src_count, r.dst_count,
             r.first_seen, r.last_seen,
             r.vendor, COALESCE(_dev.display_name, _dev.host_name) AS device_name,
+            _ir.box_hits, _ir.box_first_hit, _ir.box_last_hit, _ir.box_hits_since, _ir.box_hits_read_at,
             {rhash_expr} AS rhash,
             {log_expr}        AS log_forwarding,
             {log_start_expr}  AS log_start,
@@ -10160,6 +10865,28 @@ def _pano_net_device_id(conn, device_id):
             return device_id
         srow = _pano_bound_net_scope(conn, row[0], row[2])
         return srow[0] if srow else device_id
+    except Exception:
+        return device_id
+
+
+def _nat_source_device_id(conn, device_id):
+    """The Device whose NAT rules a source carries (docs/FMC_SOURCE_PLAN.md,
+    D8). A Cisco Management Center assigns NAT per device, so an
+    access-policy scope of a `firepower` manager reads its NAT from the
+    device scope it is paired with (its bound network scope). Every other
+    source, a firewall or a scope of any other manager, is its own NAT
+    source: identity, nothing else changes."""
+    if not device_id:
+        return device_id
+    try:
+        row = conn.execute(text(
+            "SELECT s.manager_device_id, s.scope_role, s.members, m.platform "
+            "FROM fw_scopes s JOIN fw_devices m ON m.id = s.manager_device_id "
+            "WHERE s.scope_device_id = :id"), {"id": device_id}).fetchone()
+        if not row or row[3] != "firepower" or row[1] not in ("policy", "rulebase"):
+            return device_id
+        srow = _pano_bound_net_scope(conn, row[0], row[2])
+        return int(srow[0]) if srow else device_id
     except Exception:
         return device_id
 
@@ -10687,7 +11414,8 @@ def _resolve_zones_from_routes(rules: list[dict], conn, device_id: int | None,
             rule["dst_zones"] = list(dict.fromkeys(dst_all)) or ["any"]
 
 
-def _fetch_rules_and_devices(conn, page: int = 1, page_size: int = 1000, device_id: int | None = None, display: dict = None, import_zone_overlay: bool = True, project_id: int | None = None, name_map: dict | None = None):
+def _fetch_rules_and_devices(conn, page: int = 1, page_size: int = 1000, device_id: int | None = None, display: dict = None, import_zone_overlay: bool = True, project_id: int | None = None, name_map: dict | None = None,
+                             box_sort: str | None = None):
     if display is None:
         display = load_display(conn)
     module       = display["module"]
@@ -10744,11 +11472,12 @@ def _fetch_rules_and_devices(conn, page: int = 1, page_size: int = 1000, device_
         _assign_sequences_if_needed(device_id)
 
     if module is None:
-        q = rules_query_consolidated1(ip_on, auto_name, limit=page_size, offset=offset)
+        q = rules_query_consolidated1(ip_on, auto_name, limit=page_size, offset=offset, box_sort=box_sort)
     elif module == "endpoint_pairs":
         q = rules_query_endpoint_pairs(limit=page_size, offset=offset)
     else:
-        q = rules_query(t, ip_on, ip_threshold, auto_name, limit=page_size, offset=offset, can_reorder=can_reorder)
+        q = rules_query(t, ip_on, ip_threshold, auto_name, limit=page_size, offset=offset, can_reorder=can_reorder,
+                        box_sort=box_sort)
 
     def _parse_import_json_list(v, keep_any: bool = False):
         if not v:
@@ -10768,9 +11497,11 @@ def _fetch_rules_and_devices(conn, page: int = 1, page_size: int = 1000, device_
 
     rows  = conn.execute(q, params).mappings().all()
     rules = []
+    _box_now = hitcounts.utcnow()
     for row in rows:
         rule = dict(row)
         rule["sequence"] = rule.get("sequence")
+        hitcounts.decorate(rule, _box_now)   # Box hits, Last hit, the usage tokens (docs/HIT_COUNTS_PLAN.md, D7)
         rule["sources"]   = [s for s in (rule["sources"] or "").split("\n") if s and not s.startswith("zone:")]
         rule["src_zones"] = list(dict.fromkeys(z for z in (rule.get("src_zones") or "").split("\n") if z)) or ["any"]
         rule["dst_zones"] = list(dict.fromkeys(z for z in (rule.get("dst_zones") or "").split("\n") if z)) or ["any"]
@@ -11496,17 +12227,22 @@ def run_status():
 
 
 @app.get("/")
-def root_redirect():
+def root_redirect(request: Request):
     # Projects-first IA (docs/PROJECTS_UI_DESIGN.md, D7): the operator enters
-    # through the project list; the device inventory stays at /devices.
-    return RedirectResponse("/projects", status_code=302)
+    # through the project list once the tenant has something to pair. Until a
+    # source Device is imported the next step lives on Devices, so the entry
+    # is that page (docs/UI_USABILITY_PLAN.md, D67).
+    return RedirectResponse(_landing_path(request), status_code=302)
 
 
 _OBJ_RENDER_CAP = 300   # max objects rendered inline per type; the rest load via search/load-more
 
 
 @app.get("/rules")
-def rules_page(request: Request, device: str = "", target: str = "", import_error: str = "", import_warning: str = "", template: str = "", project: str = ""):
+def rules_page(request: Request, device: str = "", target: str = "", import_error: str = "", import_warning: str = "", template: str = "", project: str = "", form_error: str = ""):
+    # a failed import started on the project page returns here with form_error, the flash
+    # the Devices page reads: the project page shows it as its import banner (D97, 2026-11-16)
+    import_error = import_error or form_error
     target = int(target) if target.strip().isdigit() else 0
     project = int(project) if project.strip().isdigit() else 0
     _src_import_ts = None   # the source's last import (header cards, push wording)
@@ -11573,6 +12309,16 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
                 "platform": tplat,
                 "role": trole,
             })
+        # The instances of a box (a VDOM, a vsys, a virtual system) are targets of
+        # their own (docs/VIRTUAL_INSTANCES_PLAN.md, D7), by the wizard's rule
+        # (_project_candidates: the box's API key, the platform on offer). Until
+        # 2026-11-05 the page left them out and showed the first plain target for
+        # a project whose target is an instance.
+        _seen_targets = {int(d["id"]) for d in target_devices}
+        for _c in _project_candidates(conn, _src_tenant)[1]:
+            if _c.get("device_kind") == "scope" and int(_c["id"]) not in _seen_targets:
+                target_devices.append({"id": int(_c["id"]), "name": _c["name"], "platform": _c["platform"],
+                                       "role": "target", "is_scope": True})
         # PANORAMA managers are EGRESS targets - push a source's config INTO a chosen scope
         # (SW-3-4). Marked is_panorama so the header adds dst DG/template dropdowns; deploy_push
         # builds config.panorama from them → the normal PanoramaDriver egress. panw ONLY: an
@@ -11630,6 +12376,14 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
             # (an undefined key is not JSON) and only FortiGate fills them
             selected_target.setdefault("ngfw_mode", None)
             selected_target.setdefault("ngfw_mode_src", None)
+            # a Check Point virtual system as the target: the deploy tab's
+            # install wording names it (docs/VSX_TARGET_PLAN.md, D3)
+            selected_target["is_vs"] = False
+            if selected_target.get("platform") == "checkpoint":
+                from deploy.checkpoint import _cp_slot as _cp_slot_of, _is_vs_type as _is_vs
+                _tcfg = conn.execute(text("SELECT config FROM fw_devices WHERE id = :id"),
+                                     {"id": int(selected_target["id"])}).scalar()
+                selected_target["is_vs"] = _is_vs(_cp_slot_of({"config": _tcfg}).get("gateway_type"))
 
         # The project this page shows: the pair's decisions - the explicit
         # pick (?project=, the header picker) when it is one of this pair's
@@ -11774,7 +12528,9 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
                             {"m": _srow[0]}).mappings():
                         # classify by the vendor-NEUTRAL role (PA shared/DG ≙ FMG global/adom/package;
                         # rule-bearing rulebase scopes belong in the policy switcher too)
-                        if _sr["scope_role"] in ("root", "policy", "rulebase"):
+                        if _sr["scope_role"] in ("root", "policy", "rulebase", "instance"):
+                            # an instance of a box (docs/VIRTUAL_INSTANCES_PLAN.md) sits in the
+                            # policy switcher and is its own network layer
                             pano_dgs.append({"name": _sr["nm"], "type": _sr["scope_type"],
                                              "id": _sr["scope_device_id"]})
                             # policy-scope members = its bound NETWORK layer(s): a Panorama DG's
@@ -11909,8 +12665,8 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
         # the gating banner - separate from has_device_data (which is per-source).
         try:
             src_count = conn.execute(text(
-                "SELECT COUNT(*) FROM fw_devices WHERE role IN ('source','both')"
-            )).scalar() or 0
+                "SELECT COUNT(*) FROM fw_devices WHERE role IN ('source','both') AND tenant_id = :tn"
+            ), {"tn": _src_tenant}).scalar() or 0
         except Exception:
             src_count = 0
         has_source_capable = bool(src_count)
@@ -12042,12 +12798,14 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
                 # Group routes by vr_name for sub-tab rendering
                 vr_groups: dict[str, list[dict]] = {}
                 for d in rt_merged:
-                    d["is_connected"] = d["prefix"] in connected_prefixes
+                    # the stored prefix bare or as a CIDR, compared as a CIDR (as the deploy path does)
+                    _pfx_c = str(d["prefix"]) if "/" in str(d["prefix"]) else f"{d['prefix']}/{d.get('prefix_len')}"
+                    d["is_connected"] = _pfx_c in connected_prefixes
                     if d["is_connected"]:
                         # auto-mapped egress (subnet owner) → falls back to the
                         # stored name if no owner resolved (shouldn't happen).
                         d["connected_iface"] = connected_owner.get(
-                            d["prefix"], d.get("interface_name"))
+                            _pfx_c, d.get("interface_name"))
                     elif not d.get("interface_name") and d.get("next_hop"):
                         d["derived_iface"] = _derive_egress(
                             d.get("next_hop"), d.get("vr_name") or "default")
@@ -12283,12 +13041,14 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
         # firewall net_layer_ids == [the device] → identical to the old behaviour.
         _vpn_seen: set = set()
         vpn_tunnels_list = []
+        vpn_orphan_keys = []   # keys under a name no tunnel carries, discarded from the view (one-way door 2)
         for _vlid in (net_layer_ids or ([_sel_did] if _sel_did else [])):
             for _vt in _load_vpn_tunnels(zconn, device_id=_vlid, include_deleted=True,
                                          project_id=project_id, name_map=name_map):
                 if _vt.get("name") not in _vpn_seen:
                     _vpn_seen.add(_vt.get("name"))
                     vpn_tunnels_list.append(_vt)
+            vpn_orphan_keys += [{"device_id": _vlid, "name": _n} for _n in _vpn_orphan_key_names(zconn, _vlid)]
         # CP-VPN (CP-3): the saved local-domain mode for the CP target gateway.
         cp_vpn_domain_mode = None
         cp_vpn_topology = None
@@ -12381,9 +13141,6 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
     ])
 
     # Tab lock state - derived from available data
-    has_iface_ip   = any(iz.get("ip_addresses") for iz in iface_zones)
-    routing_locked = not has_iface_ip
-
     # Ruleset: available as soon as pipeline data exists (zones are optional, shown as "any")
     ruleset_locked = not has_device_data
     has_default_route = any(
@@ -12429,6 +13186,7 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
         "pano_current_template": pano_current_template,
         "pano_manager_label": pano_manager_label,
         "pano_manager_id":   pano_manager_id,
+        "pano_manager_href": _manager_href(pano_manager_id),
         "pano_manager_platform": pano_manager_platform,
         "pano_bound_stack": pano_bound_stack,
         "pano_bound_members": pano_bound_members,   # linked-mode: the bound stack's member templates
@@ -12441,13 +13199,14 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
         "object_totals":   object_totals,   # full per-type counts (objects is capped for render)
         "obj_render_cap":  _OBJ_RENDER_CAP,
         "iface_zones":     iface_zones,
+        "ov_progress":     _project_progress_ctx(selected_project, iface_zones, target_ifaces, name_map),
+        "rv_kinds":        progress.KINDS,   # the Review's finding kinds, one table with the step model (D18)
         "iface_routes":    iface_routes,
         "bad_route_hint":  bad_route_hint,
         "free_phys_ifaces": free_phys_ifaces,
         "bond_member_to_parent": bond_member_to_parent,
         "target_ifaces":            target_ifaces,
         "target_discover_run_ts":   target_discover_run_ts,
-        "routing_locked":  routing_locked,
         "ruleset_locked":  ruleset_locked,
         "has_default_route": has_default_route,
         "zone_color_map":    zone_color_map,
@@ -12465,6 +13224,7 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
         "pbf_rules":         pbf_rules_list,
         "ssl_rules":         ssl_rules_list,
         "vpn_tunnels":       vpn_tunnels_list,
+        "vpn_orphan_keys":   vpn_orphan_keys,
         "cp_vpn_domain_mode": cp_vpn_domain_mode,
         "cp_vpn_topology": cp_vpn_topology,
         # Deploy is available iff a target device is picked. Source-only views
@@ -12529,11 +13289,26 @@ def rules_page(request: Request, device: str = "", target: str = "", import_erro
     return resp
 
 
+def _never_generated(conn, device_id: int) -> bool:
+    """True when the Device carries imported rules and no consolidated rows: the
+    pipeline never ran for it (D80). The dirty flag cannot say so, it is one per
+    stack and any run clears it."""
+    try:
+        imported = conn.execute(text("SELECT 1 FROM fw_imported_rules WHERE device_id = :d LIMIT 1"),
+                                {"d": device_id}).fetchone() is not None
+        consolidated = conn.execute(text("SELECT 1 FROM fw_rules_consolidated_1 WHERE device_id = :d LIMIT 1"),
+                                    {"d": device_id}).fetchone() is not None
+        return imported and not consolidated
+    except Exception:
+        return False
+
+
 @app.get("/rules-fragment", response_class=HTMLResponse)
 def rules_fragment(request: Request, page: int = 1, page_size: int = 1000,
-                   device: str = "", target: str = ""):
+                   device: str = "", target: str = "", sort: str = ""):
     page      = max(1, page)
     page_size = max(1, min(page_size, 1000))
+    _box_sort = sort if sort in hitcounts.SORTS else ""   # the Box hits / Last hit sort (docs/HIT_COUNTS_PLAN.md, D7)
     engine = get_engine()
     target_platform: str | None = None
     _tgt_id = int(target) if str(target).strip().isdigit() else None
@@ -12541,9 +13316,14 @@ def rules_fragment(request: Request, page: int = 1, page_size: int = 1000,
         needs_generate  = get_needs_generate(conn)
         display         = load_display(conn)
         _src_id = _device_id_param(device)
+        # A source with imported rules and no consolidated rows was never generated: the
+        # dirty flag is one per stack and another run may have cleared it, so the fragment
+        # says so and starts the run itself once (D80, operator 2026-11-15).
+        never_generated = _never_generated(conn, _src_id) if _src_id else False
         project_id = _page_project(conn, request, _src_id, _tgt_id)
         name_map = namemap.load_name_map(conn, project_id)
-        r               = _fetch_rules_and_devices(conn, page=page, page_size=page_size, device_id=_src_id, display=display, project_id=project_id, name_map=name_map)
+        r               = _fetch_rules_and_devices(conn, page=page, page_size=page_size, device_id=_src_id, display=display, project_id=project_id, name_map=name_map,
+                                                   box_sort=_box_sort or None)
         has_device_data = _has_data_for_device(conn, _src_id) if _src_id else True
         effective_layers = None
         if r.get("device_id"):
@@ -12571,9 +13351,11 @@ def rules_fragment(request: Request, page: int = 1, page_size: int = 1000,
         zone_color_map = _load_zone_colors(zconn)
     return templates.TemplateResponse(request, "rules_fragment.html", {
         **r,
+        "box_sort":       _box_sort,
         "module_labels":  MODULE_LABELS,
         "multi_group":    len(r["devices"]) > 1,
         "needs_generate": needs_generate,
+        "never_generated": never_generated,
         "running":        _run_state["running"],
         "run_mode":       _run_state["mode"] or "",
         "table_base":     table_base or "",
@@ -12610,7 +13392,7 @@ def organization_preview(
     """
     if rulebase not in ("access", "nat", "tp"):
         return HTMLResponse(
-            f"<div class='text-red-400 text-xs px-2 py-1.5'>Unknown rulebase: {rulebase}</div>",
+            f"<div class='text-red-400 text-xs px-2 py-1.5'>Unknown ruleset: {rulebase}</div>",
             status_code=400,
         )
 
@@ -12758,7 +13540,7 @@ def export_csv(request: Request, device: str = "", target: str = "", project: st
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["#", "name", "src_zones", "sources", "dst_zones", "destinations", "dst_nats", "application", "proto", "port", "action", "hits", "last_seen"])
+    writer.writerow(["#", "name", "src_zones", "sources", "dst_zones", "destinations", "dst_nats", "application", "proto", "port", "action", "hits", "last_seen", "box_hits", "box_last_hit"])
     for i, row in enumerate(rows, 1):
         rule = dict(row)
         sources  = rule.get("sources", "") or ""
@@ -12796,6 +13578,8 @@ def export_csv(request: Request, device: str = "", target: str = "", project: st
             rule.get("action") or "",
             rule.get("hit_count") or 0,
             rule.get("last_seen").strftime("%Y-%m-%d %H:%M") if rule.get("last_seen") else "",
+            "" if rule.get("box_hits") is None else int(rule.get("box_hits")),
+            rule.get("box_last_hit").strftime("%Y-%m-%d %H:%M") if rule.get("box_last_hit") else "",
         ])
 
     buf.seek(0)
@@ -14277,6 +15061,10 @@ def _materialize_internet_public(conn) -> None:
 
 
 # ─── Slice 6: cascade-rename helpers ──────────────────────────────────
+# (Superseded 2026-11-10 note: since projects_names_v1 a rename is a row of
+# the project name map that every reader applies, see the note above
+# _name_map_set. What follows describes the earlier in-place cascade; the
+# table constants below are what is still used.)
 # Direct-edit + cascade replaces the pre-Slice-6 target_*_name overlay.
 # When the user renames a zone / interface / VR, the rename cascades in a
 # single transaction through every dependent table so subsequent reads
@@ -14588,7 +15376,7 @@ async def _update_object(kind: str, obj_id: int, request: Request):
             if name != shown:
                 if not pid:
                     return JSONResponse(
-                        {"error": "A rename belongs to a project: pick a target first."},
+                        {"error": "A rename belongs to a project: open a project first."},
                         status_code=400)
                 try:
                     _name_map_set(conn, pid, device_id, target_type, src_name, name)
@@ -14618,7 +15406,7 @@ async def _update_object(kind: str, obj_id: int, request: Request):
                 return JSONResponse({"ok": True, "noop": True})
             if not pid:
                 return JSONResponse(
-                    {"error": "A rename belongs to a project: pick a target first."},
+                    {"error": "A rename belongs to a project: open a project first."},
                     status_code=400)
             try:
                 _name_map_set(conn, pid, device_id, grp_target, src_name, name)
@@ -15887,7 +16675,9 @@ def _inventory_rows(conn, tenant_id: int) -> tuple[list[dict], bool, bool]:
             except Exception:
                 _mdi = {}
             if _mdi:
-                _kind = "panorama" if d.get("platform") == "panw" else "fortimanager"
+                _kind = {"panw": "panorama", "fortigate": "fortimanager"}.get(d.get("platform") or "")
+                if not _kind:
+                    continue   # a Management Center's FTDs cannot be registered directly (no FDM API)
                 _mgr_ip_maps.append((d.get("display_name") or d.get("host_name")
                                      or d.get("mgmt_ip"), _kind, _mdi))
     for d in devices:
@@ -16046,6 +16836,13 @@ def _inventory_rows(conn, tenant_id: int) -> tuple[list[dict], bool, bool]:
                 "WHERE s.manager_device_id = :m "
                 f"ORDER BY {_order}, s.position, s.id LIMIT 1"), {"m": d["id"]}).fetchone()
             d["pano_default_scope"] = _ps[0] if _ps else None
+        d["has_instances"] = instancesource.has_instances(d.get("config"))
+        if d["has_instances"]:
+            _ps = conn.execute(text(
+                "SELECT COALESCE(sd.display_name, sd.host_name) AS nm FROM fw_scopes s "
+                "JOIN fw_devices sd ON sd.id = s.scope_device_id "
+                "WHERE s.manager_device_id = :m ORDER BY s.position, s.id LIMIT 1"), {"m": d["id"]}).fetchone()
+            d["pano_default_scope"] = _ps[0] if _ps else None
 
     # Capability flags for the gating banner. Mirrors the eligibility logic
     # in /rules: target-capable = role∈{target,both} ∧ platform∈DRIVERS ∧ api_key set.
@@ -16061,13 +16858,20 @@ def _inventory_rows(conn, tenant_id: int) -> tuple[list[dict], bool, bool]:
     return devices, has_source_capable, has_target_capable
 
 
-@app.get("/devices")
-def devices_page(request: Request):
-    """The inventory lives in the device column of the Projects page (U7);
-    this address stays for old links and for the flash redirects of the
-    device endpoints - the query string travels along."""
-    qs = request.url.query
-    return RedirectResponse("/projects" + (f"?{qs}" if qs else ""), status_code=302)
+@app.get("/projects", response_class=HTMLResponse)
+def projects_page(request: Request, form_error: str = "", discovered: str = "",
+                  no_data: str = "", uploaded: str = ""):
+    """The tenant's projects, the app's landing page."""
+    return _landing_page(request, "projects", form_error, discovered, no_data, uploaded)
+
+
+@app.get("/devices", response_class=HTMLResponse)
+def devices_page(request: Request, form_error: str = "", discovered: str = "",
+                 no_data: str = "", uploaded: str = ""):
+    """The tenant's Devices: the inventory as a page of its own again (D30,
+    2026-11-10, where the firewalls are connected). The device endpoints
+    return here with their flash values in the query string."""
+    return _landing_page(request, "devices", form_error, discovered, no_data, uploaded)
 
 
 @app.post("/devices/discover/{kind}", response_class=JSONResponse)
@@ -16090,166 +16894,302 @@ async def devices_discover(request: Request, kind: str):
     return JSONResponse(out)
 
 
+def _build_fmc_config(form):
+    """Add-device form, Management Center entry → (config_json, mgmt_ip,
+    api_key, row overrides) for a firepower manager row, or None. On
+    premises the address is the FMC host, the secret its password, the
+    user in config.fmc. Cloud-delivered: the regional gateway stands in
+    for the address, the secret is the tenant's API token."""
+    if form.get("fmc_enabled") not in ("on", "1", "true"):
+        return None
+    name = (form.get("fmc_name") or "").strip()
+    secret = (form.get("api_key") or "").strip()
+    if form.get("fmc_cloud") in ("on", "1", "true"):
+        from deploy._fmc_common import CDFMC_REGIONS
+        region = (form.get("fmc_region") or "").strip().lower()
+        if region not in CDFMC_REGIONS or not secret:
+            raise ValueError("The cloud-delivered Management Center needs its region and the API token.")
+        host = CDFMC_REGIONS[region]
+        cfg = {"fmc": {"cloud": {"region": region}}}
+        name = name or f"cdfmc-{region}"
+    else:
+        host = (form.get("mgmt_ip") or "").strip()
+        user = (form.get("fmc_username") or "").strip() or "admin"
+        if not host or not secret:
+            raise ValueError("The Management Center needs its address, a user and the password.")
+        cfg = {"fmc": {"username": user}}
+        name = name or host
+    return (json.dumps(cfg), host, secret,
+            {"host_name": name, "role": "source", "device_kind": "manager-source"})
+
+
+try:
+    from deploy.manager_backends import register_manager_config_builder as _reg_builder
+    # a CE builder: it must not switch the enterprise manager fieldsets on
+    _reg_builder("firepower", _build_fmc_config, manager=False)
+except Exception:
+    pass
+
+
+def _manager_href(manager_id) -> str | None:
+    """Where a manager row's name leads: the Enterprise workbench when the
+    module is loaded, else the read-only scope page of the Community
+    Edition (docs/FMC_SOURCE_PLAN.md, D17)."""
+    if not manager_id:
+        return None
+    from deploy.manager_backends import manager_ui_available as _mui
+    if _mui():
+        with get_engine().connect() as conn:
+            kind = conn.execute(text("SELECT device_kind FROM fw_devices WHERE id = :id"),
+                                {"id": int(manager_id)}).scalar()
+        if kind == "manager-source":
+            return f"/manager/{int(manager_id)}"
+    return f"/scopes/{int(manager_id)}"
+
+
+@app.get("/scopes/{manager_id}", response_class=HTMLResponse)
+def scopes_page(request: Request, manager_id: int):
+    """A manager's scopes, read-only (docs/FMC_SOURCE_PLAN.md, D17): the
+    tree the import wrote, with counts and a link into each scope's
+    ruleset. The Community Edition's page for a manager row; the
+    Enterprise workbench (/manager/{id}) takes its place when loaded."""
+    with get_engine().connect() as conn:
+        mgr = conn.execute(text(
+            "SELECT id, host_name, display_name, platform, mgmt_ip, device_kind, config "
+            "FROM fw_devices WHERE id = :m"), {"m": manager_id}).mappings().fetchone()
+        if not mgr or (mgr["device_kind"] != "manager-source" and not instancesource.has_instances(mgr["config"])):
+            raise HTTPException(status_code=404, detail="no such manager")
+        rows = [dict(r) for r in conn.execute(text(
+            "SELECT s.scope_device_id AS id, s.scope_type, s.scope_role, s.scope_name, s.members, "
+            "       s.parent_scope_device_id AS parent_id, "
+            "       (SELECT p.id FROM fw_projects p WHERE p.source_ref_id = s.scope_device_id "
+            "        ORDER BY p.updated_at DESC, p.id DESC LIMIT 1) AS project_id, "
+            "       (SELECT COUNT(*) FROM fw_imported_rules r WHERE r.device_id = s.scope_device_id) AS n_rules, "
+            "       (SELECT COUNT(*) FROM fw_imported_objects o WHERE o.device_id = s.scope_device_id) AS n_objects, "
+            "       (SELECT COUNT(*) FROM fw_nat_rules n WHERE n.device_id = s.scope_device_id) AS n_nat, "
+            "       (SELECT COUNT(*) FROM fw_interfaces i WHERE i.device_id = s.scope_device_id) AS n_ifaces "
+            "FROM fw_scopes s WHERE s.manager_device_id = :m ORDER BY s.position, s.id"),
+            {"m": manager_id}).mappings()]
+        nav_projects = _nav_projects(conn)
+    by_id = {r["id"]: r for r in rows}
+    for r in rows:
+        try:
+            r["members"] = json.loads(r["members"]) if r["members"] else []
+        except Exception:
+            r["members"] = []
+        if not isinstance(r["members"], list):
+            r["members"] = []
+    # tree order: roots first, then each one's children, depth for the indent
+    ordered: list = []
+
+    def _walk(parent_id, depth, seen):
+        for r in rows:
+            if (r["parent_id"] if r["parent_id"] in by_id else None) == parent_id and r["id"] not in seen:
+                seen.add(r["id"])
+                r["depth"] = depth
+                ordered.append(r)
+                _walk(r["id"], depth + 1, seen)
+    _walk(None, 0, set())
+    for r in rows:              # a cycle or an orphan edge: listed flat at the end
+        if r not in ordered:
+            r["depth"] = 0
+            ordered.append(r)
+    return templates.TemplateResponse(request, "scopes.html", {
+        "manager": dict(mgr), "scopes": ordered, "nav_projects": nav_projects,
+        "platform_labels": PLATFORM_LABELS})
+
+
 @app.post("/devices/add")
 async def devices_add(request: Request):
     form         = await request.form()
-    platform     = (form.get("platform") or "").strip() or None
-    mgmt_ip      = (form.get("mgmt_ip") or "").strip() or None
-    try:
-        mgmt_port = int(form.get("mgmt_port") or 443)
-    except (ValueError, TypeError):
-        mgmt_port = 443
-    api_key      = (form.get("api_key") or "").strip() or None
-    gaia_user    = (form.get("gaia_user") or "").strip() or None
-    gaia_pw      = (form.get("gaia_password") or "").strip() or None
-    notes        = (form.get("notes") or "").strip() or None
-    role         = (form.get("role") or "both").strip().lower()
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        nonlocal form
+        platform     = (form.get("platform") or "").strip() or None
+        # The add dialog's Manager entries (docs/FMC_SOURCE_PLAN.md D2, docs/UI_USABILITY_PLAN.md
+        # D69): one value per manager, mapped to the platform whose reader serves it and, for
+        # the cloud managers, the flag their builder reads. A Panorama or a FortiManager is a
+        # PAN-OS or FortiOS row the import recognises as a manager.
+        _MANAGER_ENTRIES = {"firepower_fmc": ("firepower", "fmc_enabled"), "panw_scm": ("panw", "scm_enabled"),
+                            "fortigate_fmgc": ("fortigate", "fmgc_enabled"),
+                            "panw_panorama": ("panw", None), "fortigate_fmg": ("fortigate", None)}
+        if platform in _MANAGER_ENTRIES:
+            platform, _flag = _MANAGER_ENTRIES[platform]
+            if _flag:
+                form = {**dict(form), _flag: "1"}
+        mgmt_ip      = (form.get("mgmt_ip") or "").strip() or None
+        try:
+            mgmt_port = int(form.get("mgmt_port") or 443)
+        except (ValueError, TypeError):
+            mgmt_port = 443
+        api_key      = (form.get("api_key") or "").strip() or None
+        gaia_user    = (form.get("gaia_user") or "").strip() or None
+        gaia_pw      = (form.get("gaia_password") or "").strip() or None
+        notes        = (form.get("notes") or "").strip() or None
+        role         = (form.get("role") or "both").strip().lower()
 
-    if platform not in (list(PLATFORM_LABELS) + [None]):
-        platform = None
-    if not platform:
-        # the dialog opens on its placeholder (2026-10-18): a submit without
-        # a platform registers nothing and says so
-        return RedirectResponse("/projects?form_error=" + urllib.parse.quote(
-            "Platform is required, the device was not added"), status_code=303)
-    if role not in ("source", "target", "both"):
-        role = "both"
+        if platform not in (list(PLATFORM_LABELS) + [None]):
+            platform = None
+        if not platform:
+            # the dialog opens on its placeholder (2026-10-18): a submit without
+            # a platform registers nothing and says so
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
+                "Platform is required, the device was not added"), status_code=303)
+        if role not in ("source", "target", "both"):
+            role = "both"
 
-    # Manager-managed target (Panorama / FortiManager) - an ENTERPRISE feature.
-    # The EE module registers a per-platform config builder (deploy.manager_backends);
-    # the CE ships no manager-UI logic. build_manager_config returns None in the CE
-    # (or when the form's manager toggle is off).
-    from deploy.manager_backends import build_manager_config
-    config_json = None
-    try:
-        _built = build_manager_config(platform, form)
-    except ValueError as exc:
-        # a builder refuses an incomplete form (a cloud account without a
-        # region): back to the page with the sentence, nothing registered
-        return RedirectResponse("/projects?form_error=" + urllib.parse.quote(str(exc)), status_code=303)
-    # A builder may add a fourth element: row overrides (host_name, role,
-    # device_kind) for a manager without a management address, such as a
-    # Strata Cloud Manager tenant named by the operator.
-    _row_overrides: dict = {}
-    if _built:
-        config_json, mgmt_ip, api_key = _built[0], _built[1], _built[2]
-        if len(_built) > 3 and isinstance(_built[3], dict):
-            _row_overrides = _built[3]
-            if _row_overrides.get("role") in ("source", "target", "both"):
-                role = _row_overrides["role"]
+        # Manager-managed target (Panorama / FortiManager) - an ENTERPRISE feature.
+        # The EE module registers a per-platform config builder (deploy.manager_backends);
+        # the CE ships no manager-UI logic. build_manager_config returns None in the CE
+        # (or when the form's manager toggle is off).
+        from deploy.manager_backends import build_manager_config
+        config_json = None
+        try:
+            _built = build_manager_config(platform, form)
+        except ValueError as exc:
+            # a builder refuses an incomplete form (a cloud account without a
+            # region): back to the page with the sentence, nothing registered
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(str(exc)), status_code=303)
+        # A builder may add a fourth element: row overrides (host_name, role,
+        # device_kind) for a manager without a management address, such as a
+        # Strata Cloud Manager tenant named by the operator.
+        _row_overrides: dict = {}
+        if _built:
+            config_json, mgmt_ip, api_key = _built[0], _built[1], _built[2]
+            if len(_built) > 3 and isinstance(_built[3], dict):
+                _row_overrides = _built[3]
+                if _row_overrides.get("role") in ("source", "target", "both"):
+                    role = _row_overrides["role"]
 
-    # Cisco FTD (FDM): OAuth password grant - no static API keys. The admin
-    # PASSWORD rides in api_key (the platform's secret column); the username
-    # is pinned in config.ftd.username (default 'admin').
-    if platform == "firepower":
-        ftd_user = (form.get("ftd_username") or "").strip() or "admin"
-        config_json = json.dumps({"ftd": {"username": ftd_user}})
-        role = "source"   # source-only platform (ASA precedent)
+        # Cisco FTD (FDM): OAuth password grant - no static API keys. The admin
+        # PASSWORD rides in api_key (the platform's secret column); the username
+        # is pinned in config.ftd.username (default 'admin').
+        if platform == "firepower" and not _built:
+            ftd_user = (form.get("ftd_username") or "").strip() or "admin"
+            config_json = json.dumps({"ftd": {"username": ftd_user}})
+            role = "source"   # source-only platform (ASA precedent)
 
-    # OPNsense: key AND secret, one credential column. Same split FTD uses -
-    # the SECRET rides in api_key, the key id is pinned in
-    # config.opnsense.api_key_id. No role pin: unlike ASA and FTD this
-    # vendor is a push target too.
-    #
-    # The Add form does not offer this platform - an OPNsense enters from a
-    # configuration upload, and credentials are added on the device row
-    # afterwards to make it a push target. The branch stays because this
-    # endpoint is also how a device gets registered from a script, where
-    # supplying the pair up front is the obvious thing to do.
-    if platform == "opnsense":
-        opn_key = (form.get("opn_api_key_id") or "").strip()
-        if opn_key:
-            config_json = json.dumps({"opnsense": {"api_key_id": opn_key}})
+        # OPNsense: key AND secret, one credential column. Same split FTD uses -
+        # the SECRET rides in api_key, the key id is pinned in
+        # config.opnsense.api_key_id. No role pin: unlike ASA and FTD this
+        # vendor is a push target too.
+        #
+        # The Add form does not offer this platform - an OPNsense enters from a
+        # configuration upload, and credentials are added on the device row
+        # afterwards to make it a push target. The branch stays because this
+        # endpoint is also how a device gets registered from a script, where
+        # supplying the pair up front is the obvious thing to do.
+        if platform == "opnsense":
+            opn_key = (form.get("opn_api_key_id") or "").strip()
+            if opn_key:
+                config_json = json.dumps({"opnsense": {"api_key_id": opn_key}})
 
-    # A FortiGate reached through FortiGate Cloud (docs/CLOUD_SOURCES_PLAN.md,
-    # C1): the IAM API user's password is the secret in api_key, its id, the
-    # region and the serial sit in config.fortigate.cloud, and every FortiOS
-    # call goes through the cloud's per-serial proxy (deploy._forti_common).
-    # The row carries the box's address as the picker reported it, the
-    # import adopts the hostname like a directly reached box.
-    if platform == "fortigate" and (form.get("fgc_enabled") or "").strip():
-        fgc_serial = (form.get("fgc_serial") or "").strip()
-        fgc_api_id = (form.get("fgc_api_id") or "").strip()
-        fgc_pw = (form.get("fgc_password") or "").strip()
-        fgc_region = (form.get("fgc_region") or "global").strip().lower()
-        if not (fgc_serial and fgc_api_id and fgc_pw):
-            return RedirectResponse("/projects?flash=fortigate_cloud_fields", status_code=303)
-        config_json = json.dumps({"fortigate": {"cloud": {
-            "region": fgc_region, "serial": fgc_serial, "api_id": fgc_api_id}}})
-        api_key = fgc_pw
-        mgmt_ip = (form.get("fgc_ip") or "").strip() or fgc_serial
+        # A FortiGate reached through FortiGate Cloud (docs/CLOUD_SOURCES_PLAN.md,
+        # C1): the IAM API user's password is the secret in api_key, its id, the
+        # region and the serial sit in config.fortigate.cloud, and every FortiOS
+        # call goes through the cloud's per-serial proxy (deploy._forti_common).
+        # The row carries the box's address as the picker reported it, the
+        # import adopts the hostname like a directly reached box.
+        if platform == "fortigate" and (form.get("fgc_enabled") or "").strip():
+            if (form.get("fmg_enabled") or "").strip():
+                # the row holds one address and one secret: the cloud proxy's or the
+                # manager's, never both (D71, the dialog keeps one toggle at a time)
+                return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
+                    "Pick one way to reach the Device, FortiGate Cloud or FortiManager, the Device was not added"), status_code=303)
+            fgc_serial = (form.get("fgc_serial") or "").strip()
+            fgc_api_id = (form.get("fgc_api_id") or "").strip()
+            fgc_pw = (form.get("fgc_password") or "").strip()
+            fgc_region = (form.get("fgc_region") or "global").strip().lower()
+            if not (fgc_serial and fgc_api_id and fgc_pw):
+                return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
+                    "FortiGate Cloud needs the serial number, the API user and its password, the Device was not added"), status_code=303)
+            config_json = json.dumps({"fortigate": {"cloud": {
+                "region": fgc_region, "serial": fgc_serial, "api_id": fgc_api_id}}})
+            api_key = fgc_pw
+            mgmt_ip = (form.get("fgc_ip") or "").strip() or fgc_serial
 
-    # Hostname is auto-detected from logs or API import.
-    # Use mgmt_ip as placeholder until the real hostname is known.
-    host_name = _row_overrides.get("host_name") or mgmt_ip
-    # A cloud account (EE) has no management address: the row is named by
-    # the operator, the account ids sit in config.<platform> (built by the
-    # EE config builder above), the secret in api_key. Source only.
-    if platform in CLOUD_SOURCE_PLATFORMS:
-        role = "source"
-        host_name = (form.get("cloud_name") or "").strip() or None
-    if not host_name:
-        # nothing is registered without a name: say so instead of returning
-        # to the page in silence (found 2026-10-18 on the 0.9.4 matrix)
-        missing = "Name" if platform in CLOUD_SOURCE_PLATFORMS else "Management IP"
-        return RedirectResponse("/projects?form_error=" + urllib.parse.quote(
-            f"{missing} is required, the device was not added"), status_code=303)
+        # The secret is the Device's only way in: the platforms that show the shared
+        # address and key fields have no upload path, so a row without it can do
+        # nothing (operator, docs/UI_USABILITY_PLAN.md D68). ASA and OPNsense enter
+        # from an upload, the cloud accounts validate their own fields in the builder.
+        if not api_key and platform not in ("asa", "opnsense") and platform not in CLOUD_SOURCE_PLATFORMS:
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
+                "The API key or password is required, the Device was not added"), status_code=303)
 
-    engine = get_engine()
-    with engine.begin() as conn:
-        _ensure_devices_table(conn)
-        # Re-Add of an existing host IN THIS TENANT updates connection fields
-        # but preserves role and tenant: Edit is the only path that changes
-        # them. Likewise display_name is never touched here (no form field
-        # carries it). The same name in another tenant is another Device
-        # (docs/DEVICE_IDENTITY_PLAN.md, phase 5: the row is the identity).
-        _p = {"hn": host_name, "pl": platform, "role": role,
-              "ip": mgmt_ip, "port": mgmt_port,
-              "key": secrets_util.protect(api_key),
-              "gu": gaia_user, "gp": secrets_util.protect(gaia_pw),
-              "notes": notes, "config": config_json,
-              "tn": _form_tenant(request, form, conn)}
-        _new_id = conn.execute(text(
-            "SELECT id FROM fw_devices WHERE host_name = :hn AND tenant_id = :tn "
-            "ORDER BY id LIMIT 1"), {"hn": host_name, "tn": _p["tn"]}).scalar()
-        if _new_id:
-            conn.execute(text("""
+        # Hostname is auto-detected from logs or API import.
+        # Use mgmt_ip as placeholder until the real hostname is known.
+        host_name = _row_overrides.get("host_name") or mgmt_ip
+        # A cloud account (EE) has no management address: the row is named by
+        # the operator, the account ids sit in config.<platform> (built by the
+        # EE config builder above), the secret in api_key. Source only.
+        if platform in CLOUD_SOURCE_PLATFORMS:
+            role = "source"
+            host_name = (form.get("cloud_name") or "").strip() or None
+        if not host_name:
+            # nothing is registered without a name: say so instead of returning
+            # to the page in silence (found 2026-10-18 on the 0.9.4 matrix)
+            missing = "Name" if platform in CLOUD_SOURCE_PLATFORMS else "Management IP"
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
+                f"{missing} is required, the device was not added"), status_code=303)
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            _ensure_devices_table(conn)
+            # Re-Add of an existing host IN THIS TENANT updates connection fields
+            # but preserves role and tenant: Edit is the only path that changes
+            # them. Likewise display_name is never touched here (no form field
+            # carries it). The same name in another tenant is another Device
+            # (docs/DEVICE_IDENTITY_PLAN.md, phase 5: the row is the identity).
+            _p = {"hn": host_name, "pl": platform, "role": role,
+                  "ip": mgmt_ip, "port": mgmt_port,
+                  "key": secrets_util.protect(api_key),
+                  "gu": gaia_user, "gp": secrets_util.protect(gaia_pw),
+                  "notes": notes, "config": config_json,
+                  "tn": _form_tenant(request, form, conn)}
+            _new_id = conn.execute(text(
+                "SELECT id FROM fw_devices WHERE host_name = :hn AND tenant_id = :tn "
+                "ORDER BY id LIMIT 1"), {"hn": host_name, "tn": _p["tn"]}).scalar()
+            if _new_id:
+                conn.execute(text("""
                 UPDATE fw_devices SET platform=:pl, mgmt_ip=:ip,
                     mgmt_port=:port, api_key=:key,
                     gaia_user=:gu, gaia_password=:gp, notes=:notes,
                     config=COALESCE(:config, config)
                 WHERE id = :id
             """), {**_p, "id": _new_id})
-        else:
-            _new_id = conn.execute(text("""
+            else:
+                _new_id = conn.execute(text("""
                 INSERT INTO fw_devices (host_name, platform, role, mgmt_ip, mgmt_port,
                                         api_key, gaia_user, gaia_password, notes, config, tenant_id)
                 VALUES (:hn, :pl, :role, :ip, :port, :key, :gu, :gp, :notes, :config, :tn)
             """), _p).lastrowid
-        if _row_overrides.get("device_kind") in ("manager-source",):
-            # a manager registered as such up front (no probe decides it later)
-            conn.execute(text("UPDATE fw_devices SET device_kind = :k WHERE id = :id"),
-                         {"k": _row_overrides["device_kind"], "id": _new_id})
+            if _row_overrides.get("device_kind") in ("manager-source",):
+                # a manager registered as such up front (no probe decides it later)
+                conn.execute(text("UPDATE fw_devices SET device_kind = :k WHERE id = :id"),
+                             {"k": _row_overrides["device_kind"], "id": _new_id})
 
-    # FortiGate: probe + cache the box's NAT mode right at registration
-    # (POST context, so the no-render-side-effects rule is satisfied) -
-    # the enrichment views then show 'auto (detected: X)' from minute one
-    # instead of waiting for the first deploy-generate. Best-effort with a
-    # short timeout: an unreachable box just leaves the cache empty.
-    if platform == "fortigate" and mgmt_ip and api_key:
-        try:
-            with engine.connect() as conn:
-                _nrow = conn.execute(text(
-                    "SELECT id, platform, config, mgmt_ip, mgmt_port, api_key, "
-                    "host_name FROM fw_devices WHERE id = :id"
-                ), {"id": _new_id}).mappings().fetchone()
-            if _nrow:
-                _resolve_forti_nat_mode(_device_dict(_nrow), timeout=5,
-                                        persist_device_id=_nrow["id"])
-        except Exception:
-            pass
+        # FortiGate: probe + cache the box's NAT mode right at registration
+        # (POST context, so the no-render-side-effects rule is satisfied) -
+        # the enrichment views then show 'auto (detected: X)' from minute one
+        # instead of waiting for the first deploy-generate. Best-effort with a
+        # short timeout: an unreachable box just leaves the cache empty.
+        if platform == "fortigate" and mgmt_ip and api_key:
+            try:
+                with engine.connect() as conn:
+                    _nrow = conn.execute(text(
+                        "SELECT id, platform, config, mgmt_ip, mgmt_port, api_key, "
+                        "host_name FROM fw_devices WHERE id = :id"
+                    ), {"id": _new_id}).mappings().fetchone()
+                if _nrow:
+                    _resolve_forti_nat_mode(_device_dict(_nrow), timeout=5,
+                                            persist_device_id=_nrow["id"])
+            except Exception:
+                pass
 
-    return _add_done_redirect(form, _new_id)
+        return _add_done_redirect(form, _new_id)
+    return await run_in_threadpool(_work)
 
 
 @app.post("/devices/fortigate-cloud/devices")
@@ -16258,211 +17198,234 @@ async def fortigate_cloud_devices(request: Request):
     FortiGate Cloud: the account's devices in the chosen region, read with
     the IAM API user the operator typed (nothing is stored here)."""
     form = await request.form()
-    region = (form.get("fgc_region") or "global").strip().lower()
-    api_id = (form.get("fgc_api_id") or "").strip()
-    password = (form.get("fgc_password") or "").strip()
-    if not api_id or not password:
-        return JSONResponse({"error": "API user id and password required"}, status_code=400)
-    try:
-        with fail_fast_transport():
-            devices = _forti.list_cloud_devices(region, api_id, password)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)[:300]}, status_code=200)
-    return JSONResponse({"devices": devices})
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        region = (form.get("fgc_region") or "global").strip().lower()
+        api_id = (form.get("fgc_api_id") or "").strip()
+        password = (form.get("fgc_password") or "").strip()
+        if not api_id or not password:
+            return JSONResponse({"error": "API user id and password required"}, status_code=400)
+        try:
+            with fail_fast_transport():
+                devices = _forti.list_cloud_devices(region, api_id, password)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)[:300]}, status_code=200)
+        return JSONResponse({"devices": devices})
+    return await run_in_threadpool(_work)
 
 
 @app.post("/devices/edit/{device_id}")
 async def devices_edit(device_id: int, request: Request):
     form         = await request.form()
-    # Platform is identity-pinned at create-time and immutable thereafter.
-    # The edit form renders it as static text (no form field); ignore any
-    # value posted via direct curl etc. - never touch fw_devices.platform.
-    mgmt_ip      = (form.get("mgmt_ip") or "").strip() or None
-    try:
-        mgmt_port = int(form.get("mgmt_port") or 443)
-    except (ValueError, TypeError):
-        mgmt_port = 443
-    api_key_raw  = (form.get("api_key") or "").strip()
-    gaia_user    = (form.get("gaia_user") or "").strip() or None
-    gaia_pw_raw  = (form.get("gaia_password") or "").strip()
-    notes        = (form.get("notes") or "").strip() or None
-    role         = (form.get("role") or "both").strip().lower()
-    nat_mode     = (form.get("nat_mode") or "").strip().lower()  # Forti only
-    routing_mode = (form.get("routing_mode") or "").strip().lower()  # PA only
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        _moved_to = None   # the tenant a Device moved to (D66), the redirect follows it
+        # Platform is identity-pinned at create-time and immutable thereafter.
+        # The edit form renders it as static text (no form field); ignore any
+        # value posted via direct curl etc. - never touch fw_devices.platform.
+        mgmt_ip      = (form.get("mgmt_ip") or "").strip() or None
+        try:
+            mgmt_port = int(form.get("mgmt_port") or 443)
+        except (ValueError, TypeError):
+            mgmt_port = 443
+        api_key_raw  = (form.get("api_key") or "").strip()
+        gaia_user    = (form.get("gaia_user") or "").strip() or None
+        gaia_pw_raw  = (form.get("gaia_password") or "").strip()
+        notes        = (form.get("notes") or "").strip() or None
+        role         = (form.get("role") or "both").strip().lower()
+        nat_mode     = (form.get("nat_mode") or "").strip().lower()  # Forti only
+        routing_mode = (form.get("routing_mode") or "").strip().lower()  # PA only
 
-    # If the user is (re)setting the Gaia password and left the user blank,
-    # default to "admin" (CP's stock account). Mirrors /devices/add/cp/save.
-    if gaia_pw_raw and not gaia_user:
-        gaia_user = "admin"
+        # If the user is (re)setting the Gaia password and left the user blank,
+        # default to "admin" (CP's stock account). Mirrors /devices/add/cp/save.
+        if gaia_pw_raw and not gaia_user:
+            gaia_user = "admin"
 
-    if role not in ("source", "target", "both"):
-        role = "both"
+        if role not in ("source", "target", "both"):
+            role = "both"
 
-    # Build SET fragments for secrets that follow "blank = keep" semantics.
-    # api_key + gaia_password are write-only (passwords); the form sends an
-    # empty value when the user didn't touch the field, and we must not
-    # clobber the stored value to NULL in that case.
-    secret_sets = []
-    secret_params: dict[str, str] = {}
-    if api_key_raw:
-        secret_sets.append("api_key=:key")
-        secret_params["key"] = secrets_util.protect(api_key_raw)
-    if gaia_pw_raw:
-        secret_sets.append("gaia_password=:gp")
-        secret_params["gp"] = secrets_util.protect(gaia_pw_raw)
+        # Build SET fragments for secrets that follow "blank = keep" semantics.
+        # api_key + gaia_password are write-only (passwords); the form sends an
+        # empty value when the user didn't touch the field, and we must not
+        # clobber the stored value to NULL in that case.
+        secret_sets = []
+        secret_params: dict[str, str] = {}
+        if api_key_raw:
+            secret_sets.append("api_key=:key")
+            secret_params["key"] = secrets_util.protect(api_key_raw)
+        if gaia_pw_raw:
+            secret_sets.append("gaia_password=:gp")
+            secret_params["gp"] = secrets_util.protect(gaia_pw_raw)
 
-    engine = get_engine()
-    with engine.begin() as conn:
-        # CP gateway-as-device rows pin identity in (mgmt_ip, gateway_uid,
-        # policy_package). mgmt_ip = Gateway-IP and is identity, not a
-        # mutable endpoint - refuse to overwrite it on edit. Legacy CP and
-        # PANW rows keep the original behavior.
-        existing = conn.execute(text(
-            "SELECT platform, mgmt_ip, mgmt_port, config FROM fw_devices WHERE id=:id"
-        ), {"id": device_id}).mappings().fetchone()
-        ip_to_write   = mgmt_ip
-        port_to_write = mgmt_port
-        if existing and existing["platform"] == "checkpoint":
-            try:
-                cfg = json.loads(existing["config"] or "{}")
-            except Exception:
-                cfg = {}
-            if (cfg.get("cp") or {}).get("gateway_uid"):
-                ip_to_write   = existing["mgmt_ip"]
-                port_to_write = existing["mgmt_port"]
-            # Fail-fast Gaia probe on credential change - same contract as
-            # the add wizard (a wrong password otherwise resurfaces later as
-            # cryptic collect failures). Probe target = the gateway IP.
-            if gaia_pw_raw:
+        engine = get_engine()
+        with engine.begin() as conn:
+            # CP gateway-as-device rows pin identity in (mgmt_ip, gateway_uid,
+            # policy_package). mgmt_ip = Gateway-IP and is identity, not a
+            # mutable endpoint - refuse to overwrite it on edit. Legacy CP and
+            # PANW rows keep the original behavior.
+            existing = conn.execute(text(
+                "SELECT platform, mgmt_ip, mgmt_port, config FROM fw_devices WHERE id=:id"
+            ), {"id": device_id}).mappings().fetchone()
+            ip_to_write   = mgmt_ip
+            port_to_write = mgmt_port
+            if existing and existing["platform"] == "checkpoint":
                 try:
-                    _ghost = management_host(ip_to_write or mgmt_ip or existing["mgmt_ip"], "Gaia")
-                except ManagementAddressError as exc:
-                    return RedirectResponse("/projects?form_error=" + urllib.parse.quote(str(exc)),
-                                            status_code=303)
-                try:
-                    _gr = requests.post(f"https://{_ghost}:443/gaia_api/login",
-                                        json={"user": gaia_user,
-                                              "password": gaia_pw_raw},
-                                        verify=False, timeout=(6, 20))
-                    if not (_gr.status_code == 200
-                            and (_gr.json() or {}).get("sid")):
-                        return RedirectResponse(
-                            "/projects?form_error=" + urllib.parse.quote(
-                                f"Gaia login failed on {_ghost} "
-                                f"(HTTP {_gr.status_code}): credentials NOT "
-                                "saved. Check password / Gaia REST API"),
-                            status_code=303)
+                    cfg = json.loads(existing["config"] or "{}")
+                except Exception:
+                    cfg = {}
+                if (cfg.get("cp") or {}).get("gateway_uid"):
+                    ip_to_write   = existing["mgmt_ip"]
+                    port_to_write = existing["mgmt_port"]
+                # Fail-fast Gaia probe on credential change - same contract as
+                # the add wizard (a wrong password otherwise resurfaces later as
+                # cryptic collect failures). Probe target = the gateway IP.
+                if gaia_pw_raw:
                     try:
-                        requests.post(f"https://{_ghost}:443/gaia_api/logout",
-                                      headers={"X-chkp-sid": _gr.json()["sid"]},
-                                      verify=False, timeout=(6, 10))
-                    except Exception:
-                        pass
-                except requests.exceptions.RequestException as exc:
-                    return RedirectResponse(
-                        "/projects?form_error=" + urllib.parse.quote(
-                            f"Gaia API on {_ghost} not reachable "
-                            f"({exc.__class__.__name__}): credentials NOT "
-                            "saved. Enable the Gaia REST API first"),
-                        status_code=303)
+                        _ghost = management_host(ip_to_write or mgmt_ip or existing["mgmt_ip"], "Gaia")
+                    except ManagementAddressError as exc:
+                        return RedirectResponse("/devices?form_error=" + urllib.parse.quote(str(exc)),
+                                                status_code=303)
+                    try:
+                        _gr = requests.post(f"https://{_ghost}:443/gaia_api/login",
+                                            json={"user": gaia_user,
+                                                  "password": gaia_pw_raw},
+                                            verify=False, timeout=(6, 20))
+                        if not (_gr.status_code == 200
+                                and (_gr.json() or {}).get("sid")):
+                            # back to the Devices page, where the dialog lives (D96, 2026-11-16)
+                            return RedirectResponse(
+                                "/devices?form_error=" + urllib.parse.quote(
+                                    f"Gaia login failed on {_ghost} (HTTP {_gr.status_code}): the "
+                                    "credentials were not saved. Check the Gaia user and password."),
+                                status_code=303)
+                        try:
+                            requests.post(f"https://{_ghost}:443/gaia_api/logout",
+                                          headers={"X-chkp-sid": _gr.json()["sid"]},
+                                          verify=False, timeout=(6, 10))
+                        except Exception:
+                            pass
+                    except requests.exceptions.RequestException as exc:
+                        return RedirectResponse(
+                            "/devices?form_error=" + urllib.parse.quote(
+                                f"The Gaia API on {_ghost} did not answer: the credentials were not "
+                                "saved. Enable the Gaia REST API on the gateway first."),
+                            status_code=303)
 
-        # FortiGate NAT rendering mode (Stufe B): persist into
-        # config.fortigate.nat_mode {auto|central|policy}, preserving other config.
-        config_set, config_param = "", {}
-        if (existing and existing["platform"] == "fortigate"
-                and nat_mode in ("auto", "central", "policy")):
-            try:
-                fcfg = json.loads(existing["config"] or "{}")
-            except Exception:
-                fcfg = {}
-            fcfg.setdefault("fortigate", {})["nat_mode"] = nat_mode
-            config_set = ", config=:cfg"
-            config_param["cfg"] = json.dumps(fcfg)
-        elif (existing and existing["platform"] == "panw"
-                and routing_mode in ("auto", "legacy", "advanced")):
-            # PAN-OS routing render mode: persist into config.panw.routing_mode
-            # {auto|legacy|advanced}, preserving other config (e.g. config.panorama).
-            try:
-                pcfg = json.loads(existing["config"] or "{}")
-            except Exception:
-                pcfg = {}
-            pcfg.setdefault("panw", {})["routing_mode"] = routing_mode
-            config_set = ", config=:cfg"
-            config_param["cfg"] = json.dumps(pcfg)
-        elif existing and existing["platform"] == "firepower":
-            # FDM admin username: persist into config.ftd.username (blank =
-            # keep 'admin' default), preserving other config keys.
-            role = "source"   # source-only platform - role is not editable
-            ftd_user = (form.get("ftd_username") or "").strip() or "admin"
-            try:
-                tcfg = json.loads(existing["config"] or "{}")
-            except Exception:
-                tcfg = {}
-            tcfg.setdefault("ftd", {})["username"] = ftd_user
-            config_set = ", config=:cfg"
-            config_param["cfg"] = json.dumps(tcfg)
-        elif existing and existing["platform"] == "opnsense":
-            # Key id into config.opnsense.api_key_id, preserving the rest -
-            # including a stored configuration from the upload path. Blank
-            # keeps what is there, matching the "blank = keep" semantics the
-            # secret fields use.
-            opn_key = (form.get("opn_api_key_id") or "").strip()
-            try:
-                ocfg = json.loads(existing["config"] or "{}")
-            except Exception:
-                ocfg = {}
-            if opn_key:
-                ocfg.setdefault("opnsense", {})["api_key_id"] = opn_key
+            # FortiGate NAT rendering mode (Stufe B): persist into
+            # config.fortigate.nat_mode {auto|central|policy}, preserving other config.
+            config_set, config_param = "", {}
+            if (existing and existing["platform"] == "fortigate"
+                    and nat_mode in ("auto", "central", "policy")):
+                try:
+                    fcfg = json.loads(existing["config"] or "{}")
+                except Exception:
+                    fcfg = {}
+                fcfg.setdefault("fortigate", {})["nat_mode"] = nat_mode
                 config_set = ", config=:cfg"
-                config_param["cfg"] = json.dumps(ocfg)
-        elif existing and existing["platform"] in CLOUD_SOURCE_PLATFORMS:
-            # Cloud account (EE): the ids live in config.<platform>, posted
-            # as cloud_<key> fields; blank keeps what is there, an uploaded
-            # bundle under the same block survives. Source only.
-            role = "source"
-            try:
-                ccfg = json.loads(existing["config"] or "{}")
-            except Exception:
-                ccfg = {}
-            block = ccfg.setdefault(existing["platform"], {})
-            changed = False
-            for fk, fv in form.items():
-                if fk.startswith("cloud_") and fk != "cloud_name":
-                    val = str(fv or "").strip()
-                    if val:
-                        block[fk[len("cloud_"):]] = val
-                        changed = True
-            if changed:
+                config_param["cfg"] = json.dumps(fcfg)
+            elif (existing and existing["platform"] == "panw"
+                    and routing_mode in ("auto", "legacy", "advanced")):
+                # PAN-OS routing render mode: persist into config.panw.routing_mode
+                # {auto|legacy|advanced}, preserving other config (e.g. config.panorama).
+                try:
+                    pcfg = json.loads(existing["config"] or "{}")
+                except Exception:
+                    pcfg = {}
+                pcfg.setdefault("panw", {})["routing_mode"] = routing_mode
                 config_set = ", config=:cfg"
-                config_param["cfg"] = json.dumps(ccfg)
+                config_param["cfg"] = json.dumps(pcfg)
+            elif existing and existing["platform"] == "firepower":
+                # FDM admin username: persist into config.ftd.username (blank =
+                # keep 'admin' default), preserving other config keys.
+                role = "source"   # source-only platform - role is not editable
+                ftd_user = (form.get("ftd_username") or "").strip() or "admin"
+                try:
+                    tcfg = json.loads(existing["config"] or "{}")
+                except Exception:
+                    tcfg = {}
+                tcfg.setdefault("ftd", {})["username"] = ftd_user
+                config_set = ", config=:cfg"
+                config_param["cfg"] = json.dumps(tcfg)
+            elif existing and existing["platform"] == "opnsense":
+                # Key id into config.opnsense.api_key_id, preserving the rest -
+                # including a stored configuration from the upload path. Blank
+                # keeps what is there, matching the "blank = keep" semantics the
+                # secret fields use.
+                opn_key = (form.get("opn_api_key_id") or "").strip()
+                try:
+                    ocfg = json.loads(existing["config"] or "{}")
+                except Exception:
+                    ocfg = {}
+                if opn_key:
+                    ocfg.setdefault("opnsense", {})["api_key_id"] = opn_key
+                    config_set = ", config=:cfg"
+                    config_param["cfg"] = json.dumps(ocfg)
+            elif existing and existing["platform"] in CLOUD_SOURCE_PLATFORMS:
+                # Cloud account (EE): the ids live in config.<platform>, posted
+                # as cloud_<key> fields; blank keeps what is there, an uploaded
+                # bundle under the same block survives. Source only.
+                role = "source"
+                try:
+                    ccfg = json.loads(existing["config"] or "{}")
+                except Exception:
+                    ccfg = {}
+                block = ccfg.setdefault(existing["platform"], {})
+                changed = False
+                for fk, fv in form.items():
+                    if fk.startswith("cloud_") and fk != "cloud_name":
+                        val = str(fv or "").strip()
+                        if val:
+                            block[fk[len("cloud_"):]] = val
+                            changed = True
+                if changed:
+                    config_set = ", config=:cfg"
+                    config_param["cfg"] = json.dumps(ccfg)
 
-        # display_name is intentionally not in the SET list - the form has no
-        # field for it, so writing :dn would clobber any pre-existing value
-        # (set elsewhere e.g. via auto-detected hostname) to NULL on every save.
-        sql = (
-            "UPDATE fw_devices SET role=:role, "
-            "mgmt_ip=:ip, mgmt_port=:port, gaia_user=:gu, notes=:notes"
-        )
-        if secret_sets:
-            sql += ", " + ", ".join(secret_sets)
-        sql += config_set
-        # The tenant is identity, fixed at registration (user decision
-        # 2026-10-03): a form value is ignored. Moving a device means deleting
-        # it and registering it in the other tenant - projects and imported
-        # data stay with the tenant they were made in.
-        tenant_param: dict = {}
-        sql += " WHERE id=:id"
-        params = {"role": role, "ip": ip_to_write, "port": port_to_write,
-                  "gu": gaia_user, "notes": notes, "id": device_id,
-                  **secret_params, **config_param, **tenant_param}
-        conn.execute(text(sql), params)
-    # Back to where the edit came from when a project's device card said so
-    # (hidden `next`, the D8 mechanism); the inventory otherwise. Only a
-    # local path - never an off-site redirect from a form value.
-    _nxt = str(form.get("next") or "").strip()
-    if _nxt.startswith("/") and not _nxt.startswith("//"):
-        return RedirectResponse(_nxt, status_code=303)
-    return RedirectResponse("/projects", status_code=303)
+            # display_name is intentionally not in the SET list - the form has no
+            # field for it, so writing :dn would clobber any pre-existing value
+            # (set elsewhere e.g. via auto-detected hostname) to NULL on every save.
+            sql = (
+                "UPDATE fw_devices SET role=:role, "
+                "mgmt_ip=:ip, mgmt_port=:port, gaia_user=:gu, notes=:notes"
+            )
+            if secret_sets:
+                sql += ", " + ", ".join(secret_sets)
+            sql += config_set
+            # The tenant was fixed at registration (user decision 2026-10-03). Since
+            # D66 (2026-11-13) a Device no project binds may move through the form's
+            # tenant_id: the helper refuses a bound Device, a scope and a name clash.
+            tenant_param: dict = {}
+            _tn_raw = (form.get("tenant_id") or "").strip()
+            if _tn_raw:
+                try:
+                    _moved, _tn_err = _move_device_tenant(conn, device_id, int(_tn_raw))
+                except ValueError:
+                    _moved, _tn_err = False, "tenant_id must be a number"
+                if _tn_err:
+                    return RedirectResponse("/devices?form_error=" + urllib.parse.quote(_tn_err), status_code=303)
+                if _moved:
+                    _moved_to = int(_tn_raw)
+            sql += " WHERE id=:id"
+            params = {"role": role, "ip": ip_to_write, "port": port_to_write,
+                      "gu": gaia_user, "notes": notes, "id": device_id,
+                      **secret_params, **config_param, **tenant_param}
+            conn.execute(text(sql), params)
+            # A box with instance scopes: their rows carry its address and credentials as a
+            # derived copy, rewritten here (docs/VIRTUAL_INSTANCES_PLAN.md, D3).
+            instancesource.copy_box_fields(conn, device_id)
+        # Back to where the edit came from when a project's device card said so
+        # (hidden `next`, the D8 mechanism); the inventory otherwise. Only a
+        # local path - never an off-site redirect from a form value.
+        _nxt = str(form.get("next") or "").strip()
+        if _nxt.startswith("/") and not _nxt.startswith("//"):
+            return RedirectResponse(_nxt, status_code=303)
+        # a moved Device shows in its new tenant (D66)
+        return RedirectResponse(f"/devices?tenant={_moved_to}" if _moved_to else "/devices", status_code=303)
+    return await run_in_threadpool(_work)
 
 
 def _iface_guard_response(d: dict, iname: str, conn, device_id: int,
@@ -16633,7 +17596,7 @@ async def interface_update(iface_id: int, request: Request):
                 return JSONResponse({"error": "Interface name cannot be empty"}, status_code=400)
             if not pid:
                 return JSONResponse(
-                    {"error": "A rename belongs to a project: pick a target first."},
+                    {"error": "A rename belongs to a project: open a project first."},
                     status_code=400)
         if "zone_name" in body:
             zone_name_val = body["zone_name"] or None
@@ -16902,16 +17865,20 @@ async def interface_update(iface_id: int, request: Request):
             old_pfx = set(_iface_connected_prefixes(_old_ips))
             new_pfx = set(_iface_connected_prefixes(ips))
             fact_pfx: set = set()
-            for pfx, vr in conn.execute(text(
-                    "SELECT prefix, COALESCE(vr_name, 'default') FROM fw_routes "
+            for pfx, plen, vr in conn.execute(text(
+                    "SELECT prefix, prefix_len, COALESCE(vr_name, 'default') FROM fw_routes "
                     "WHERE device_id = :did AND interface_name = :iface "
                     "AND project_id IS NULL AND next_hop IS NULL"
             ), {"did": device_id, "iface": old_iface_name}).fetchall():
-                fact_pfx.add(pfx)
-                if pfx in old_pfx and pfx not in new_pfx:
+                # the stored prefix comes bare ('192.0.2.0' with prefix_len, the readers) or as a
+                # CIDR (the connected synthesis): compared in one form, else every imported
+                # connected network came back as a duplicate addition (2026-11-16, gcp to PA)
+                pfx_c = str(pfx) if "/" in str(pfx) else f"{pfx}/{plen}"
+                fact_pfx.add(pfx_c)
+                if pfx_c in old_pfx and pfx_c not in new_pfx:
                     projview.exclude(conn, pid, device_id, "route", projview.route_key(pfx, vr),
                                      label=projview.route_label(pfx, None, vr), reason="edit")
-                elif pfx in new_pfx:
+                elif pfx_c in new_pfx:
                     projview.restore(conn, pid, device_id, "route", projview.route_key(pfx, vr))
             conn.execute(text(
                 "DELETE FROM fw_routes WHERE device_id = :did AND project_id = :pid "
@@ -17525,12 +18492,18 @@ async def rules_shadowing(request: Request, device_id: int, target_id: int = 0):
         ), {"id": device_id}).fetchone()
         if not row:
             return JSONResponse({"error": "device not found"}, status_code=404)
-        tplat = ""
+        tplat, tmode = "", None
         if target_id:
             trow = conn.execute(text(
-                "SELECT platform FROM fw_devices WHERE id = :id"
+                "SELECT platform, config FROM fw_devices WHERE id = :id"
             ), {"id": target_id}).fetchone()
             tplat = (trow[0] or "") if trow else ""
+            if tplat == "fortigate":
+                # the mode the generate renders for (unknown reads profile-based)
+                try:
+                    tmode, _ = _forti_effective_ngfw_mode(json.loads(trow[1] or "{}"))
+                except Exception:
+                    tmode = None
         display = dict(load_display(conn))
         display["group_by"] = "device"
         _pid = _page_project(conn, request, device_id, target_id or None)
@@ -17541,7 +18514,7 @@ async def rules_shadowing(request: Request, device_id: int, target_id: int = 0):
         rules_flat: list[dict] = []
         for rs in (data.get("devices") or {}).values():
             rules_flat.extend(rs)
-        profile = shadowing.profile_for(tplat)
+        profile = shadowing.profile_for(tplat, tmode)
         res = shadowing.analyze(conn, device_id, rules_flat, profile)
         _names = {(r.get("rhash") or ""): (r.get("rule_name") or "") for r in rules_flat}
         for _rh, _e in (res.get("shadowed") or {}).items():
@@ -17553,7 +18526,11 @@ async def rules_shadowing(request: Request, device_id: int, target_id: int = 0):
         "skipped": res["skipped"],
         "count": len(res["shadowed"]),
         "total": len(rules_flat),
+        # 15b: an empty result says when nothing could have covered at all
+        "candidates": int(res.get("candidates") or 0),
+        "no_cover": shadowing.explain_no_cover(res),
         "zones_in_match": profile.zones_in_match,
+        "apps_in_match": profile.apps_in_match,
         "target_platform": tplat,
     })
 
@@ -18393,15 +19370,51 @@ async def nat_rule_get(rule_id: int):
     return JSONResponse(out)
 
 
+def _nat_override_set(conn, pid: int, nat_hash, col: str, value) -> None:
+    """One project-own slot of an imported NAT rule (description, disabled):
+    the override row keyed on nat_hash, source manual, so the edit survives a
+    re-import and stays this project's (2026-11-10, text review 14.4 item 1)."""
+    assert col in ("description", "disabled")
+    conn.execute(text(f"""
+        INSERT INTO fw_nat_rule_overrides (project_id, nat_hash, {col}, source)
+        VALUES (:pid, :nh, :v, 'manual')
+        ON DUPLICATE KEY UPDATE {col} = :v, source = 'manual'
+    """), {"pid": pid, "nh": nat_hash, "v": value})
+
+
+def _nat_override_props_patch(conn, pid: int, nat_hash, patch: dict, platform: str | None) -> None:
+    """The project's property override of an imported NAT rule after a patch
+    (nat_schemas.override_props_merge): only the patched keys land in the
+    row's JSON, the negate flags in it stay as they are."""
+    cur = conn.execute(text(
+        "SELECT properties FROM fw_nat_rule_overrides WHERE project_id = :pid AND nat_hash = :nh"
+    ), {"pid": pid, "nh": nat_hash}).scalar()
+    new_ov = nat_override_props_merge(_decode_nat_props(cur), patch, platform)
+    conn.execute(text("""
+        INSERT INTO fw_nat_rule_overrides (project_id, nat_hash, properties, source)
+        VALUES (:pid, :nh, :p, 'manual')
+        ON DUPLICATE KEY UPDATE properties = :p, source = 'manual'
+    """), {"pid": pid, "nh": nat_hash, "p": json.dumps(new_ov) if new_ov else None})
+
+
+_NAT_NO_HASH = ("this NAT rule has no hash yet: re-import the device, then edit it")
+
+
 @app.patch("/nat-rules/{rule_id}", response_class=JSONResponse)
 async def nat_rule_patch(rule_id: int, request: Request):
     """Partial update of name / description / disabled / properties.
 
-    Hash-input fields (nat_type, zones, orig_*, trans_*) are silently
-    ignored - those changes belong in Delete+Add or Re-Import per
+    The project model (docs/PROJECT_VIEW_DESIGN.md, D4; 2026-11-10, text
+    review 14.4 item 1): an imported rule is never written. Its name goes
+    into the project's name map like every other rename, description,
+    disabled and the target fields into the project's override row
+    (fw_nat_rule_overrides, keyed on nat_hash, so they survive a re-import
+    and no other project sees them). The project's own addition is written
+    in place. Hash-input fields (nat_type, zones, orig_*, trans_*) are
+    silently ignored - those changes belong in Delete+Add or Re-Import per
     project_nat_full_scope_plan.
 
-    409 on UNIQUE(device_id, name) violations.
+    409 on a name another rule of the device carries or is shown as.
     """
     body = await request.json()
     target_platform = (body.get("target_platform") or "").strip().lower() or None
@@ -18409,11 +19422,14 @@ async def nat_rule_patch(rule_id: int, request: Request):
     with engine.begin() as conn:
         pid = _ctx_project_required(conn, request)
         row = conn.execute(text(
-            "SELECT device_id, name, properties, nat_hash FROM fw_nat_rules WHERE id = :id"
+            "SELECT device_id, name, properties, nat_hash, project_id FROM fw_nat_rules WHERE id = :id"
         ), {"id": rule_id}).fetchone()
         if not row:
             return JSONResponse({"error": "nat-rule not found"}, status_code=404)
-        device_id, old_name, props_raw, nat_hash = row[0], row[1], row[2], row[3]
+        device_id, old_name, props_raw, nat_hash, row_pid = row[0], row[1], row[2], row[3], row[4]
+        own = _own_network_row(pid, row_pid)
+        if not own and not nat_hash:
+            return JSONResponse({"error": _NAT_NO_HASH}, status_code=409)
 
         # src_zone / dst_zone - the per-rule zone OVERLAY (fw_nat_rule_overrides,
         # same slots the route-derive writes; nat_hash-keyed → survives
@@ -18433,47 +19449,60 @@ async def nat_rule_patch(rule_id: int, request: Request):
                 ON DUPLICATE KEY UPDATE {_col} = :v, source = 'manual'
             """), {"pid": pid, "nh": nat_hash, "v": _json})
 
-        # Name - rename is a simple UPDATE; name is excluded from nat_hash so
-        # override bindings survive. UNIQUE(device_id, name) → 409.
         if "name" in body:
             n = str(body["name"] or "").strip()
             if not n:
                 return JSONResponse({"error": "name cannot be empty"}, status_code=400)
-            if n != old_name:
-                clash = conn.execute(text(
-                    "SELECT 1 FROM fw_nat_rules WHERE device_id = :did AND name = :n AND id <> :id"
-                ), {"did": device_id, "n": n, "id": rule_id}).fetchone()
-                if clash:
-                    return JSONResponse({"error": "nat-rule with that name already exists"}, status_code=409)
-                conn.execute(text(
-                    "UPDATE fw_nat_rules SET name = :n WHERE id = :id"
-                ), {"n": n, "id": rule_id})
+            if own:
+                # the project's own rule: a plain rename, UNIQUE(device_id, name) → 409
+                if n != old_name:
+                    clash = conn.execute(text(
+                        "SELECT 1 FROM fw_nat_rules WHERE device_id = :did AND name = :n AND id <> :id"
+                    ), {"did": device_id, "n": n, "id": rule_id}).fetchone()
+                    if clash:
+                        return JSONResponse({"error": "nat-rule with that name already exists"}, status_code=409)
+                    conn.execute(text(
+                        "UPDATE fw_nat_rules SET name = :n WHERE id = :id"
+                    ), {"n": n, "id": rule_id})
+            else:
+                try:
+                    _name_map_set(conn, pid, device_id, "nat_rule", old_name, n)
+                except ValueError as e:
+                    return JSONResponse({"error": str(e)}, status_code=409)
 
-        # description / disabled - straight UPDATE
         if "description" in body:
-            conn.execute(text(
-                "UPDATE fw_nat_rules SET description = :d WHERE id = :id"
-            ), {"d": (body["description"] or "") or None, "id": rule_id})
+            desc = (body["description"] or "")
+            if own:
+                conn.execute(text(
+                    "UPDATE fw_nat_rules SET description = :d WHERE id = :id"
+                ), {"d": desc or None, "id": rule_id})
+            else:
+                _nat_override_set(conn, pid, nat_hash, "description", desc)
 
         if "disabled" in body:
             val = body["disabled"]
             if isinstance(val, str):
                 val = val.strip().lower() in ("1", "true", "yes", "on")
-            conn.execute(text(
-                "UPDATE fw_nat_rules SET disabled = :d WHERE id = :id"
-            ), {"d": 1 if val else 0, "id": rule_id})
+            if own:
+                conn.execute(text(
+                    "UPDATE fw_nat_rules SET disabled = :d WHERE id = :id"
+                ), {"d": 1 if val else 0, "id": rule_id})
+            else:
+                _nat_override_set(conn, pid, nat_hash, "disabled", 1 if val else 0)
 
-        # properties - schema-validated merge (Phase D fills the schema;
-        # Phase C accepts any platform with empty whitelist → no-op)
+        # properties - schema-validated merge against the target platform's vocabulary
         if isinstance(body.get("properties"), dict):
-            merged = _apply_nat_props_patch(
-                _decode_nat_props(props_raw),
-                body["properties"],
-                target_platform,
-            )
-            conn.execute(text(
-                "UPDATE fw_nat_rules SET properties = :p WHERE id = :id"
-            ), {"p": json.dumps(merged) if merged else None, "id": rule_id})
+            if own:
+                merged = _apply_nat_props_patch(
+                    _decode_nat_props(props_raw),
+                    body["properties"],
+                    target_platform,
+                )
+                conn.execute(text(
+                    "UPDATE fw_nat_rules SET properties = :p WHERE id = :id"
+                ), {"p": json.dumps(merged) if merged else None, "id": rule_id})
+            else:
+                _nat_override_props_patch(conn, pid, nat_hash, body["properties"], target_platform)
     return JSONResponse({"ok": True})
 
 
@@ -18595,7 +19624,9 @@ async def nat_rules_bulk(request: Request):
     nat_hash-keyed, source='manual' - same slot the single-rule dropdown
     writes); ``__clear__`` empties the slot so the rule reverts to derive/
     imported zones. Hash-input fields are not accepted (Phase D /
-    Delete+Add territory).
+    Delete+Add territory). An imported rule's description, disabled flag and
+    properties go into the project's override row (2026-11-10), the
+    project's own addition is written in place.
     """
     body = await request.json()
     rule_ids = body.get("rule_ids") or []
@@ -18626,10 +19657,14 @@ async def nat_rules_bulk(request: Request):
             except (TypeError, ValueError):
                 continue
             row = conn.execute(text(
-                "SELECT properties, nat_hash FROM fw_nat_rules WHERE id = :id"
+                "SELECT properties, nat_hash, project_id FROM fw_nat_rules WHERE id = :id"
             ), {"id": rid_int}).fetchone()
             if not row:
                 continue
+            # the project model (2026-11-10, see nat_rule_patch): an imported rule
+            # gets its edits in the project's override row, the project's own
+            # addition is written in place
+            own = _own_network_row(pid, row[2])
             if zone_sets and row[1]:
                 for _col, _zval in zone_sets.items():
                     _json = json.dumps([_zval]) if _zval else None
@@ -18638,21 +19673,32 @@ async def nat_rules_bulk(request: Request):
                         VALUES (:pid, :nh, :v, 'manual')
                         ON DUPLICATE KEY UPDATE {_col} = :v, source = 'manual'
                     """), {"pid": pid, "nh": row[1], "v": _json})
+            if not own and not row[1]:
+                continue   # an imported rule without a hash: nothing project-own can hold its edit
             if set_desc is not None:
-                conn.execute(text(
-                    "UPDATE fw_nat_rules SET description = :d WHERE id = :id"
-                ), {"d": (set_desc or None), "id": rid_int})
+                if own:
+                    conn.execute(text(
+                        "UPDATE fw_nat_rules SET description = :d WHERE id = :id"
+                    ), {"d": (set_desc or None), "id": rid_int})
+                else:
+                    _nat_override_set(conn, pid, row[1], "description", set_desc or "")
             if set_dis is not None:
-                conn.execute(text(
-                    "UPDATE fw_nat_rules SET disabled = :d WHERE id = :id"
-                ), {"d": set_dis, "id": rid_int})
+                if own:
+                    conn.execute(text(
+                        "UPDATE fw_nat_rules SET disabled = :d WHERE id = :id"
+                    ), {"d": set_dis, "id": rid_int})
+                else:
+                    _nat_override_set(conn, pid, row[1], "disabled", set_dis)
             if patch_props:
-                merged = _apply_nat_props_patch(
-                    _decode_nat_props(row[0]), patch_props, target_platform,
-                )
-                conn.execute(text(
-                    "UPDATE fw_nat_rules SET properties = :p WHERE id = :id"
-                ), {"p": json.dumps(merged) if merged else None, "id": rid_int})
+                if own:
+                    merged = _apply_nat_props_patch(
+                        _decode_nat_props(row[0]), patch_props, target_platform,
+                    )
+                    conn.execute(text(
+                        "UPDATE fw_nat_rules SET properties = :p WHERE id = :id"
+                    ), {"p": json.dumps(merged) if merged else None, "id": rid_int})
+                else:
+                    _nat_override_props_patch(conn, pid, row[1], patch_props, target_platform)
             updated += 1
     return JSONResponse({"ok": True, "updated": updated})
 
@@ -18710,7 +19756,10 @@ def _fold_preview_state(conn, source_id: int | None,
         if ((v or {}).get("type") or "").lower() == "ippool":
             ippools.add(nm)
     from deploy.fortinet import fold_policy_nat
-    fold = fold_policy_nat(nat_rules, rules, addr_value_lookup, ippools)
+    group_members = {nm: list(v["members"]) for nm, v in addr_value_lookup.items()
+                     if isinstance(v.get("members"), list)}
+    fold = fold_policy_nat(nat_rules, rules, addr_value_lookup, ippools,
+                           group_members=group_members)
     summary = {"total": len(fold["fates"]),
                "folds": 0, "vip": 0, "declared": 0, "disabled": 0}
     fates_by_name: dict[str, dict] = {}
@@ -19194,7 +20243,7 @@ async def vrf_delete(vrf_id: int, request: Request, net_did: int = 0):
 # ═════════════════════════════════════════════════════════════════
 
 @app.get("/enrichment/settings/{device_id}", response_class=JSONResponse)
-async def enrichment_settings_get(request: Request, device_id: int, platform: str = ""):
+def enrichment_settings_get(request: Request, device_id: int, platform: str = ""):
     """Return vendor-specific settings for a device+platform combo."""
     engine = get_engine()
     with engine.connect() as conn:
@@ -19246,7 +20295,7 @@ async def enrichment_settings_get(request: Request, device_id: int, platform: st
 
 
 @app.post("/deploy/cp-pin/revalidate/{device_id}", response_class=JSONResponse)
-async def deploy_cp_pin_revalidate(device_id: int):
+def deploy_cp_pin_revalidate(device_id: int):
     """Re-check a CP gateway device's pinned policy package against the
     management server. Ground truth = the gateway object's
     policy.access-policy-name (show-gateways-and-servers) - the same
@@ -19272,15 +20321,16 @@ async def deploy_cp_pin_revalidate(device_id: int):
         if not (mgmt_ip and row["api_key"]):
             return JSONResponse({"error": "no management address / API key"},
                                 status_code=400)
+        _domain = (cp_cfg.get("domain") or "").strip() or None     # a Multi-Domain row re-checks in its domain
+        _api_key = secrets_util.reveal(row["api_key"])
         try:
-            sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port,
-                                        secrets_util.reveal(row["api_key"]))
+            sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, _api_key, _domain)
             from deploy.checkpoint import _call as cp_call
             with fail_fast_transport():
                 gw_resp = cp_call(base_url, sid, "show-gateways-and-servers",
                                   {"limit": 200, "details-level": "full"})
         except Exception as exc:
-            _cp_invalidate_sid(mgmt_ip, mgmt_port, row["api_key"])
+            _cp_invalidate_sid(mgmt_ip, mgmt_port, _api_key, _domain)
             return JSONResponse({"error": f"management lookup failed: {exc}"},
                                 status_code=502)
         names = {row["host_name"], row["display_name"]}
@@ -19307,7 +20357,7 @@ async def deploy_cp_pin_revalidate(device_id: int):
 
 
 @app.get("/enrichment/settings/{device_id}/options/{key}", response_class=JSONResponse)
-async def enrichment_settings_options(request: Request, device_id: int, key: str, platform: str = "",
+def enrichment_settings_options(request: Request, device_id: int, key: str, platform: str = "",
                                       cp_package: str = ""):
     """Live option lookup for a ``select_remote`` setting.
 
@@ -19441,7 +20491,7 @@ def _pano_catalog_scopes(target_id: int, scope: str) -> list[str] | None:
 
 
 @app.get("/enrichment/security-profiles/{target_id}", response_class=JSONResponse)
-async def enrichment_security_profiles(target_id: int, scope: str = "", cp_package: str = ""):
+def enrichment_security_profiles(target_id: int, scope: str = "", cp_package: str = ""):
     """Read the target's per-rule attachable profile catalog.
 
     Driver-decided shape: returns {category: [name, ...]} where categories are
@@ -19489,7 +20539,7 @@ async def enrichment_security_profiles(target_id: int, scope: str = "", cp_packa
         return JSONResponse({"error": str(e), "supported": False},
                             status_code=400)
     except Exception as e:
-        return JSONResponse({"error": f"read failed: {e}"}, status_code=502)
+        return JSONResponse({"error": f"read failed: {_reach_error(e)}"}, status_code=502)
     return JSONResponse({"target_id": target_id, "platform": platform,
                          "catalog": catalog})
 
@@ -19552,7 +20602,7 @@ def _tp_get_driver(device: dict):
 
 
 @app.get("/enrichment/threat-layers/{target_id}", response_class=JSONResponse)
-async def enrichment_threat_layers(target_id: int, cp_package: str = ""):
+def enrichment_threat_layers(target_id: int, cp_package: str = ""):
     """List Threat-Prevention layers on the target.
 
     Drivers without a TP-rulebase concept return 400 supported=False; the
@@ -19571,7 +20621,7 @@ async def enrichment_threat_layers(target_id: int, cp_package: str = ""):
         return JSONResponse({"error": str(e), "supported": False},
                             status_code=400)
     except Exception as e:
-        return JSONResponse({"error": f"read failed: {e}"}, status_code=502)
+        return JSONResponse({"error": f"read failed: {_reach_error(e)}"}, status_code=502)
     # Default layer for the UI preselect: the layer that belongs to the
     # target's POLICY PACKAGE (finding 2026-09-16: without a default the
     # user configured a foreign package's layer alongside the right one,
@@ -19595,7 +20645,7 @@ async def enrichment_threat_layers(target_id: int, cp_package: str = ""):
 
 
 @app.get("/enrichment/threat-profiles/{target_id}", response_class=JSONResponse)
-async def enrichment_threat_profiles(target_id: int, cp_package: str = ""):
+def enrichment_threat_profiles(target_id: int, cp_package: str = ""):
     """List Threat-Prevention profiles on the target.
 
     Catalog used by the Strategy form (e.g. ``security-ruleset`` needs a
@@ -19614,7 +20664,7 @@ async def enrichment_threat_profiles(target_id: int, cp_package: str = ""):
         return JSONResponse({"error": str(e), "supported": False},
                             status_code=400)
     except Exception as e:
-        return JSONResponse({"error": f"read failed: {e}"}, status_code=502)
+        return JSONResponse({"error": f"read failed: {_reach_error(e)}"}, status_code=502)
     return JSONResponse({"target_id": target_id, "platform": device["platform"],
                          "profiles": profiles})
 
@@ -19767,120 +20817,125 @@ async def enrichment_tp_apply(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    target_id = body.get("target_id")
-    if not isinstance(target_id, int):
-        return JSONResponse({"error": "target_id required (int)"}, status_code=400)
-    source_id = body.get("source_id")
-    if not isinstance(source_id, int):
-        source_id = target_id
-    layer_name = (body.get("layer_name") or "").strip()
-    strategy   = (body.get("strategy") or "").strip()
-    params     = body.get("params") or {}
-    if not layer_name or not strategy or not isinstance(params, dict):
-        return JSONResponse(
-            {"error": "layer_name, strategy, params (dict) required"},
-            status_code=400,
-        )
-
-    res = _tp_load_target_device(target_id, (body.get("cp_package") or ""))
-    if isinstance(res, tuple):
-        return res[0]
-    device = res
-    driver, err = _tp_get_driver(device)
-    if err:
-        return err
-
-    # Catalog-validation: refuse Apply if layer or profile vanished
-    try:
-        layers = driver.list_threat_layers(device=device)
-    except NotImplementedError as e:
-        return JSONResponse({"error": str(e), "supported": False},
-                            status_code=400)
-    except Exception as e:
-        return JSONResponse({"error": f"layer catalog read failed: {e}"},
-                            status_code=502)
-    if not any(l["name"] == layer_name for l in layers):
-        return JSONResponse(
-            {"error": f"layer {layer_name!r} not found on target",
-             "available_layers": [l["name"] for l in layers]},
-            status_code=400,
-        )
-
-    if strategy in ("security-ruleset", "baseline", "protected-assets"):
-        default_profile = (params.get("default_profile") or "").strip()
-        if not default_profile:
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        target_id = body.get("target_id")
+        if not isinstance(target_id, int):
+            return JSONResponse({"error": "target_id required (int)"}, status_code=400)
+        source_id = body.get("source_id")
+        if not isinstance(source_id, int):
+            source_id = target_id
+        layer_name = (body.get("layer_name") or "").strip()
+        strategy   = (body.get("strategy") or "").strip()
+        params     = body.get("params") or {}
+        if not layer_name or not strategy or not isinstance(params, dict):
             return JSONResponse(
-                {"error": f"params.default_profile required for strategy {strategy!r}"},
-                status_code=400,
-            )
-        try:
-            profiles = driver.list_threat_profiles(device=device)
-        except Exception as e:
-            return JSONResponse({"error": f"profile catalog read failed: {e}"},
-                                status_code=502)
-        if not any(p["name"] == default_profile for p in profiles):
-            return JSONResponse(
-                {"error": f"profile {default_profile!r} not found on target",
-                 "available_profiles": [p["name"] for p in profiles]},
+                {"error": "layer_name, strategy, params (dict) required"},
                 status_code=400,
             )
 
-    # Load source-data + generate
-    engine = get_engine()
-    with engine.begin() as conn:
-        # Saving a layer config is a write for the (source, target) pair.
-        pid = _project_for_pair(conn, source_id, target_id, create=True)
-        if pid is None:
-            return JSONResponse({"error": "source or target device not found"},
-                                status_code=404)
-        rules, addr_obj, addr_grp = _tp_load_source_data(
-            conn, source_id, project_id=pid, name_map=namemap.load_name_map(conn, pid))
-        imported_tp = _load_imported_tp_rules(conn, source_id)
+        res = _tp_load_target_device(target_id, (body.get("cp_package") or ""))
+        if isinstance(res, tuple):
+            return res[0]
+        device = res
+        driver, err = _tp_get_driver(device)
+        if err:
+            return err
+
+        # Catalog-validation: refuse Apply if layer or profile vanished
         try:
-            tp_rules = driver.generate_tp_rules(
-                layer_name=layer_name,
-                strategy=strategy,
-                params=params,
-                rules=rules,
-                zones=[],
-                address_objects=addr_obj,
-                address_groups=addr_grp,
-                imported_tp=imported_tp,
-            )
+            layers = driver.list_threat_layers(device=device)
         except NotImplementedError as e:
             return JSONResponse({"error": str(e), "supported": False},
                                 status_code=400)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
-            return JSONResponse({"error": f"generate failed: {e}"},
-                                status_code=500)
+            return JSONResponse({"error": f"layer catalog read failed: {e}"},
+                                status_code=502)
+        if not any(l["name"] == layer_name for l in layers):
+            return JSONResponse(
+                {"error": f"layer {layer_name!r} not found on target",
+                 "available_layers": [l["name"] for l in layers]},
+                status_code=400,
+            )
 
-        conn.execute(text("""
+        if strategy in ("security-ruleset", "baseline", "protected-assets"):
+            default_profile = (params.get("default_profile") or "").strip()
+            if not default_profile:
+                return JSONResponse(
+                    {"error": f"params.default_profile required for strategy {strategy!r}"},
+                    status_code=400,
+                )
+            try:
+                profiles = driver.list_threat_profiles(device=device)
+            except Exception as e:
+                return JSONResponse({"error": f"profile catalog read failed: {e}"},
+                                    status_code=502)
+            if not any(p["name"] == default_profile for p in profiles):
+                return JSONResponse(
+                    {"error": f"profile {default_profile!r} not found on target",
+                     "available_profiles": [p["name"] for p in profiles]},
+                    status_code=400,
+                )
+
+        # Load source-data + generate
+        engine = get_engine()
+        with engine.begin() as conn:
+            # Saving a layer config is a write for the (source, target) pair.
+            pid = _project_for_pair(conn, source_id, target_id, create=True)
+            if pid is None:
+                return JSONResponse({"error": "source or target device not found"},
+                                    status_code=404)
+            rules, addr_obj, addr_grp = _tp_load_source_data(
+                conn, source_id, project_id=pid, name_map=namemap.load_name_map(conn, pid))
+            imported_tp = _load_imported_tp_rules(conn, source_id)
+            try:
+                tp_rules = driver.generate_tp_rules(
+                    layer_name=layer_name,
+                    strategy=strategy,
+                    params=params,
+                    rules=rules,
+                    zones=[],
+                    address_objects=addr_obj,
+                    address_groups=addr_grp,
+                    imported_tp=imported_tp,
+                )
+            except NotImplementedError as e:
+                return JSONResponse({"error": str(e), "supported": False},
+                                    status_code=400)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"error": f"generate failed: {e}"},
+                                    status_code=500)
+
+            conn.execute(text("""
             INSERT INTO fw_tp_layer_config (project_id, device_id, layer_name, strategy, params_json)
             VALUES (:pid, :did, :ln, :st, :pj)
             ON DUPLICATE KEY UPDATE
               strategy    = VALUES(strategy),
               params_json = VALUES(params_json)
         """), {
-            "pid": pid, "did": target_id, "ln": layer_name, "st": strategy,
-            "pj":  json.dumps(params, separators=(",", ":")),
-        })
+                "pid": pid, "did": target_id, "ln": layer_name, "st": strategy,
+                "pj":  json.dumps(params, separators=(",", ":")),
+            })
 
-    return JSONResponse({
-        "target_id":  target_id,
-        "source_id":  source_id,
-        "layer_name": layer_name,
-        "strategy":   strategy,
-        "params":     params,
-        "tp_rules":   tp_rules,
-        "rule_count": len(tp_rules),
-    })
+        return JSONResponse({
+            "target_id":  target_id,
+            "source_id":  source_id,
+            "layer_name": layer_name,
+            "strategy":   strategy,
+            "params":     params,
+            "tp_rules":   tp_rules,
+            "rule_count": len(tp_rules),
+        })
+    return await run_in_threadpool(_work)
 
 
 @app.get("/enrichment/tp/preview/{target_id}/{layer_name:path}",
          response_class=JSONResponse)
-async def enrichment_tp_preview(request: Request, target_id: int, layer_name: str,
+def enrichment_tp_preview(request: Request, target_id: int, layer_name: str,
                                 source_id: int | None = None, cp_package: str = ""):
     """Regenerate TP-rules preview from the saved config for this layer.
 
@@ -20080,7 +21135,7 @@ def _cp_url_category_state(conn, source_id: int, target_id: int,
 
 @app.get("/enrichment/url-category-map/{source_id}/{target_id}",
          response_class=JSONResponse)
-async def enrichment_url_category_map(request: Request, source_id: int, target_id: int):
+def enrichment_url_category_map(request: Request, source_id: int, target_id: int):
     """Mapping state for the Decryption tab: referenced source URL categories
     classified auto/manual/orphaned/unmapped + the target's fetched catalog.
     Only meaningful for a Check Point target (the one decryption renderer that
@@ -20148,7 +21203,7 @@ async def enrichment_url_category_map_delete(target_id: int,
 
 
 @app.get("/enrichment/utm-profiles/{target_id}", response_class=JSONResponse)
-async def enrichment_utm_profiles(target_id: int):
+def enrichment_utm_profiles(target_id: int):
     """Read the Forti target's UTM profile catalog.
 
     Returns ``{"target_id": int, "platform": str,
@@ -20189,13 +21244,13 @@ async def enrichment_utm_profiles(target_id: int):
             status_code=400,
         )
     except Exception as e:
-        return JSONResponse({"error": f"read failed: {e}"}, status_code=502)
+        return JSONResponse({"error": f"read failed: {_reach_error(e)}"}, status_code=502)
     return JSONResponse({"target_id": target_id, "platform": platform,
                          "catalog": catalog})
 
 
 @app.get("/enrichment/log-forwarding/{target_id}", response_class=JSONResponse)
-async def enrichment_log_forwarding(target_id: int, scope: str = ""):
+def enrichment_log_forwarding(target_id: int, scope: str = ""):
     """Read the target's log-forwarding profile catalog.
 
     Same shape as ``/enrichment/security-profiles``. Driver decides categories
@@ -20241,7 +21296,7 @@ async def enrichment_log_forwarding(target_id: int, scope: str = ""):
             status_code=400,
         )
     except Exception as e:
-        return JSONResponse({"error": f"read failed: {e}"}, status_code=502)
+        return JSONResponse({"error": f"read failed: {_reach_error(e)}"}, status_code=502)
     return JSONResponse({"target_id": target_id, "platform": platform,
                          "catalog": catalog})
 
@@ -20385,8 +21440,9 @@ async def enrichment_schedule_apply(request: Request):
     """Bulk-attach a schedule reference to selected rules.
 
     Body: ``{"rule_hashes": [...], "schedule": "<name>", "clear": bool}``.
-    ``clear=true`` (or empty schedule) deletes the override → rule falls
-    back to its source-imported schedule (or none). Writes with
+    ``clear=true`` deletes the override: the rule falls back to its imported
+    schedule. ``schedule="__none__"`` writes an empty override: no schedule, the
+    rule runs always. A name writes that schedule. Writes carry
     ``source='manual'`` so future Phase-B auto-promoter won't stomp it.
     """
     try:
@@ -20408,15 +21464,25 @@ async def enrichment_schedule_apply(request: Request):
         return JSONResponse({"error": "rule_hashes is empty or invalid"},
                             status_code=400)
 
-    # Force-empty Clear semantic: UPSERT a manual row with schedule_name=''.
-    # The read-path COALESCE(schovr.schedule_name, r.schedule) already
-    # honors '' (not NULL) as the override value, so an empty override row
-    # shadows the vendor-imported r.schedule and the cell renders empty.
+    # Clear deletes the override: the rule falls back to its imported schedule
+    # (2026-11-10, docs/UI_USABILITY_PLAN.md 14.4 item 4; until then Clear wrote
+    # an empty override). "__none__" is that empty override by choice: the
+    # read-path COALESCE(schovr.schedule_name, r.schedule) honors '' (not NULL),
+    # so the imported schedule is shadowed and the rule runs always.
     engine = get_engine()
     written = 0
     with engine.begin() as conn:
         pid = _ctx_project_required(conn, request)
-        sval = "" if (clear or not schedule) else schedule
+        if clear:
+            cleared = 0
+            for h in hashes:
+                cleared += conn.execute(text(
+                    "DELETE FROM fw_rule_schedule_overrides WHERE project_id = :pid AND rule_hash = :h"),
+                    {"pid": pid, "h": bytes.fromhex(h)}).rowcount
+            return JSONResponse({"cleared": cleared, "schedule": None})
+        if not schedule:
+            return JSONResponse({"error": "pick a schedule or none"}, status_code=400)
+        sval = "" if schedule == "__none__" else schedule
         for h in hashes:
             conn.execute(text("""
                 INSERT INTO fw_rule_schedule_overrides
@@ -20427,9 +21493,7 @@ async def enrichment_schedule_apply(request: Request):
                   source        = 'manual'
             """), {"pid": pid, "h": bytes.fromhex(h), "s": sval})
             written += 1
-    if clear or not schedule:
-        return JSONResponse({"cleared": written, "schedule": None})
-    return JSONResponse({"written": written, "schedule": schedule})
+    return JSONResponse({"written": written, "schedule": ("none" if sval == "" else sval)})
 
 
 def _effective_identities(conn, hashes: list[str],
@@ -20763,7 +21827,9 @@ async def enrichment_pbf_edit(request: Request):
 @app.post("/enrichment/ssl/edit", response_class=JSONResponse)
 async def enrichment_ssl_edit(request: Request):
     """Per-rule OR bulk SSL-decryption field edit (Phase 5d + UI-unify). Body:
-    ``{ssl_hash | ssl_hashes:[...], edits:{action?,disabled?,cert_ref?,deleted?}}``
+    ``{ssl_hash | ssl_hashes:[...], edits:{action?,disabled?,deleted?}}`` (cert_ref was
+    editable until 2026-11-10: the forward-trust CA is a setting of the box and no
+    renderer read the field, docs/UI_USABILITY_PLAN.md 14.4 item 2)
     or ``{ssl_hash|ssl_hashes, reset:true}``. The same edits/reset apply to every
     listed hash (bulk = the enrichment 'apply to selection' pattern). Edits merge
     into fw_ssl_rule_overrides.edits keyed on the IMPORTED ssl_hash (stable,
@@ -20814,8 +21880,6 @@ async def enrichment_ssl_edit(request: Request):
             clean[k] = v
         elif k in ("disabled", "deleted"):
             clean[k] = (None if v is None else bool(v))
-        elif k == "cert_ref":
-            clean[k] = (str(v).strip() or None) if v is not None else None
         # unknown keys ignored
     if not clean:
         return JSONResponse({"error": "no valid edits"}, status_code=400)
@@ -20957,25 +22021,30 @@ async def enrichment_vpn_cp_domain_mode(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    try:
-        tid = int(body.get("target_id"))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "target_id required"}, status_code=400)
-    mode = (body.get("mode") or "").strip().lower()
-    if mode not in ("manual", "topology"):
-        return JSONResponse({"error": "mode must be manual|topology"}, status_code=400)
-    engine = get_engine()
-    with engine.begin() as conn:
-        pid = _ctx_project_required(conn, request)
-        conn.execute(text(
-            "DELETE FROM fw_deploy_settings WHERE project_id = :pid AND device_id = :id "
-            "AND platform = 'checkpoint' AND skey = 'cp_vpn_domain_mode'"
-        ), {"pid": pid, "id": tid})
-        conn.execute(text(
-            "INSERT INTO fw_deploy_settings (project_id, device_id, platform, skey, svalue) "
-            "VALUES (:pid, :id, 'checkpoint', 'cp_vpn_domain_mode', :v)"
-        ), {"pid": pid, "id": tid, "v": mode})
-    return JSONResponse({"ok": True, "mode": mode})
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        try:
+            tid = int(body.get("target_id"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "target_id required"}, status_code=400)
+        mode = (body.get("mode") or "").strip().lower()
+        if mode not in ("manual", "topology"):
+            return JSONResponse({"error": "mode must be manual|topology"}, status_code=400)
+        engine = get_engine()
+        with engine.begin() as conn:
+            pid = _ctx_project_required(conn, request)
+            conn.execute(text(
+                "DELETE FROM fw_deploy_settings WHERE project_id = :pid AND device_id = :id "
+                "AND platform = 'checkpoint' AND skey = 'cp_vpn_domain_mode'"
+            ), {"pid": pid, "id": tid})
+            conn.execute(text(
+                "INSERT INTO fw_deploy_settings (project_id, device_id, platform, skey, svalue) "
+                "VALUES (:pid, :id, 'checkpoint', 'cp_vpn_domain_mode', :v)"
+            ), {"pid": pid, "id": tid, "v": mode})
+        return JSONResponse({"ok": True, "mode": mode})
+    return await run_in_threadpool(_work)
 
 
 @app.post("/enrichment/vpn/cp-topology", response_class=JSONResponse)
@@ -20989,25 +22058,30 @@ async def enrichment_vpn_cp_topology(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    try:
-        tid = int(body.get("target_id"))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "target_id required"}, status_code=400)
-    topo = (body.get("topology") or "").strip().lower()
-    if topo not in ("meshed", "star"):
-        return JSONResponse({"error": "topology must be meshed|star"}, status_code=400)
-    engine = get_engine()
-    with engine.begin() as conn:
-        pid = _ctx_project_required(conn, request)
-        conn.execute(text(
-            "DELETE FROM fw_deploy_settings WHERE project_id = :pid AND device_id = :id "
-            "AND platform = 'checkpoint' AND skey = 'cp_vpn_topology'"
-        ), {"pid": pid, "id": tid})
-        conn.execute(text(
-            "INSERT INTO fw_deploy_settings (project_id, device_id, platform, skey, svalue) "
-            "VALUES (:pid, :id, 'checkpoint', 'cp_vpn_topology', :v)"
-        ), {"pid": pid, "id": tid, "v": topo})
-    return JSONResponse({"ok": True, "topology": topo})
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        try:
+            tid = int(body.get("target_id"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "target_id required"}, status_code=400)
+        topo = (body.get("topology") or "").strip().lower()
+        if topo not in ("meshed", "star"):
+            return JSONResponse({"error": "topology must be meshed|star"}, status_code=400)
+        engine = get_engine()
+        with engine.begin() as conn:
+            pid = _ctx_project_required(conn, request)
+            conn.execute(text(
+                "DELETE FROM fw_deploy_settings WHERE project_id = :pid AND device_id = :id "
+                "AND platform = 'checkpoint' AND skey = 'cp_vpn_topology'"
+            ), {"pid": pid, "id": tid})
+            conn.execute(text(
+                "INSERT INTO fw_deploy_settings (project_id, device_id, platform, skey, svalue) "
+                "VALUES (:pid, :id, 'checkpoint', 'cp_vpn_topology', :v)"
+            ), {"pid": pid, "id": tid, "v": topo})
+        return JSONResponse({"ok": True, "topology": topo})
+    return await run_in_threadpool(_work)
 
 
 def _vpn_tunnel_name_for(engine, device_id: int, vpn_hash_hex: str):
@@ -21027,7 +22101,10 @@ async def enrichment_vpn_psk(request: Request):
     rest (Fernet) and upserted; an empty/absent ``psk`` clears it. The plaintext
     is never stored, never returned, never logged - it is injected server-side
     into the live push only (deploy_push). Setting requires GATESHIFT_SECRET_KEY;
-    clearing always works."""
+    clearing always works. ``{device_id, tunnel_name, psk: ""}`` discards an
+    orphan key, one stored under a name no tunnel of the Device carries any
+    more (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2): it has no hash to be
+    addressed by, and it is only ever discarded, a key is set on a tunnel."""
     try:
         body = await request.json()
     except Exception:
@@ -21036,12 +22113,26 @@ async def enrichment_vpn_psk(request: Request):
         did = int(body.get("device_id"))
     except (TypeError, ValueError):
         return JSONResponse({"error": "device_id required"}, status_code=400)
-    h = (body.get("vpn_hash") or "").strip().lower()
-    if len(h) != 40 or not all(c in "0123456789abcdef" for c in h):
-        return JSONResponse({"error": "valid vpn_hash required"}, status_code=400)
     psk = body.get("psk")
     psk = psk if isinstance(psk, str) else ""
     engine = get_engine()
+    h = (body.get("vpn_hash") or "").strip().lower()
+    _orphan = (body.get("tunnel_name") or "").strip() if not h else ""
+    if _orphan:
+        if psk.strip():
+            return JSONResponse({"error": "a key is set on a tunnel, addressed by its hash"}, status_code=400)
+        with engine.begin() as conn:
+            if conn.execute(text(
+                "SELECT 1 FROM fw_vpn_tunnels WHERE device_id = :d AND name = :n"
+            ), {"d": did, "n": _orphan}).fetchone():
+                return JSONResponse({"error": "a tunnel of this Device carries that name: clear its key "
+                                              "on the tunnel"}, status_code=409)
+            _gone = conn.execute(text(
+                "DELETE FROM fw_vpn_tunnel_secrets WHERE device_id = :d AND tunnel_name = :n"
+            ), {"d": did, "n": _orphan}).rowcount
+        return JSONResponse({"ok": True, "psk_set": False, "discarded": int(_gone or 0)})
+    if len(h) != 40 or not all(c in "0123456789abcdef" for c in h):
+        return JSONResponse({"error": "valid vpn_hash required"}, status_code=400)
     tname = _vpn_tunnel_name_for(engine, did, h)
     if not tname:
         return JSONResponse({"error": "no tunnel of this Device carries that hash: "
@@ -21591,7 +22682,7 @@ async def enrichment_services_apply(request: Request):
 
 
 @app.get("/enrichment/applications/{target_id}", response_class=JSONResponse)
-async def enrichment_applications(target_id: int):
+def enrichment_applications(target_id: int):
     """Read the target's user-curated application catalog.
 
     Same shape as ``/enrichment/security-profiles``. Driver decides categories
@@ -21625,7 +22716,7 @@ async def enrichment_applications(target_id: int):
         return JSONResponse({"error": str(e), "supported": False},
                             status_code=400)
     except Exception as e:
-        return JSONResponse({"error": f"read failed: {e}"}, status_code=502)
+        return JSONResponse({"error": f"read failed: {_reach_error(e)}"}, status_code=502)
     return JSONResponse({"target_id": target_id, "platform": platform,
                          "catalog": catalog})
 
@@ -21693,236 +22784,241 @@ async def enrichment_map_ports(target_id: int, request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    raw_hashes = body.get("rule_hashes") or []
-    force = bool(body.get("force"))
-    scoped_hashes: list[bytes] = []
-    for h in raw_hashes:
-        if not isinstance(h, str):
-            continue
-        h = h.strip().lower()
-        if len(h) == 40 and all(c in "0123456789abcdef" for c in h):
-            scoped_hashes.append(bytes.fromhex(h))
-    engine = get_engine()
-    with engine.connect() as conn:
-        pid = _ctx_project_required(conn, request)
-        row = conn.execute(text(
-            "SELECT id, host_name, display_name, platform, mgmt_ip, mgmt_port, "
-            "       api_key, gaia_user, gaia_password, config "
-            "FROM fw_devices WHERE id = :id"
-        ), {"id": target_id}).fetchone()
-    if not row:
-        return JSONResponse({"error": "target not found"}, status_code=404)
-    platform = row[3] or ""
-    driver_cls = DEPLOY_DRIVERS.get(platform)
-    if not driver_cls:
-        return JSONResponse({"error": f"no driver for platform {platform!r}"},
-                            status_code=400)
-    driver = driver_cls()
-    device = {
-        "id": row[0], "host_name": row[1], "display_name": row[2],
-        "platform": platform, "mgmt_ip": row[4], "mgmt_port": row[5],
-        "api_key": secrets_util.reveal(row[6]), "gaia_user": row[7], "gaia_password": secrets_util.reveal(row[8]),
-        "config": row[9],
-    }
-    try:
-        with fail_fast_transport():
-            catalog = driver.list_applications(device=device)
-    except NotImplementedError as e:
-        return JSONResponse({"error": str(e), "supported": False},
-                            status_code=400)
-    except Exception as e:
-        return JSONResponse({"error": f"catalog fetch failed: {e}"}, status_code=502)
-
-    # specificity = total port count across the app's default_ports (ranges
-    # count as hi-lo+1). web-browsing → ['tcp/80'] has specificity 1; dns →
-    # ['tcp/53','udp/53'] has 2; multi-port apps may have 4+. Lower
-    # specificity = stronger signal that this port is canonical for the app.
-    def _spec_count(specs: list[str]) -> int:
-        n = 0
-        for s in specs:
-            for _, lo, hi in _parse_port_spec(s):
-                n += hi - lo + 1
-        return n
-
-    def _build_port_index(entries: list[dict],
-                          ) -> dict[tuple[str, int], list[tuple[str, int]]]:
-        idx: dict[tuple[str, int], list[tuple[str, int]]] = {}
-        for entry in entries:
-            name = entry.get("name") or ""
-            specs = entry.get("default_ports") or []
-            if not name or not specs:
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        raw_hashes = body.get("rule_hashes") or []
+        force = bool(body.get("force"))
+        scoped_hashes: list[bytes] = []
+        for h in raw_hashes:
+            if not isinstance(h, str):
                 continue
-            sc = _spec_count(specs)
-            if sc == 0:
-                continue
-            seen: set[tuple[str, int]] = set()
+            h = h.strip().lower()
+            if len(h) == 40 and all(c in "0123456789abcdef" for c in h):
+                scoped_hashes.append(bytes.fromhex(h))
+        engine = get_engine()
+        with engine.connect() as conn:
+            pid = _ctx_project_required(conn, request)
+            row = conn.execute(text(
+                "SELECT id, host_name, display_name, platform, mgmt_ip, mgmt_port, "
+                "       api_key, gaia_user, gaia_password, config "
+                "FROM fw_devices WHERE id = :id"
+            ), {"id": target_id}).fetchone()
+        if not row:
+            return JSONResponse({"error": "target not found"}, status_code=404)
+        platform = row[3] or ""
+        driver_cls = DEPLOY_DRIVERS.get(platform)
+        if not driver_cls:
+            return JSONResponse({"error": f"no driver for platform {platform!r}"},
+                                status_code=400)
+        driver = driver_cls()
+        device = {
+            "id": row[0], "host_name": row[1], "display_name": row[2],
+            "platform": platform, "mgmt_ip": row[4], "mgmt_port": row[5],
+            "api_key": secrets_util.reveal(row[6]), "gaia_user": row[7], "gaia_password": secrets_util.reveal(row[8]),
+            "config": row[9],
+        }
+        try:
+            with fail_fast_transport():
+                catalog = driver.list_applications(device=device)
+        except NotImplementedError as e:
+            return JSONResponse({"error": str(e), "supported": False},
+                                status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": f"catalog fetch failed: {e}"}, status_code=502)
+
+        # specificity = total port count across the app's default_ports (ranges
+        # count as hi-lo+1). web-browsing → ['tcp/80'] has specificity 1; dns →
+        # ['tcp/53','udp/53'] has 2; multi-port apps may have 4+. Lower
+        # specificity = stronger signal that this port is canonical for the app.
+        def _spec_count(specs: list[str]) -> int:
+            n = 0
             for s in specs:
-                for proto, lo, hi in _parse_port_spec(s):
-                    if lo != hi:
-                        continue
-                    key = (proto, lo)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    idx.setdefault(key, []).append((name, sc))
-        return idx
+                for _, lo, hi in _parse_port_spec(s):
+                    n += hi - lo + 1
+            return n
 
-    custom_index = _build_port_index(catalog.get("application", []))
-    predef_index = _build_port_index(catalog.get("application-predefined", []))
-    predef_names = {e.get("name") for e in catalog.get("application-predefined", [])
-                    if e.get("name")}
+        def _build_port_index(entries: list[dict],
+                              ) -> dict[tuple[str, int], list[tuple[str, int]]]:
+            idx: dict[tuple[str, int], list[tuple[str, int]]] = {}
+            for entry in entries:
+                name = entry.get("name") or ""
+                specs = entry.get("default_ports") or []
+                if not name or not specs:
+                    continue
+                sc = _spec_count(specs)
+                if sc == 0:
+                    continue
+                seen: set[tuple[str, int]] = set()
+                for s in specs:
+                    for proto, lo, hi in _parse_port_spec(s):
+                        if lo != hi:
+                            continue
+                        key = (proto, lo)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        idx.setdefault(key, []).append((name, sc))
+            return idx
 
-    # Canonical map: filter to entries whose apps all exist in the live
-    # catalog. Driver-provided so each vendor curates its own (PA fills the
-    # gaps in its predefined catalog; CP returns empty since its curated map
-    # already lives in application-predefined with explicit default_ports).
-    _CANON_RAW = driver.canonical_port_apps()
-    canonical_map: dict[tuple[str, int], list[str]] = {}
-    for key, apps in _CANON_RAW.items():
-        valid = [a for a in apps if a in predef_names]
-        if valid:
-            canonical_map[key] = valid
+        custom_index = _build_port_index(catalog.get("application", []))
+        predef_index = _build_port_index(catalog.get("application-predefined", []))
+        predef_names = {e.get("name") for e in catalog.get("application-predefined", [])
+                        if e.get("name")}
 
-    if not (predef_index or custom_index or canonical_map):
-        return JSONResponse({"matched": 0, "total": 0, "skipped_manual": 0,
-                             "note": "catalog has no port-bound apps"})
+        # Canonical map: filter to entries whose apps all exist in the live
+        # catalog. Driver-provided so each vendor curates its own (PA fills the
+        # gaps in its predefined catalog; CP returns empty since its curated map
+        # already lives in application-predefined with explicit default_ports).
+        _CANON_RAW = driver.canonical_port_apps()
+        canonical_map: dict[tuple[str, int], list[str]] = {}
+        for key, apps in _CANON_RAW.items():
+            valid = [a for a in apps if a in predef_names]
+            if valid:
+                canonical_map[key] = valid
 
-    # Per-port caps for the predefined-catalog tier (tier 3). MAX_SPECIFICITY
-    # filters out catch-all apps that list the port as one of many ports
-    # (port isn't canonical for them). MAX_AMBIGUOUS skips ports where too
-    # many apps still survive - those are generic (tcp/80) and the canonical
-    # map handles them at tier 4.
-    MAX_SPECIFICITY = 4
-    MAX_AMBIGUOUS = 5
+        if not (predef_index or custom_index or canonical_map):
+            return JSONResponse({"matched": 0, "total": 0, "skipped_manual": 0,
+                                 "note": "catalog has no port-bound apps"})
 
-    def _resolve(port_key: tuple[str, int]) -> tuple[list[str] | None, str]:
-        """Return (apps_or_none, source_label). Source labels: 'custom',
+        # Per-port caps for the predefined-catalog tier (tier 3). MAX_SPECIFICITY
+        # filters out catch-all apps that list the port as one of many ports
+        # (port isn't canonical for them). MAX_AMBIGUOUS skips ports where too
+        # many apps still survive - those are generic (tcp/80) and the canonical
+        # map handles them at tier 4.
+        MAX_SPECIFICITY = 4
+        MAX_AMBIGUOUS = 5
+
+        def _resolve(port_key: tuple[str, int]) -> tuple[list[str] | None, str]:
+            """Return (apps_or_none, source_label). Source labels: 'custom',
         'canonical', 'predefined', 'ambiguous', 'unmatched'."""
-        # Tier 2: custom (vsys) apps - wins over everything below.
-        custom = custom_index.get(port_key)
-        if custom:
-            names = sorted({n for n, _ in custom})
-            return names, "custom"
-        # Tier 3: canonical map - curated, wins when present.
-        canon = canonical_map.get(port_key)
-        if canon:
-            return list(canon), "canonical"
-        # Tier 4: predefined catalog with specificity + ambiguity caps.
-        candidates = predef_index.get(port_key, [])
-        ranked = sorted(
-            ((n, s) for n, s in candidates if s <= MAX_SPECIFICITY),
-            key=lambda x: (x[1], x[0]),
-        )
-        if ranked and len(ranked) <= MAX_AMBIGUOUS:
-            return [n for n, _ in ranked], "predefined"
-        if ranked and len(ranked) > MAX_AMBIGUOUS:
-            return None, "ambiguous"
-        return None, "unmatched"
+            # Tier 2: custom (vsys) apps - wins over everything below.
+            custom = custom_index.get(port_key)
+            if custom:
+                names = sorted({n for n, _ in custom})
+                return names, "custom"
+            # Tier 3: canonical map - curated, wins when present.
+            canon = canonical_map.get(port_key)
+            if canon:
+                return list(canon), "canonical"
+            # Tier 4: predefined catalog with specificity + ambiguity caps.
+            candidates = predef_index.get(port_key, [])
+            ranked = sorted(
+                ((n, s) for n, s in candidates if s <= MAX_SPECIFICITY),
+                key=lambda x: (x[1], x[0]),
+            )
+            if ranked and len(ranked) <= MAX_AMBIGUOUS:
+                return [n for n, _ in ranked], "predefined"
+            if ranked and len(ranked) > MAX_AMBIGUOUS:
+                return None, "ambiguous"
+            return None, "unmatched"
 
-    matched_rules = 0
-    by_source = {"custom": 0, "predefined": 0, "canonical": 0}
-    total_rules = 0
-    skipped_manual = 0
-    ambiguous_ports: set[tuple[str, int]] = set()
-    unmatched_ports: set[tuple[str, int]] = set()
-    with engine.begin() as conn:
-        pid = _ctx_project_required(conn, request)
-        # Match the table the UI is actually showing - selection-scoped hashes
-        # come from whatever pipeline stage `_fetch_rules_and_devices` reads.
-        # Querying fw_rules_filtered unconditionally returns 0 rows for users
-        # whose UI sits on consolidated_1 (no pipeline module enabled).
-        display = load_display(conn)
-        module = display["module"]
-        t = "fw_rules_consolidated_1" if module is None else MODULE_TABLES[module]
-        # content_hash identifies the rule (Slice C). Manual override rows
-        # are skipped by their hash, not by natkey - so editing one rule
-        # never bleeds into another that happens to share (proto, port).
-        sql = f"""
-            SELECT r.content_hash, r.proto, r.dst_port
-            FROM {t} r
-            WHERE r.generated_at = (SELECT MAX(generated_at) FROM {t})
-              AND r.proto IS NOT NULL AND r.proto <> ''
-              AND r.dst_port IS NOT NULL AND r.dst_port > 0
-              AND r.content_hash IS NOT NULL
-        """
-        params: dict = {}
-        if scoped_hashes:
-            placeholders = ", ".join(f":h{i}" for i in range(len(scoped_hashes)))
-            sql += f" AND r.content_hash IN ({placeholders})"
-            params = {f"h{i}": scoped_hashes[i] for i in range(len(scoped_hashes))}
-        rules = conn.execute(text(sql), params).all()
-        total_rules = len(rules)
+        matched_rules = 0
+        by_source = {"custom": 0, "predefined": 0, "canonical": 0}
+        total_rules = 0
+        skipped_manual = 0
+        ambiguous_ports: set[tuple[str, int]] = set()
+        unmatched_ports: set[tuple[str, int]] = set()
+        with engine.begin() as conn:
+            pid = _ctx_project_required(conn, request)
+            # Match the table the UI is actually showing - selection-scoped hashes
+            # come from whatever pipeline stage `_fetch_rules_and_devices` reads.
+            # Querying fw_rules_filtered unconditionally returns 0 rows for users
+            # whose UI sits on consolidated_1 (no pipeline module enabled).
+            display = load_display(conn)
+            module = display["module"]
+            t = "fw_rules_consolidated_1" if module is None else MODULE_TABLES[module]
+            # content_hash identifies the rule (Slice C). Manual override rows
+            # are skipped by their hash, not by natkey - so editing one rule
+            # never bleeds into another that happens to share (proto, port).
+            sql = f"""
+                SELECT r.content_hash, r.proto, r.dst_port
+                FROM {t} r
+                WHERE r.generated_at = (SELECT MAX(generated_at) FROM {t})
+                  AND r.proto IS NOT NULL AND r.proto <> ''
+                  AND r.dst_port IS NOT NULL AND r.dst_port > 0
+                  AND r.content_hash IS NOT NULL
+            """
+            params: dict = {}
+            if scoped_hashes:
+                placeholders = ", ".join(f":h{i}" for i in range(len(scoped_hashes)))
+                sql += f" AND r.content_hash IN ({placeholders})"
+                params = {f"h{i}": scoped_hashes[i] for i in range(len(scoped_hashes))}
+            rules = conn.execute(text(sql), params).all()
+            total_rules = len(rules)
 
-        # force=True (Apps tab "auto-assign on selection") explicitly opts
-        # into overwriting manual overrides for the picked rules.
-        if force:
-            manual_hashes: set = set()
-        else:
-            manual_hashes = {
-                row[0] for row in conn.execute(text(
-                    "SELECT rule_hash FROM fw_rule_app_overrides WHERE project_id = :pid AND source = 'manual'"
-                ), {"pid": pid}).all()
-            }
-
-        for rhash, proto, dst_port in rules:
-            if rhash in manual_hashes:
-                skipped_manual += 1
-                continue
-            port_key = ((proto or "").lower(), int(dst_port))
-            apps, source = _resolve(port_key)
-            if apps is None:
-                if source == "ambiguous":
-                    ambiguous_ports.add(port_key)
-                else:
-                    unmatched_ports.add(port_key)
-                continue
-            apps_csv = ",".join(apps)
+            # force=True (Apps tab "auto-assign on selection") explicitly opts
+            # into overwriting manual overrides for the picked rules.
             if force:
-                # User explicitly opted into re-deriving these rules - overwrite
-                # manual rows too, mark them as 'auto' since the value came from
-                # the catalog (so a future global run picks them up again).
-                conn.execute(text("""
+                manual_hashes: set = set()
+            else:
+                manual_hashes = {
+                    row[0] for row in conn.execute(text(
+                        "SELECT rule_hash FROM fw_rule_app_overrides WHERE project_id = :pid AND source = 'manual'"
+                    ), {"pid": pid}).all()
+                }
+
+            for rhash, proto, dst_port in rules:
+                if rhash in manual_hashes:
+                    skipped_manual += 1
+                    continue
+                port_key = ((proto or "").lower(), int(dst_port))
+                apps, source = _resolve(port_key)
+                if apps is None:
+                    if source == "ambiguous":
+                        ambiguous_ports.add(port_key)
+                    else:
+                        unmatched_ports.add(port_key)
+                    continue
+                apps_csv = ",".join(apps)
+                if force:
+                    # User explicitly opted into re-deriving these rules - overwrite
+                    # manual rows too, mark them as 'auto' since the value came from
+                    # the catalog (so a future global run picks them up again).
+                    conn.execute(text("""
                     INSERT INTO fw_rule_app_overrides (project_id, rule_hash, applications, source)
                     VALUES (:pid, :rh, :ap, 'auto')
                     ON DUPLICATE KEY UPDATE
                       applications = VALUES(applications),
                       source       = 'auto'
                 """), {"pid": pid, "rh": rhash, "ap": apps_csv})
-            else:
-                conn.execute(text("""
+                else:
+                    conn.execute(text("""
                     INSERT INTO fw_rule_app_overrides (project_id, rule_hash, applications, source)
                     VALUES (:pid, :rh, :ap, 'auto')
                     ON DUPLICATE KEY UPDATE
                       applications = IF(source = 'manual', applications, VALUES(applications)),
                       source       = IF(source = 'manual', 'manual', 'auto')
                 """), {"pid": pid, "rh": rhash, "ap": apps_csv})
-            matched_rules += 1
-            by_source[source] += 1
+                matched_rules += 1
+                by_source[source] += 1
 
-    def _fmt_ports(ports: set[tuple[str, int]]) -> list[str]:
-        return [f"{p[0]}/{p[1]}" for p in sorted(ports)]
+        def _fmt_ports(ports: set[tuple[str, int]]) -> list[str]:
+            return [f"{p[0]}/{p[1]}" for p in sorted(ports)]
 
-    # Driver-supplied enrichment caveat (optional): e.g. a CP target whose
-    # layer has the apps blade disabled would strip every derived app at
-    # push - say so NOW instead of surprising the operator at push time.
-    caveat = None
-    _caveat_fn = getattr(driver, "app_binding_caveat", None)
-    if callable(_caveat_fn):
-        try:
-            with fail_fast_transport():
-                caveat = _caveat_fn(device=device)
-        except Exception:
-            caveat = None
+        # Driver-supplied enrichment caveat (optional): e.g. a CP target whose
+        # layer has the apps blade disabled would strip every derived app at
+        # push - say so NOW instead of surprising the operator at push time.
+        caveat = None
+        _caveat_fn = getattr(driver, "app_binding_caveat", None)
+        if callable(_caveat_fn):
+            try:
+                with fail_fast_transport():
+                    caveat = _caveat_fn(device=device)
+            except Exception:
+                caveat = None
 
-    return JSONResponse({
-        "matched": matched_rules,
-        "by_source": by_source,
-        "total": total_rules,
-        "skipped_manual": skipped_manual,
-        "ambiguous_ports": _fmt_ports(ambiguous_ports),
-        "unmatched_ports": _fmt_ports(unmatched_ports),
-        "caveat": caveat,
-    })
+        return JSONResponse({
+            "matched": matched_rules,
+            "by_source": by_source,
+            "total": total_rules,
+            "skipped_manual": skipped_manual,
+            "ambiguous_ports": _fmt_ports(ambiguous_ports),
+            "unmatched_ports": _fmt_ports(unmatched_ports),
+            "caveat": caveat,
+        })
+    return await run_in_threadpool(_work)
 
 
 @app.post("/enrichment/map-apps/{target_id}", response_class=JSONResponse)
@@ -21941,143 +23037,149 @@ async def enrichment_map_apps(target_id: int, request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    raw_hashes = body.get("rule_hashes") or []
-    force = bool(body.get("force"))
-    scoped_hashes: list[bytes] = []
-    for h in raw_hashes:
-        if not isinstance(h, str):
-            continue
-        h = h.strip().lower()
-        if len(h) == 40 and all(c in "0123456789abcdef" for c in h):
-            scoped_hashes.append(bytes.fromhex(h))
-    engine = get_engine()
-    with engine.connect() as conn:
-        row = conn.execute(text(
-            "SELECT id, host_name, display_name, platform, mgmt_ip, mgmt_port, "
-            "       api_key, gaia_user, gaia_password, config "
-            "FROM fw_devices WHERE id = :id"
-        ), {"id": target_id}).fetchone()
-    if not row:
-        return JSONResponse({"error": "target not found"}, status_code=404)
-    platform = row[3] or ""
-    driver_cls = DEPLOY_DRIVERS.get(platform)
-    if not driver_cls:
-        return JSONResponse({"error": f"no driver for platform {platform!r}"}, status_code=400)
-    driver = driver_cls()
-    device = {
-        "id": row[0], "host_name": row[1], "display_name": row[2],
-        "platform": platform, "mgmt_ip": row[4], "mgmt_port": row[5],
-        "api_key": secrets_util.reveal(row[6]), "gaia_user": row[7], "gaia_password": secrets_util.reveal(row[8]),
-        "config": row[9],
-    }
-    try:
-        with fail_fast_transport():
-            catalog = driver.list_applications(device=device)
-    except NotImplementedError as e:
-        return JSONResponse({"error": str(e), "supported": False}, status_code=400)
-    except Exception as e:
-        return JSONResponse({"error": f"catalog fetch failed: {e}"}, status_code=502)
-    # lower-cased name -> the catalog's spelling; custom objects and groups
-    # win over the vendor signature of the same name
-    index: dict[str, str] = {}
-    for bucket in ("application-predefined", "application-filter", "application-group", "application"):
-        for e in catalog.get(bucket) or []:
-            nm = (e.get("name") or "").strip()
-            if nm:
-                index[nm.lower()] = nm
-    if not index:
-        return JSONResponse({"matched": 0, "total": 0, "skipped_manual": 0, "note": "catalog is empty"})
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _map_apps_work():   # named for the reader allow-list, a bare _work would cover every worker
 
-    def _source_app_names(app_col, source_type, import_apps) -> list[str]:
-        """The SOURCE's application names of one rule, read the way the rules
+        raw_hashes = body.get("rule_hashes") or []
+        force = bool(body.get("force"))
+        scoped_hashes: list[bytes] = []
+        for h in raw_hashes:
+            if not isinstance(h, str):
+                continue
+            h = h.strip().lower()
+            if len(h) == 40 and all(c in "0123456789abcdef" for c in h):
+                scoped_hashes.append(bytes.fromhex(h))
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, host_name, display_name, platform, mgmt_ip, mgmt_port, "
+                "       api_key, gaia_user, gaia_password, config "
+                "FROM fw_devices WHERE id = :id"
+            ), {"id": target_id}).fetchone()
+        if not row:
+            return JSONResponse({"error": "target not found"}, status_code=404)
+        platform = row[3] or ""
+        driver_cls = DEPLOY_DRIVERS.get(platform)
+        if not driver_cls:
+            return JSONResponse({"error": f"no driver for platform {platform!r}"}, status_code=400)
+        driver = driver_cls()
+        device = {
+            "id": row[0], "host_name": row[1], "display_name": row[2],
+            "platform": platform, "mgmt_ip": row[4], "mgmt_port": row[5],
+            "api_key": secrets_util.reveal(row[6]), "gaia_user": row[7], "gaia_password": secrets_util.reveal(row[8]),
+            "config": row[9],
+        }
+        try:
+            with fail_fast_transport():
+                catalog = driver.list_applications(device=device)
+        except NotImplementedError as e:
+            return JSONResponse({"error": str(e), "supported": False}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": f"catalog fetch failed: {e}"}, status_code=502)
+        # lower-cased name -> the catalog's spelling; custom objects and groups
+        # win over the vendor signature of the same name
+        index: dict[str, str] = {}
+        for bucket in ("application-predefined", "application-filter", "application-group", "application"):
+            for e in catalog.get(bucket) or []:
+                nm = (e.get("name") or "").strip()
+                if nm:
+                    index[nm.lower()] = nm
+        if not index:
+            return JSONResponse({"matched": 0, "total": 0, "skipped_manual": 0, "note": "catalog is empty"})
+
+        def _source_app_names(app_col, source_type, import_apps) -> list[str]:
+            """The SOURCE's application names of one rule, read the way the rules
         page reads them (_fetch_rules_and_devices): a config import carries
         them on fw_imported_rules.applications (a JSON list), a log source on
         the pipeline row. 'any' means none."""
-        names: list[str] = []
-        if (source_type or "") in ("api_import", "both") and import_apps:
-            try:
-                names = [str(x) for x in json.loads(import_apps) if x]
-            except Exception:
-                names = [import_apps]
-        elif app_col:
-            names = [a.strip() for a in str(app_col).replace(";", ",").split(",") if a.strip()]
-        return [n for n in names if n.strip() and n.strip().lower() != "any"]
+            names: list[str] = []
+            if (source_type or "") in ("api_import", "both") and import_apps:
+                try:
+                    names = [str(x) for x in json.loads(import_apps) if x]
+                except Exception:
+                    names = [import_apps]
+            elif app_col:
+                names = [a.strip() for a in str(app_col).replace(";", ",").split(",") if a.strip()]
+            return [n for n in names if n.strip() and n.strip().lower() != "any"]
 
-    matched_rules = partial_rules = 0
-    total_rules = skipped_manual = 0
-    unmatched_names: dict[str, int] = {}
-    with engine.begin() as conn:
-        pid = _ctx_project_required(conn, request)
-        src_id, _tgt_id = _ctx_pair(request)
-        t = _active_rules_table(conn)
-        # The stage table holds every device's rules of the latest run: scope
-        # to the project's source device (the page header), like the rules
-        # page does. The imported applications ride along for config sources.
-        sql = f"""
-            SELECT r.content_hash, r.application, r.source_type, _ir.applications
-            FROM {t} r
-            LEFT JOIN fw_devices _dev ON _dev.id = r.device_id
-            LEFT JOIN fw_imported_rules _ir
-              ON r.source_type IN ('api_import', 'both')
-             AND _ir.device_id = _dev.id
-             AND _ir.rule_name = r.rule_name
-             AND _ir.import_ts = (SELECT MAX(import_ts) FROM fw_imported_rules WHERE device_id = _dev.id)
-            WHERE r.generated_at = (SELECT MAX(generated_at) FROM {t})
-              AND r.content_hash IS NOT NULL
-              AND (:sid IS NULL OR _dev.id = :sid)
-        """
-        params: dict = {"sid": src_id}
-        if scoped_hashes:
-            placeholders = ", ".join(f":h{i}" for i in range(len(scoped_hashes)))
-            sql += f" AND r.content_hash IN ({placeholders})"
-            params.update({f"h{i}": scoped_hashes[i] for i in range(len(scoped_hashes))})
-        rows = conn.execute(text(sql), params).all()
-        manual_hashes: set = set()
-        if not force:
-            manual_hashes = {r[0] for r in conn.execute(text(
-                "SELECT rule_hash FROM fw_rule_app_overrides WHERE project_id = :pid AND source = 'manual'"),
-                {"pid": pid}).all()}
-        seen_hashes: set = set()
-        for rhash, app_col, source_type, import_apps in rows:
-            if rhash in seen_hashes:
-                continue
-            seen_hashes.add(rhash)
-            names = _source_app_names(app_col, source_type, import_apps)
-            if not names:
-                continue
-            total_rules += 1
-            if rhash in manual_hashes:
-                skipped_manual += 1
-                continue
-            out, hits, misses = [], [], []
-            for nm in names:
-                hit = index.get(nm.lower())
-                out.append(hit or nm)
-                (hits if hit else misses).append(hit or nm)
-            for nm in misses:
-                unmatched_names[nm] = unmatched_names.get(nm, 0) + 1
-            if not hits:
-                continue
-            # The override carries the matched names in the catalog's spelling
-            # AND the unmatched ones as the source wrote them: the push declares
-            # those, and the pane shows what found no match.
-            conn.execute(text("""
+        matched_rules = partial_rules = 0
+        total_rules = skipped_manual = 0
+        unmatched_names: dict[str, int] = {}
+        with engine.begin() as conn:
+            pid = _ctx_project_required(conn, request)
+            src_id, _tgt_id = _ctx_pair(request)
+            t = _active_rules_table(conn)
+            # The stage table holds every device's rules of the latest run: scope
+            # to the project's source device (the page header), like the rules
+            # page does. The imported applications ride along for config sources.
+            sql = f"""
+                SELECT r.content_hash, r.application, r.source_type, _ir.applications
+                FROM {t} r
+                LEFT JOIN fw_devices _dev ON _dev.id = r.device_id
+                LEFT JOIN fw_imported_rules _ir
+                  ON r.source_type IN ('api_import', 'both')
+                 AND _ir.device_id = _dev.id
+                 AND _ir.rule_name = r.rule_name
+                 AND _ir.import_ts = (SELECT MAX(import_ts) FROM fw_imported_rules WHERE device_id = _dev.id)
+                WHERE r.generated_at = (SELECT MAX(generated_at) FROM {t})
+                  AND r.content_hash IS NOT NULL
+                  AND (:sid IS NULL OR _dev.id = :sid)
+            """
+            params: dict = {"sid": src_id}
+            if scoped_hashes:
+                placeholders = ", ".join(f":h{i}" for i in range(len(scoped_hashes)))
+                sql += f" AND r.content_hash IN ({placeholders})"
+                params.update({f"h{i}": scoped_hashes[i] for i in range(len(scoped_hashes))})
+            rows = conn.execute(text(sql), params).all()
+            manual_hashes: set = set()
+            if not force:
+                manual_hashes = {r[0] for r in conn.execute(text(
+                    "SELECT rule_hash FROM fw_rule_app_overrides WHERE project_id = :pid AND source = 'manual'"),
+                    {"pid": pid}).all()}
+            seen_hashes: set = set()
+            for rhash, app_col, source_type, import_apps in rows:
+                if rhash in seen_hashes:
+                    continue
+                seen_hashes.add(rhash)
+                names = _source_app_names(app_col, source_type, import_apps)
+                if not names:
+                    continue
+                total_rules += 1
+                if rhash in manual_hashes:
+                    skipped_manual += 1
+                    continue
+                out, hits, misses = [], [], []
+                for nm in names:
+                    hit = index.get(nm.lower())
+                    out.append(hit or nm)
+                    (hits if hit else misses).append(hit or nm)
+                for nm in misses:
+                    unmatched_names[nm] = unmatched_names.get(nm, 0) + 1
+                if not hits:
+                    continue
+                # The override carries the matched names in the catalog's spelling
+                # AND the unmatched ones as the source wrote them: the push declares
+                # those, and the pane shows what found no match.
+                conn.execute(text("""
                 INSERT INTO fw_rule_app_overrides (project_id, rule_hash, applications, source)
                 VALUES (:pid, :rh, :ap, 'auto')
                 ON DUPLICATE KEY UPDATE
                   applications = IF(source = 'manual' AND NOT :force, applications, VALUES(applications)),
                   source       = IF(source = 'manual' AND NOT :force, 'manual', 'auto')
             """), {"pid": pid, "rh": rhash, "ap": ",".join(dict.fromkeys(out)), "force": int(force)})
-            if misses:
-                partial_rules += 1
-            else:
-                matched_rules += 1
-    return JSONResponse({
-        "matched": matched_rules, "partial": partial_rules, "total": total_rules,
-        "skipped_manual": skipped_manual,
-        "unmatched_names": [f"{n} ({c})" for n, c in sorted(unmatched_names.items(), key=lambda x: (-x[1], x[0]))][:40],
-        "unmatched_total": len(unmatched_names),
-    })
+                if misses:
+                    partial_rules += 1
+                else:
+                    matched_rules += 1
+        return JSONResponse({
+            "matched": matched_rules, "partial": partial_rules, "total": total_rules,
+            "skipped_manual": skipped_manual,
+            "unmatched_names": [f"{n} ({c})" for n, c in sorted(unmatched_names.items(), key=lambda x: (-x[1], x[0]))][:40],
+            "unmatched_total": len(unmatched_names),
+        })
+    return await run_in_threadpool(_map_apps_work)
 
 
 def _active_rules_table(conn) -> str:
@@ -22119,7 +23221,7 @@ async def enrichment_zones_set_all_any(request: Request, device: str | None = No
             return JSONResponse(
                 {"error": "Not available in Endpoint-pairs mode: disable "
                           "'Endpoint pairs' in the Consolidation panel "
-                          "(Rules > Firewall) first."},
+                          "(Policies > Security) first."},
                 status_code=400)
         params: dict = {}
         where = (f"WHERE r.generated_at = (SELECT MAX(generated_at) FROM {table}) "
@@ -22173,7 +23275,7 @@ async def enrichment_zones_reset(request: Request, device: str | None = None):
             return JSONResponse(
                 {"error": "Not available in Endpoint-pairs mode: disable "
                           "'Endpoint pairs' in the Consolidation panel "
-                          "(Rules > Firewall) first."},
+                          "(Policies > Security) first."},
                 status_code=400)
         # Project-scoped in both forms: without `device` the delete used to
         # run unfiltered, across every project (2026-10-07).
@@ -23041,7 +24143,7 @@ def enrichment_zones_list_fragment(request: Request, device: str = "", target: s
 
 
 @app.get("/enrichment/zones/catalog", response_class=JSONResponse)
-async def enrichment_zones_catalog(request: Request, target: str):
+def enrichment_zones_catalog(request: Request, target: str):
     """Return the picker catalog for per-rule src_zone/dst_zone overrides
     on the given target device.
 
@@ -23286,7 +24388,7 @@ def _prune_target_discover(conn, target_device_id: int, kind: str, name: str) ->
 
 
 @app.post("/network/discover/{device_id}/{kind}", response_class=JSONResponse)
-async def network_discover_run(device_id: int, kind: str,
+def network_discover_run(device_id: int, kind: str,
                                dg: str = "", template: str = "",
                                template_kind: str = ""):
     """Fetch a fresh Discover snapshot from the target and upsert it.
@@ -23368,6 +24470,7 @@ async def network_discover_run(device_id: int, kind: str,
         driver = driver_cls()
         try:
             with fail_fast_transport():
+                driver.discover_warnings = []
                 payload = _discover_dispatch(driver, kind, device)
             # Template-STACK target: the stack's own config is only the
             # highest-precedence layer - its effective network is the
@@ -23408,7 +24511,9 @@ async def network_discover_run(device_id: int, kind: str,
             return JSONResponse({"error": str(e), "supported": False},
                                 status_code=400)
         except Exception as e:
-            return JSONResponse({"error": f"discover failed: {e}"},
+            _record_device_log(device_id, "discover", platform, False,
+                               f"{kind}: the fetch from the target failed", errors=[_reach_error(e)])
+            return JSONResponse({"error": _reach_error(e)},
                                 status_code=502)
         conn.execute(text("""
             INSERT INTO fw_target_discover (device_id, kind, payload)
@@ -23418,15 +24523,20 @@ async def network_discover_run(device_id: int, kind: str,
         run_ts_row = conn.execute(text(
             "SELECT run_ts FROM fw_target_discover WHERE device_id = :did AND kind = :kind"
         ), {"did": device_id, "kind": kind}).fetchone()
+    _warn = list(getattr(driver, "discover_warnings", None) or [])
+    _record_device_log(device_id, "discover", platform, True,
+                       f"{kind}: {len(payload) if isinstance(payload, list) else 1} entries fetched from the target"
+                       + (", with a warning" if _warn else ""), warnings=_warn or None)
     return JSONResponse({
         "device_id": device_id, "platform": platform, "kind": kind,
         "payload": payload,
         "run_ts": run_ts_row[0].isoformat() if run_ts_row and run_ts_row[0] else None,
+        "warnings": _warn,
     })
 
 
 @app.get("/network/discover/{device_id}/{kind}", response_class=JSONResponse)
-async def network_discover_get(device_id: int, kind: str):
+def network_discover_get(device_id: int, kind: str):
     """Return the last persisted Discover snapshot, or empty if none yet."""
     err = _discover_check_kind(kind)
     if err is not None:
@@ -23794,7 +24904,7 @@ async def network_discover_save(source_device_id: int, kind: str, request: Reque
 
 
 @app.get("/deploy/targets", response_class=JSONResponse)
-async def deploy_targets():
+def deploy_targets():
     """List all eligible deploy targets.
 
     Eligible = role in (target, both), platform has a driver, API key set.
@@ -23936,11 +25046,13 @@ def _resolve_forti_nat_mode(device: dict, timeout: int = 15,
                 _persist_observed_nat_mode(persist_device_id, _mode,
                                            ngfw_mode=(_res.get("ngfw-mode") or "").lower() or None)
             return _mode, None
-        return "central", (f"Forti NAT-mode auto-probe failed (HTTP {resp.status_code}), "
-                           "assumed central. Set central-nat or pin nat_mode")
+        return "central", (f"The FortiGate's NAT mode could not be read (HTTP {resp.status_code}), "
+                           "central NAT assumed. Check central-nat on the target or pin the NAT mode "
+                           "under Profiles & Settings.")
     except Exception as e:
-        return "central", (f"Forti NAT-mode auto-probe failed ({type(e).__name__}), "
-                           "assumed central. Verify target central-nat / pin nat_mode")
+        return "central", (f"The FortiGate's NAT mode could not be read ({_reach_error(e)}), "
+                           "central NAT assumed. Check central-nat on the target or pin the NAT mode "
+                           "under Profiles & Settings.")
 
 
 def _resolve_panw_routing_mode(device: dict, timeout: int = 15) -> tuple[str, str | None]:
@@ -24041,7 +25153,8 @@ async def deploy_generate(source_id: int, request: Request):
             body["project_id"] = _pid
     except Exception:
         pass
-    return _deploy_generate_impl(source_id, body)
+    # the build runs in the threadpool: a FortiGate target's guard reads its routes live
+    return await run_in_threadpool(_deploy_generate_impl, source_id, body)
 
 
 def _forti_target_port_issues(conn, source_id: int, net_source_id: int,
@@ -24248,7 +25361,10 @@ def _cp_target_mgmt_issues(conn, net_source_id: int,
         _tcp = (json.loads(_trow["config"] or "{}").get("cp") or {})
     except Exception:
         _tcp = {}
-    if "cluster" in (_tcp.get("gateway_type") or "").lower():
+    from deploy.checkpoint import _is_vsx_type as _cp_is_vsx_type
+    if "cluster" in (_tcp.get("gateway_type") or "").lower() or _cp_is_vsx_type(_tcp.get("gateway_type")):
+        # a cluster's network strand skips the interface push, a virtual
+        # system's network strand is never pushed (docs/VSX_TARGET_PLAN.md, D9)
         return issues
     mgmt_ip = (_trow["mgmt_ip"] or "").strip()
     if not mgmt_ip:
@@ -24632,7 +25748,8 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
                 # set-simple-gateway 400s on a cluster UID.
                 _gt = ((json.loads(_cpdev["config"] or "{}").get("cp") or {})
                        .get("gateway_type") or "") if _cpdev else ""
-                settings["cp_gateway_is_cluster"] = "cluster" in _gt.lower()
+                from deploy.checkpoint import _is_cluster_target as _cp_is_cluster_target
+                settings["cp_gateway_is_cluster"] = _cp_is_cluster_target(_gt)
             except Exception:
                 pass
             # URL-category resolution inputs (project_cp_url_category_map_plan):
@@ -24695,14 +25812,18 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
         for d in _rt_rows:
             prefix, plen, iname = d.get("prefix"), d.get("prefix_len"), d.get("interface_name")
             nh, vr, metric, route_type = d.get("next_hop"), d.get("vr_name"), d.get("metric"), d.get("route_type")
-            # Connected = prefix matches an interface IP subnet.
+            # Connected = prefix matches an interface IP subnet. The stored prefix comes bare
+            # ('192.0.2.0' with prefix_len, the readers) or as a CIDR (the connected synthesis):
+            # compared as a CIDR, else a cloud source's subnets went out as static routes
+            # next to the interface that carries them (2026-11-16, gcp to PA)
+            prefix_c = str(prefix) if "/" in str(prefix) else f"{prefix}/{plen}"
             is_conn = False
             for iface in interfaces:
                 if iface["interface_name"] == iname:
                     for ip_cidr in (iface.get("ip_addresses") or []):
                         try:
                             net = ipaddress.ip_network(ip_cidr, strict=False)
-                            if str(net) == prefix:
+                            if str(net) == prefix_c:
                                 is_conn = True
                                 break
                         except ValueError:
@@ -24799,6 +25920,12 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
         # carries them as literals, the target gets them as objects
         _auto_addr_names: list[str] = []
         _auto_svc_names: list[str] = []
+        # In name order: the artefact is the same build after build. Read in
+        # database order the objects moved whenever a re-import or the
+        # literal-derived ones (source synthetic) were written again, and the
+        # render diff of the reference projects read that as a change
+        # (0.9.5 matrix). The drivers push objects before the groups and
+        # rules that name them, so the order within a kind is free.
         try:
             obj_rows = conn.execute(text("""
                 SELECT obj_type, name, value FROM fw_imported_objects
@@ -24807,6 +25934,7 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
                           SELECT MAX(import_ts) FROM fw_imported_objects
                           WHERE device_id = :id AND source = 'import'))
                        OR source = 'synthetic')
+                ORDER BY name, obj_type, id
             """), {"id": source_id}).fetchall()
             for otype, oname, val_json in obj_rows:
                 val = json.loads(val_json) if isinstance(val_json, str) else (val_json or {})
@@ -24945,44 +26073,11 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
         # it is: the security policy carries the applications with
         # enforce-default-app-port (docs/FGT_POLICY_MODE_PLAN.md, D4), so
         # the rule's service stays ALL instead of synthesised port objects.
-        _appdef_synth: list[tuple[str, str]] = []   # (service name, rule) created below, declared after the render
-        if platform != "panw" and not (platform == "fortigate" and forti_ngfw_mode == "policy-based"):
-            from deploy.app_defaults import resolve_app_default
-            _synth_seen = {o["name"] for o in service_objects}
-            for _rule in rules:
-                if _rule.get("services"):
-                    continue
-                _imp = _rule.get("import_services")
-                if isinstance(_imp, str):
-                    try:
-                        _imp = json.loads(_imp)
-                    except Exception:
-                        _imp = []
-                if "application-default" not in (_imp or []):
-                    continue
-                _apps = _rule.get("import_applications")
-                if isinstance(_apps, str):
-                    try:
-                        _apps = json.loads(_apps)
-                    except Exception:
-                        _apps = []
-                _specs, _unresolved = resolve_app_default(_apps or [])
-                _names: list[str] = []
-                for _proto, _port in _specs:
-                    _sname = f"app-{_proto}-{_port}"
-                    if _sname not in _synth_seen:
-                        service_objects.append({
-                            "name": _sname,
-                            "value": {"protocol": _proto, "port": _port},
-                        })
-                        _synth_seen.add(_sname)
-                        _appdef_synth.append((_sname, str(_rule.get("rule_name") or "")))
-                    if _sname not in _names:
-                        _names.append(_sname)
-                if _names:
-                    _rule["services"] = _names
-                if _unresolved:
-                    _rule["_appdef_unresolved"] = _unresolved
+        # The loop lives in deploy.app_defaults.apply_app_default so it can be
+        # tested on its own; it also honours the rule's service mode for every
+        # target (docs/APPDEF_WIDENING_PLAN.md, D5).
+        from deploy.app_defaults import apply_app_default
+        _appdef_synth = apply_app_default(rules, platform, forti_ngfw_mode, service_objects)
 
         # Load NAT rules from the SOURCE device. NAT goes through the same
         # zone-translation path as security rules so cross-device pushes work.
@@ -25301,6 +26396,22 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
         app_catalog=forti_app_catalog,
     )
 
+    # A strand the target lacks by its nature (a Check Point virtual system's
+    # network: docs/VSX_TARGET_PLAN.md, D2): its sections leave the artefact
+    # here, the Review gets one note, the summary carries the declaration for
+    # the deploy tab and the push route. The driver refuses the strand too.
+    _target_dev = {"id": tgt[0], "platform": platform, "config": tgt[4]}
+    declared_strands: dict[str, str] = {}
+    for _strand in _artifact.STRANDS:
+        _why = driver.strand_unavailable(device=_target_dev, strand=_strand)
+        if _why:
+            declared_strands[_strand] = _why
+    if declared_strands:
+        config = {_k: _v for _k, _v in config.items() if driver.section_strand(_k) not in declared_strands}
+        for _strand, _why in declared_strands.items():
+            validation_issues.append({"kind": "strand_declared", "interface": None,
+                                      "detail": f"the {_strand} strand is not pushed to this target: {_why}"})
+
     # ... and declared here, so the Review accounts for every source route
     # instead of showing a silent shortfall. Same field and wording for every
     # target - the statement is not vendor-specific. The routes that followed
@@ -25423,10 +26534,10 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
                 "reason": f"the source carries {_tp_src} threat prevention rule(s), "
                           "but no layer with a generation strategy is configured "
                           "for this target",
-                # the pane moved to Rules > Threat Prevention on 2026-10-12
+                # the pane moved to Policies > Threat Prevention on 2026-10-12
                 # (CE backlog 6); an artefact built before that keeps the old
                 # wording until it is built again
-                "fallback": "not pushed: configure the layer under Rules > "
+                "fallback": "not pushed: configure the layer under Policies > "
                             "Threat Prevention",
                 "rhash": "",
             })
@@ -25459,11 +26570,13 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
     if _rules_log is not None:
         try:
             with engine.connect() as _shc:
-                _sh = shadowing.analyze(_shc, source_id, rules, shadowing.profile_for(platform))
+                _sh = shadowing.analyze(_shc, source_id, rules, shadowing.profile_for(platform, forti_ngfw_mode))
             _shn = {(r.get("rhash") or ""): str(r.get("rule_name") or r.get("id") or "?") for r in rules}
             _rules_log["shadowed"] = [[rh, _shn.get(rh) or rh[:12], str(e.get("kind") or "shadowed"), str(e.get("by") or "")]
                                       for rh, e in (_sh.get("shadowed") or {}).items() if isinstance(e, dict)]
             _rules_log["shadow_skipped"] = int(_sh.get("skipped") or 0)
+            # 15b: an empty scan says why nothing could cover (all application-default)
+            _rules_log["shadow_no_cover"] = shadowing.explain_no_cover(_sh)
         except Exception as _she:
             _rules_log.pop("shadowed", None)
             _rules_log["shadow_error"] = str(_she)[:300]
@@ -25486,6 +26599,15 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
                                       "count": int(_row["rule_count"] or 0), "samples": list(_smp)[:20]})
     except Exception:
         _import_drops = []
+    # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D7): the source's own
+    # counters as a decision aid in the Review, never a gate (the push and the
+    # render do not see them).
+    _box_usage = None
+    try:
+        with engine.connect() as _buc:
+            _box_usage = hitcounts.summary(_buc, source_id)
+    except Exception:
+        _box_usage = None
     # Drops that carry a validation kind (deploy.base.unresolved_reference):
     # the driver pruned a rule reference to an object the build does not
     # create. Lifted here into validation_issues, where the blocking kinds
@@ -25586,14 +26708,19 @@ def _deploy_generate_impl(source_id: int, body: dict) -> JSONResponse:
         "counts": [{"name": s["name"], "count": s["count"]} for s in sections],
         "dropped_fields": list(dropped_fields or [])[:5000],
         "validation_issues": validation_issues,
+        "declared_strands": declared_strands,
         "completeness": completeness_issues,
         "skipped_interfaces": skipped_interfaces,
         "mode_notes": _mode_notes,
         "nat_mode": forti_nat_mode if platform == "fortigate" else None,
         "blocking_kinds": sorted(BLOCKING_VALIDATION_KINDS),
+        # which kinds hold back which push (docs/APPDEF_WIDENING_PLAN.md, D4)
+        "blocking_kinds_policy": sorted(blocking_kinds_for("policy")),
+        "blocking_kinds_network": sorted(blocking_kinds_for("network")),
         "kinds": _kinds,
         "rules_log": _rules_log,
         "import_drops": _import_drops,
+        "box_usage": _box_usage,
         "push_options": _push_opts_persisted,
     }
     _record_generate_history(
@@ -25728,7 +26855,7 @@ async def optimize_apply(device_id: int, request: Request):
         result["note"] = (f"Deleted {n} object(s) LIVE on the FortiGate. A full-config backup "
                           "was taken first: download it to restore. FortiOS has no candidate/undo.")
     else:
-        result["note"] = ("Deleted on the CANDIDATE config. Review on the box, then commit or "
+        result["note"] = ("Deleted on the CANDIDATE config. Review on the Device, then commit or "
                           "revert, Gateshift commits nothing.")
     return JSONResponse(result)
 
@@ -25862,12 +26989,16 @@ def _run_deploy_push(job_id: str, device: dict, config: dict,
                      skip_sections: list[str] | None = None,
                      mgmt_override: bool = False,
                      vpn_certs: dict | None = None,
-                     push_options: dict | None = None) -> None:
+                     push_options: dict | None = None,
+                     advisories: list[tuple[str, str]] | None = None) -> None:
     """Worker body (runs in _DEPLOY_EXECUTOR). Iterates the sync
     driver.push() generator, persisting each step to fw_deploy_job_events and
     finalizing the job row. Not tied to any request, so a client disconnect
     cannot abort it; CP discard+logout in the driver's finally runs because we
-    always inner.close()."""
+    always inner.close(). `advisories` are (step, detail) pairs the record
+    opens with, before the driver's steps: what the operator should know about
+    this push that is not a failure (a tunnel going out with the placeholder
+    pre-shared key, docs/DEVICE_IDENTITY_PLAN.md, one-way door 2)."""
     engine = get_engine()
     # Manager-managed targets (Panorama/FortiManager) resolve to an enterprise
     # driver subclass when the EE module is loaded; a gate driver when the
@@ -25881,7 +27012,16 @@ def _run_deploy_push(job_id: str, device: dict, config: dict,
     seq = 0
     all_ok = True
     push_id: str | None = None
+    first_failure = ""     # the job's summary: the first step that failed, as its sentence
     try:
+        for _step, _detail in (advisories or ()):
+            seq += 1
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "INSERT INTO fw_deploy_job_events "
+                    "  (job_id, seq, step, success, detail, data_json) "
+                    "VALUES (:j, :q, :st, 1, :d, NULL)"
+                ), {"j": job_id, "q": seq, "st": _step[:255], "d": (_detail or "")[:2000]})
         for result in inner:
             seq += 1
             data_extra: dict = {}
@@ -25898,28 +27038,42 @@ def _run_deploy_push(job_id: str, device: dict, config: dict,
                         "UPDATE fw_deploy_jobs SET push_id = :p, session_handle = :h, "
                         "needs_commit = 1 WHERE job_id = :j"
                     ), {"p": push_id, "h": json.dumps(handle), "j": job_id})
+            _detail = result.detail or ""
             if not result.success:
                 all_ok = False
+                _detail = _step_detail_sentence(_detail)
+                if not first_failure:
+                    first_failure = f"{result.step}: {_detail}"[:2000]
             with engine.begin() as conn:
                 conn.execute(text(
                     "INSERT INTO fw_deploy_job_events "
                     "  (job_id, seq, step, success, detail, data_json) "
                     "VALUES (:j, :q, :st, :ok, :d, :dj)"
                 ), {"j": job_id, "q": seq, "st": result.step,
-                    "ok": 1 if result.success else 0, "d": result.detail or "",
+                    "ok": 1 if result.success else 0, "d": _detail,
                     "dj": json.dumps(data_extra) if data_extra else None})
         # A push changes no inputs: the target configuration stays exactly as
         # fresh as it was (docs/DEPLOY_PAGE_DESIGN.md, E4) - nothing to clear.
         with engine.begin() as conn:
             conn.execute(text(
-                "UPDATE fw_deploy_jobs SET status = 'done', success = :ok WHERE job_id = :j"
-            ), {"ok": 1 if all_ok else 0, "j": job_id})
+                "UPDATE fw_deploy_jobs SET status = 'done', success = :ok, error_text = :et WHERE job_id = :j"
+            ), {"ok": 1 if all_ok else 0, "et": "" if all_ok else first_failure, "j": job_id})
             # Project status follows the latest action (P1.1): a push that
             # ran through marks its project pushed; a failed one leaves it.
             if all_ok:
-                _touch_project_status(conn, conn.execute(text(
-                    "SELECT project_id FROM fw_deploy_jobs WHERE job_id = :j"
-                ), {"j": job_id}).scalar(), "pushed")
+                # The step model's evidence (docs/UI_USABILITY_PLAN.md, D1): this
+                # strand was pushed from the artefact's current build, and the
+                # project status follows (D7, never stepped back by a later build).
+                _pj = conn.execute(text(
+                    "SELECT project_id, strand FROM fw_deploy_jobs WHERE job_id = :j"
+                ), {"j": job_id}).fetchone()
+                if _pj and _pj[0]:
+                    _strand = "network" if _pj[1] == "network" else "policy"
+                    conn.execute(text(
+                        f"UPDATE fw_target_configs SET pushed_{_strand}_job_id = job_id, "
+                        f"pushed_{_strand}_at = NOW() WHERE project_id = :p"
+                    ), {"p": int(_pj[0])})
+                    _sync_project_status(conn, int(_pj[0]))
     except Exception as e:
         try:
             with engine.begin() as conn:
@@ -26104,7 +27258,7 @@ def _record_generate_history(source_id: int, target_id: int,
                     "   success, kind, project_id) "
                     "VALUES (:j, :s, :t, :p, 'policy', 'done', 1, 'generate', :pid)"
                 ), {"j": job_id, "s": source_id, "t": target_id, "p": platform, "pid": pid})
-            _touch_project_status(conn, pid, "generated")
+            _sync_project_status(conn, pid)
             seq = 0 if own_row else int(conn.execute(text(
                 "SELECT COALESCE(MAX(seq), -1) + 1 FROM fw_deploy_job_events WHERE job_id = :j"
             ), {"j": job_id}).scalar() or 0)
@@ -26321,6 +27475,20 @@ async def deploy_push(source_id: int, request: Request):
         project_id = (_ctx_explicit_project(_pc, request, source_id, target_id)
                       or _project_of_pair(_pc, body.get("project_id"), source_id, target_id)
                       or _project_for_pair(_pc, source_id, target_id, create=True))
+    # A strand the target lacks by its nature (a Check Point virtual system's
+    # network: docs/VSX_TARGET_PLAN.md, D2) is refused here with the driver's
+    # reason, before the artefact gates. The driver refuses it again.
+    with get_engine().connect() as _dc:
+        _drow = _dc.execute(text("SELECT platform, config FROM fw_devices WHERE id = :id"),
+                            {"id": target_id}).mappings().fetchone()
+    _dcls = DEPLOY_DRIVERS.get(_drow["platform"] or "") if _drow else None
+    _declined = _dcls().strand_unavailable(device=dict(_drow), strand=strand) if _dcls else None
+    if _declined:
+        _record_refused_push(source_id, target_id, strand, _drow["platform"],
+                             f"the {strand} strand is not pushed to this target: {_declined}",
+                             project_id=project_id)
+        return JSONResponse({"error": f"the {strand} strand is not pushed to this target: {_declined}",
+                             "declared": strand}, status_code=409)
     # The target configuration artefact (docs/DEPLOY_PAGE_DESIGN.md, E3): the
     # push reads what the page reviewed. Missing, outdated for the strand, or
     # changed since the review (build_id) refuses with 409 - the page builds
@@ -26360,35 +27528,56 @@ async def deploy_push(source_id: int, request: Request):
     config = {str(s.get("name") or ""): (s.get("xml") or "") for s in art.get("sections") or []}
     if not config:
         return JSONResponse({"error": "the target configuration has no sections"}, status_code=400)
-    _detached = _detached_push_secrets(config, source_id)
-    if _detached:
+    # Pre-shared keys (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2). The
+    # tokens live in the network strand's sections of every target (PA IKE
+    # gateways, FortiOS phase1, CP VPN peers and communities), so a policy
+    # push does not look. A tunnel without a stored key goes out with the
+    # placeholder and the push record names it (until 2026-11-11 that case
+    # was refused whenever the Device held a key for any other tunnel, which
+    # stopped a push with the keys of some tunnels entered: the 0.9.5 rc
+    # matrix). A key this Device holds under a name no tunnel carries any
+    # more was detached by a rename or re-import, and the renamed tunnel is
+    # one of those without a key: that push is refused, both named.
+    _unkeyed, _orphans = _push_secret_gaps(config, source_id) if strand == "network" else ([], [])
+    if _unkeyed and _orphans:
         _record_refused_push(source_id, target_id, strand, None,
-                             f"{len(_detached)} VPN tunnel(s) with a detached pre-shared key",
+                             f"{len(_unkeyed)} VPN tunnel(s) without a pre-shared key while "
+                             f"{len(_orphans)} stored key(s) belong to no tunnel: {', '.join(_orphans)}",
                              project_id=project_id)
-        return JSONResponse({"error": f"{len(_detached)} VPN tunnel(s) in this push reference a "
-                                      "pre-shared key this Device holds under another tunnel: "
-                                      "the stored keys were detached from their tunnels by a "
-                                      "rename or re-import. Re-enter them under VPN, then push.",
-                             "detached_tunnels": _detached}, status_code=409)
+        return JSONResponse({"error": f"{len(_unkeyed)} VPN tunnel(s) in this push have no pre-shared key, "
+                                      f"and this Device holds {len(_orphans)} key(s) under tunnel name(s) no "
+                                      f"tunnel carries any more ({', '.join(_orphans)}): a rename or re-import "
+                                      "detached them. Set the keys of the renamed tunnels under Network > VPN, "
+                                      "discard the keys left behind there, then push.",
+                             "detached_tunnels": _unkeyed, "orphan_keys": _orphans}, status_code=409)
+    _advisories: list[tuple[str, str]] = []
+    if _unkeyed:
+        _advisories.append(("pre-shared keys",
+                            f"{len(_unkeyed)} tunnel(s) go out with the placeholder pre-shared key "
+                            f"{_VPN_PSK_PLACEHOLDER}, no key is stored for them: {', '.join(_unkeyed)}. "
+                            "Set the keys under Network > VPN and push the network again, or set them "
+                            "on the target."))
     _leaks = int(((art.get("summary") or {}).get("leaks")) or 0)
     if _leaks:
         _record_refused_push(source_id, target_id, strand, None,
                              f"{_leaks} item(s) deleted in this project still in the build", project_id=project_id)
         return JSONResponse({"error": f"the build still carries {_leaks} item(s) deleted in this project: "
                                       "a Gateshift defect, see the findings", "leaks": _leaks}, status_code=400)
-    # Rule references the build pruned (deploy.base.UNRESOLVED_REFERENCE): a
-    # side pushed without them matches wider than the source. The policy
-    # strand is refused until the operator creates the objects or re-imports;
-    # the network strand carries no rule and goes ahead.
-    _unres = int(((art.get("summary") or {}).get("unresolved")) or 0)
-    if _unres and strand == "policy":
-        _record_refused_push(source_id, target_id, strand, None,
-                             f"{_unres} rule reference(s) to objects the build does not create",
-                             project_id=project_id)
-        return JSONResponse({"error": f"the build has {_unres} rule reference(s) to objects it does not "
-                                      "create: create the objects (the findings name the values) or "
-                                      "re-import the source, then build again", "unresolved": _unres},
-                            status_code=400)
+    # Blocking findings of the policy strand (docs/APPDEF_WIDENING_PLAN.md,
+    # D4): a rule reference the build pruned, a deny rule losing IPv6 reach,
+    # an allow rule widened to every service. Each would push something wider
+    # than the source, so the policy strand is refused until the operator
+    # decides per finding; the network strand carries no rule and goes ahead.
+    # Until 2026-11-03 only the pruned references were enforced here, the
+    # other kinds were Review labels without teeth.
+    if strand == "policy":
+        _refusal = _policy_push_refusal(art.get("summary") or {})
+        if _refusal:
+            _record_refused_push(source_id, target_id, strand, None, _refusal, project_id=project_id)
+            return JSONResponse({"error": _refusal + ". The findings name each rule. Decide per finding, "
+                                          "then build again.",
+                                 "blockers": int((art.get("summary") or {}).get("blockers_policy") or 0)},
+                                status_code=400)
     # Per-section push toggles (Phase 4 of push-scope-toggles). Body carries
     # UI-label keys the user opted OUT of in the modal. Validated below
     # against the target driver's _SECTION_LABELS so unknown keys can't
@@ -26709,7 +27898,7 @@ async def deploy_push(source_id: int, request: Request):
         return JSONResponse(
             {"error": ("the target configuration of this target is being built: "
                        "the push waits for it" if conflict_kind == "generate"
-                       else "a push is already running for this target"),
+                       else "A push is already running for this target, wait for it to finish."),
              "running": True, "job_id": conflict, "kind": conflict_kind},
             status_code=409,
         )
@@ -26732,7 +27921,7 @@ async def deploy_push(source_id: int, request: Request):
     # Job row is committed; spawn the worker (decoupled from this request).
     _DEPLOY_EXECUTOR.submit(
         _run_deploy_push, job_id, device, live_config, strand, deploy_platform,
-        skip_sections, mgmt_override, vpn_certs, push_options,
+        skip_sections, mgmt_override, vpn_certs, push_options, _advisories,
     )
     return JSONResponse({"job_id": job_id, "status": "running"}, status_code=202)
 
@@ -26898,6 +28087,48 @@ def _tc_sections_for_kinds(platform: str) -> dict:
     return out
 
 
+def _policy_push_refusal(summary: dict) -> str:
+    """Why the policy push is refused on this build's summary, or "" to go.
+
+    A summary from before the strand split carries no `blockers_policy`: it
+    is refused as "rebuild first" rather than read as clean, because what it
+    did not count cannot be trusted to be zero."""
+    if "blockers_policy" not in (summary or {}):
+        return "the build predates this version and does not say whether it carries blockers: build again"
+    n = int(summary.get("blockers_policy") or 0)
+    if not n:
+        return ""
+    unres = int(summary.get("unresolved") or 0)
+    if unres == n:
+        return f"the build has {n} rule reference(s) to objects it does not create"
+    return f"the build has {n} blocking finding(s) on its rules"
+
+
+def _blocker_kinds(issues) -> dict:
+    """The blocking findings of a build by kind (docs/UI_USABILITY_PLAN.md,
+    D18): the step model names each with the place that fixes it."""
+    out: dict = {}
+    for i in issues or ():
+        k = i.get("kind") if isinstance(i, dict) else None
+        if k in BLOCKING_VALIDATION_KINDS:
+            out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _blocker_kinds_of_report(conn, project_id: int) -> dict:
+    """The same from the stored report, for an artefact built before the
+    summary carried `blocker_kinds`."""
+    raw = conn.execute(text("SELECT report_json FROM fw_target_configs WHERE project_id = :p"),
+                       {"p": project_id}).scalar()
+    if not raw:
+        return {}
+    try:
+        rep = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+    except Exception:
+        return {}
+    return _blocker_kinds((rep or {}).get("validation_issues") or [])
+
+
 def _target_config_summary(sections: list, report: dict) -> dict:
     log = report.get("rules_log") or {}
     sh = log.get("shadowed")
@@ -26906,11 +28137,19 @@ def _target_config_summary(sections: list, report: dict) -> dict:
         "sections": [{"name": s.get("name"), "count": int(s.get("count") or 0)} for s in sections],
         "blockers": sum(1 for i in (report.get("validation_issues") or [])
                         if i.get("kind") in BLOCKING_VALIDATION_KINDS),
+        # the same per kind: the step model's fix steps (docs/UI_USABILITY_PLAN.md, D18)
+        "blocker_kinds": _blocker_kinds(report.get("validation_issues") or []),
+        # the policy push refuses on this one (docs/APPDEF_WIDENING_PLAN.md, D4)
+        "blockers_policy": sum(1 for i in (report.get("validation_issues") or [])
+                               if i.get("kind") in blocking_kinds_for("policy")),
         "leaks": sum(1 for i in (report.get("validation_issues") or []) if i.get("kind") == "excluded_leak"),
         # rule references the build pruned (deploy.base.UNRESOLVED_REFERENCE):
         # the push handler refuses on this count, like on leaks
         "unresolved": sum(1 for i in (report.get("validation_issues") or []) if i.get("kind") == "unresolved_reference"),
         "dropped_fields": len(report.get("dropped_fields") or []),
+        # the strands this target lacks, with the driver's reason (docs/VSX_TARGET_PLAN.md,
+        # D2): present only when there is one, every other summary is as before
+        **({"declared_strands": report["declared_strands"]} if report.get("declared_strands") else {}),
         "rules": {"source": log.get("source"), "target": log.get("target"),
                   "dropped": len(log.get("dropped") or []), "changed": len(log.get("changed") or []),
                   "shadowed": (len(sh) if isinstance(sh, list) else None)},
@@ -27043,6 +28282,7 @@ def _run_target_build(job_id: str, source_id: int, target_id: int, project_id: i
         summary = _persist_target_config(project_id, source_id, target_id, platform, job_id, sections, report)
         secs = int(time.time() - t_start)
         with engine.begin() as c:
+            _sync_project_status(c, project_id)   # the artefact is stored: the step model's status (D7)
             c.execute(text("UPDATE fw_deploy_job_events SET detail = :d WHERE job_id = :j AND seq = 0"),
                       {"d": f"{summary['entries']} entries generated, {secs}s", "j": job_id})
             _job_event(c, job_id, "build",
@@ -27124,7 +28364,12 @@ async def deploy_config(project_id: int = 0, report: int = 1):
                     rep = json.loads(raw)
                 except Exception:
                     rep = None
+        _ferr = _target_fetch_error(conn, conn.execute(text(
+            "SELECT target_ref_id FROM fw_projects WHERE id = :p"), {"p": project_id}).scalar())
     st["report"] = rep
+    # the target's newest failed read (product finding 9): the Review carries it as a warning
+    st["target_fetch_error"] = (dict(_ferr, at=_ferr["at"].strftime("%Y-%m-%d %H:%M") if _ferr.get("at") else None)
+                                if _ferr else None)
     return JSONResponse(st)
 
 
@@ -27269,7 +28514,7 @@ async def deploy_history(source_id: int = 0, target_id: int = 0,
                 "SELECT source_ref_id, target_ref_id FROM fw_projects WHERE id = :p"),
                 {"p": project_id}).fetchone()
         where.append("(j.project_id = :p"
-                     " OR (j.kind IN ('import', 'collect') AND j.source_id IN (:ps, :pt))"
+                     " OR (j.kind IN ('import', 'collect', 'hits', 'discover') AND j.source_id IN (:ps, :pt))"
                      " OR (j.kind IN ('backup', 'restore') AND j.target_id = :pt))")
         params.update({"p": project_id,
                        "ps": int(pair[0]) if pair else 0,
@@ -27329,7 +28574,7 @@ async def deploy_history(source_id: int = 0, target_id: int = 0,
             # not with an arbitrary later detail.
             "summary": ((r["first_step"]
                          if (r["kind"] or "") in ("generate", "import",
-                                                  "collect", "upload")
+                                                  "collect", "upload", "hits")
                          else None)
                         or r["error_text"] or r["last_fail"] or ""),
         })
@@ -27392,7 +28637,7 @@ def _cp_conflict_label(fixable: dict) -> str:
 
 
 @app.post("/deploy/publish/{push_id}")
-async def deploy_publish(push_id: str):
+def deploy_publish(push_id: str):
     """Finalize a session-scoped push (CP publish). Streams SSE.
 
     On success the staged changes are committed to the management DB and
@@ -27484,7 +28729,7 @@ async def deploy_publish(push_id: str):
                                      if len(_names) > 10 else "")
                             _detail += (f". Check Point names: {_head}"
                                         f"{_more}. Disable or adjust these "
-                                        "rules in Rules > Firewall and "
+                                        "rules in Policies > Security and "
                                         "push again. This list is the "
                                         "authority for installability. The "
                                         "Shadowed filter answers a narrower "
@@ -27515,7 +28760,7 @@ async def deploy_publish(push_id: str):
 
 
 @app.post("/deploy/discard/{push_id}")
-async def deploy_discard(push_id: str):
+def deploy_discard(push_id: str):
     """Drop a staged push without publishing. Streams SSE."""
     pending = _load_pending_push_db(push_id)
     if not pending:
@@ -27793,10 +29038,11 @@ async def devices_delete(device_id: int):
             "ORDER BY updated_at DESC"), {"d": device_id}).fetchall()]
     if _using:
         _shown = ", ".join(_using[:5]) + (f" (+{len(_using) - 5} more)" if len(_using) > 5 else "")
+        # back to the Devices page, where the delete lives (block E, 2026-11-16)
         return RedirectResponse(
-            "/projects?form_error=" + urllib.parse.quote(
-                f"This device is used by {len(_using)} project(s): {_shown}. "
-                "Delete those projects first (Projects page)."),
+            "/devices?form_error=" + urllib.parse.quote(
+                f"This Device is used by {len(_using)} project(s): {_shown}. "
+                "Delete those projects first under Projects."),
             status_code=303)
     with engine.begin() as conn:
         _ensure_devices_table(conn)
@@ -27824,7 +29070,7 @@ async def devices_delete(device_id: int):
         idph = ", ".join(f":i{k}" for k in range(len(ids)))
         conn.execute(text(f"DELETE FROM fw_devices WHERE id IN ({idph})"),
                      {f"i{k}": v for k, v in enumerate(ids)})
-    return RedirectResponse("/projects", status_code=303)
+    return RedirectResponse("/devices", status_code=303)
 
 
 _VENDOR_PLATFORM = {
@@ -27957,7 +29203,7 @@ def _sender_scan_redirect(res: dict, extra: dict | None = None) -> RedirectRespo
         q["unattributed"] = res["unattributed"]
     else:
         q["form_error"] = f"sender scan failed: {res.get('error')}"
-    return RedirectResponse("/projects?" + urllib.parse.urlencode(q), status_code=303)
+    return RedirectResponse("/devices?" + urllib.parse.urlencode(q), status_code=303)
 
 
 @app.post("/devices/discover")
@@ -28064,7 +29310,7 @@ async def devices_add_from_logs(request: Request):
     form = await request.form()
     platform = (form.get("platform") or "").strip()
     if platform not in PLATFORM_LABELS:
-        return RedirectResponse("/projects?form_error=" + urllib.parse.quote("pick a platform"),
+        return RedirectResponse("/devices?form_error=" + urllib.parse.quote("pick a platform"),
                                 status_code=303)
     try:
         sender_ids = sorted({int(x) for x in form.getlist("sender") if str(x).strip().isdigit()})
@@ -28082,23 +29328,23 @@ async def devices_add_from_logs(request: Request):
                 f"WHERE source_type = 'syslog' AND id IN ({ph})"),
                 {f"s{i}": v for i, v in enumerate(sender_ids)}).mappings().all()]
         if len(chosen) != len(sender_ids):
-            return RedirectResponse("/projects?form_error=" + urllib.parse.quote(
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
                 "a chosen sender no longer exists: scan again"), status_code=303)
         taken = [c for c in chosen if c["device_id"]]
         if taken:
-            return RedirectResponse("/projects?form_error=" + urllib.parse.quote(
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
                 f"sender {taken[0]['header_host'] or taken[0]['source_addr']} is attributed to "
-                f"Device #{taken[0]['device_id']}: detach it first (Devices > Log senders)"),
+                f"Device #{taken[0]['device_id']}: detach it first (Log senders on the Projects page)"),
                 status_code=303)
         if not name and chosen:
             name = chosen[0]["vendor_serial"] or chosen[0]["header_host"] or chosen[0]["source_addr"]
         if not name:
-            return RedirectResponse("/projects?form_error=" + urllib.parse.quote(
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
                 "a name is required when no sender is chosen"), status_code=303)
         _tn = _form_tenant(request, form, conn)
         if conn.execute(text("SELECT 1 FROM fw_devices WHERE host_name = :h AND tenant_id = :tn"),
                         {"h": name, "tn": _tn}).scalar():
-            return RedirectResponse("/projects?form_error=" + urllib.parse.quote(
+            return RedirectResponse("/devices?form_error=" + urllib.parse.quote(
                 f"a Device named {name} exists: attach the sender to it on the senders page, "
                 "or pick another name"), status_code=303)
         device_id = conn.execute(text(
@@ -28130,7 +29376,7 @@ async def devices_logs_upload(request: Request, log_file: UploadFile = File(...)
     the one log as GLOBAL rows (kind 'upload', device 0), not banners."""
     def _fail(msg: str) -> RedirectResponse:
         _record_device_log(0, "upload", None, False, msg)
-        return RedirectResponse("/projects", status_code=303)
+        return RedirectResponse("/devices", status_code=303)
 
     target_dir = "/ingest-logs"
     if not os.path.isdir(target_dir):
@@ -28209,7 +29455,7 @@ async def devices_reset(device_id: int):
     with engine.connect() as conn:
         if not conn.execute(text("SELECT 1 FROM fw_devices WHERE id = :id"),
                             {"id": device_id}).scalar():
-            return RedirectResponse("/projects", status_code=303)
+            return RedirectResponse("/devices", status_code=303)
 
     with engine.begin() as conn:
         # 1) Overrides keyed on a hash, not on the Device: through their rule
@@ -28243,7 +29489,7 @@ async def devices_reset(device_id: int):
         _reset_pipeline_config(conn)
         _recompute_zone_status(conn)
         set_needs_generate(conn, False)
-    return RedirectResponse("/projects", status_code=303)
+    return RedirectResponse("/devices", status_code=303)
 
 
 # ── PANW API import ────────────────────────────────────────────────────────────
@@ -28275,6 +29521,54 @@ def _panw_get(base_url: str, api_key: str, xpath: str) -> ET.Element:
         raise RuntimeError(f"PAN-OS API error: {msg}")
     result = root.find("result")
     return result if result is not None else root
+
+
+def _with_flash(next_url: str, **params: str) -> str:
+    """``next_url`` with the flash parameters in its query, in front of a fragment: a
+    form that returns to '/rules?...#overview' got the flash appended behind the hash,
+    which the browser never sends, so a failed import from the Dashboard showed
+    nothing (D98, 2026-11-16)."""
+    base, _, frag = (next_url or "/").partition("#")
+    sep = "&" if "?" in base else "?"
+    query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
+    return base + sep + query + ("#" + frag if frag else "")
+
+
+_TRANSPORT_FAILURE_RE = re.compile(
+    r"HTTPSConnectionPool|HTTPConnectionPool|Max retries exceeded|NewConnectionError|"
+    r"ConnectTimeoutError|Connection refused|No route to host", re.I)
+
+
+def _step_detail_sentence(detail: str) -> str:
+    """The operator's sentence for a push step that failed on the transport or on a
+    refused credential, every other detail as it was (block E, 2026-11-16: the dead
+    box's step said "HTTPSConnectionPool(host=...) Max retries exceeded with url: ...
+    (Caused by ConnectTimeoutError(...))"). Narrower than _reach_error on purpose: a
+    vendor's own "timed out" (a commit, a job) must stay what it is."""
+    d = detail or ""
+    if _TRANSPORT_FAILURE_RE.search(d):
+        return "device unreachable: no answer from the management address"
+    if "Invalid Credential" in d or re.search(r"\b40[13] Client Error\b", d):
+        return "API access denied (Invalid Credential): check the API key"
+    return d
+
+
+def _reach_error(exc: BaseException) -> str:
+    """The operator's sentence for a Device that could not be read: a refused credential
+    and a box that does not answer come back as one short line, any other error as it
+    was. The same sentence the import pre-flight uses, so a refused key reads the same
+    on every path (D95, 2026-11-16: the instance discovery ran before the pre-flight and
+    the target snapshot said '403 Client Error: Invalid Credential for url: ...' once per
+    catalogue)."""
+    msg = str(exc or "")
+    code = getattr(getattr(exc, "response", None), "status_code", None)
+    if code in (401, 403) or "Invalid Credential" in msg or re.search(r"\b40[13] Client Error\b", msg):
+        return "API access denied (Invalid Credential): check the API key"
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)) or re.search(
+            r"timed out|Max retries|Connection refused|Failed to establish|NewConnectionError|"
+            r"Name or service not known|No route to host", msg, re.I):
+        return "device unreachable: no answer from the management address"
+    return msg
 
 
 class _ImportAuthError(RuntimeError):
@@ -28391,6 +29685,45 @@ def _panw_op(base_url: str, api_key: str, cmd: str) -> ET.Element:
         raise RuntimeError(f"PAN-OS API error: {msg}")
     result = root.find("result")
     return result if result is not None else root
+
+
+def _panw_read_hit_counts(base_url: str, api_key: str, vsys: str) -> "hitcounts.Reading":
+    """The firewall's own counters of one vsys (docs/HIT_COUNTS_PLAN.md, D1, D4,
+    measured on PAN-OS 10.1 2026-11-05): `show rule-hit-count vsys vsys-name
+    <vsys> rule-base <security|nat> rules all` answers one entry per rule with
+    hit-count, first-hit-timestamp, last-hit-timestamp, last-reset-timestamp
+    and rule-creation-timestamp (epoch seconds, 0 when never) and `latest`
+    (no for a superseded revision, skipped). The since-time is the last reset,
+    else the rule's creation. Read-only: nothing here resets a counter."""
+    read_at = hitcounts.utcnow()
+    found: dict[str, dict] = {"security": {}, "nat": {}}
+    for rb in ("security", "nat"):
+        cmd = (f"<show><rule-hit-count><vsys><vsys-name><entry name='{vsys}'><rule-base><entry name='{rb}'>"
+               "<rules><all/></rules></entry></rule-base></entry></vsys-name></vsys></rule-hit-count></show>")
+        result = _panw_op(base_url, api_key, cmd)
+        for e in result.findall(".//rules/entry"):
+            name = (e.attrib.get("name") or "").strip()
+            if not name or (e.findtext("latest") or "yes").strip().lower() == "no":
+                continue
+            reset = hitcounts.from_epoch(e.findtext("last-reset-timestamp"))
+            created = hitcounts.from_epoch(e.findtext("rule-creation-timestamp"))
+            found[rb][name] = hitcounts.entry(e.findtext("hit-count"),
+                                              first=hitcounts.from_epoch(e.findtext("first-hit-timestamp")),
+                                              last=hitcounts.from_epoch(e.findtext("last-hit-timestamp")),
+                                              since=reset or created)
+    return hitcounts.Reading(rules=found["security"], nats=found["nat"], read_at=read_at)
+
+
+def _panw_hits(device: dict) -> "hitcounts.Reading":
+    """The refresh's read of a PAN-OS row (docs/HIT_COUNTS_PLAN.md, D3): the
+    same session facts the import uses, the vsys of the row. The shared
+    objects row carries no rulebase and declares."""
+    vsys = _panw_vsys_of(device)
+    if vsys == "shared":
+        return hitcounts.declared("the shared objects scope carries no ruleset")
+    host = device["mgmt_ip"] or device["host_name"]
+    base_url = f"https://{host}:{device['mgmt_port'] or 443}"
+    return _panw_read_hit_counts(base_url, device["api_key"] or "", vsys)
 
 
 def _parse_panw_interfaces(result: ET.Element) -> list[dict]:
@@ -28734,9 +30067,13 @@ def _collect_panw_interfaces(device: dict, dev_base: str | None = None) -> dict:
     is_firewall = dev_base is None  # a Panorama TEMPLATE has no dataplane to probe
     if dev_base is None:
         dev_base = "/config/devices/entry[@name='localhost.localdomain']"
-    vsys_xpath  = f"{dev_base}/vsys/entry[@name='vsys1']/zone"
+    _vsys = _panw_vsys_of(device) if is_firewall else "vsys1"
+    if _vsys == "shared":          # the root scope of a multi-vsys box owns no network
+        return {"interfaces": [], "routes": [], "vrfs": [], "zones": [], "errors": [], "warnings": []}
+    vsys_xpath  = f"{dev_base}/vsys/entry[@name='{_vsys}']/zone"
     iface_xpath = f"{dev_base}/network/interface"
     vr_xpath    = f"{dev_base}/network/virtual-router"
+    import_xpath = f"{dev_base}/vsys/entry[@name='{_vsys}']/import/network"
 
     interfaces: list[dict] = []
     routes:     list[dict] = []
@@ -28935,6 +30272,15 @@ def _collect_panw_interfaces(device: dict, dev_base: str | None = None) -> dict:
         except Exception as exc:
             errors.append(f"routing: {exc}")
 
+    if is_firewall and _panw_is_instance_row(device):
+        # a vsys of a multi-vsys box: the device-level network narrowed to its import lists
+        try:
+            _imp = _panw_get(base_url, api_key, import_xpath)
+            _imp_if = {m.text.strip() for m in _imp.findall(".//interface/member") if m.text}
+            _imp_vr = {m.text.strip() for m in _imp.findall(".//virtual-router/member") if m.text}
+            interfaces, routes, vrfs = _panw_vsys_scope(interfaces, routes, vrfs, _imp_if, _imp_vr)
+        except Exception as exc:
+            warnings.append(f"vsys import lists: {exc}")
     return {"interfaces": interfaces, "routes": routes, "vrfs": vrfs, "zones": zones, "errors": errors, "warnings": warnings}
 
 
@@ -29003,7 +30349,7 @@ def _merge_gaia_iface_extras(rows: list[dict], extras: list[dict]) -> list[str]:
                 if owner in from_object else
                 f"interfaces: Gaia reports {addr} on both '{owner}' and '{name}', "
                 f"keeping '{owner}'. Two interfaces cannot share one address. Check the "
-                f"box.")
+                f"Device.")
             continue
         row = {
             "name":        name,
@@ -29049,6 +30395,17 @@ def _collect_checkpoint_via_mgmt(device: dict) -> dict:
     cp = cfg.get("cp") or {}
     gateway_uid = cp.get("gateway_uid")
     gateway_type = cp.get("gateway_type") or "simple-gateway"
+    # a virtual system row (an instance scope of its VSX gateway, F-4) reads
+    # its object through the management. The Gaia side-channel stays off for
+    # it: the VSX member's Gaia view is VS0, not this virtual system, and the
+    # Gaia API of R81.20 takes no virtual system context (measured 2026-11-05).
+    from deploy.checkpoint import _is_vs_type as _cp_is_vs
+    gaia_device = device
+    if _cp_is_vs(gateway_type):
+        warnings.append("network: the Gaia API carries no virtual system context (API 1.6 on R81.20), "
+                        "the static routes of the virtual system are not read. Its connected routes "
+                        "come from the object's topology")
+        gaia_device = dict(device, gaia_user=None, gaia_password=None)
     if not gateway_uid:
         errors.append("interfaces: device.config.cp.gateway_uid not set")
         return {"interfaces": [], "routes": [], "vrfs": [], "errors": errors, "warnings": warnings}
@@ -29066,9 +30423,20 @@ def _collect_checkpoint_via_mgmt(device: dict) -> dict:
         try:
             gw = _cp_fetch_gateway_config(base_url, sid, gateway_uid, gateway_type)
         except Exception as exc:
-            errors.append(f"interfaces: show-{gateway_type}: {exc}")
-            return {"interfaces": [], "routes": [], "vrfs": [], "errors": errors, "warnings": warnings}
+            if "HTTP 401" not in str(exc):
+                errors.append(f"interfaces: show-{gateway_type}: {exc}")
+                return {"interfaces": [], "routes": [], "vrfs": [], "errors": errors, "warnings": warnings}
+            # the shared session was rejected (the driver dropped it from its
+            # cache on the 401): one more try on a fresh login
+            try:
+                sid, base_url = cp_login(device)
+                gw = _cp_fetch_gateway_config(base_url, sid, gateway_uid, gateway_type)
+            except Exception as exc2:
+                errors.append(f"interfaces: show-{gateway_type}: {exc2}")
+                return {"interfaces": [], "routes": [], "vrfs": [], "errors": errors, "warnings": warnings}
 
+        if gw.get("_declared"):
+            warnings.append(f"interfaces: {gw['_declared']}")
         gateway_name = gw.get("name") or device.get("host_name") or ""
         # show-simple-gateway omits bonds/loopback/etc. that don't carry a
         # zone. Pull the bond list separately via Gaia so the source row
@@ -29076,7 +30444,7 @@ def _collect_checkpoint_via_mgmt(device: dict) -> dict:
         # Empty when Gaia creds are missing - bonds simply remain hidden in
         # that case (same as before this slice).
         from deploy.checkpoint import _fetch_bonds_optional
-        bonds_map = _fetch_bonds_optional(device)
+        bonds_map = _fetch_bonds_optional(gaia_device)
         seen_iface_names: set[str] = set()
         # A ClusterXL cluster object returns `interfaces` as a settings DICT (not
         # the per-iface LIST a simple-gateway gives); its real interface dicts
@@ -29160,7 +30528,7 @@ def _collect_checkpoint_via_mgmt(device: dict) -> dict:
         # ipv4-address + mask. Best-effort; missing creds → skip silently.
         from deploy.checkpoint import _fetch_all_gaia_interfaces_optional
         warnings.extend(_merge_gaia_iface_extras(
-            interfaces, _fetch_all_gaia_interfaces_optional(device)))
+            interfaces, _fetch_all_gaia_interfaces_optional(gaia_device)))
         seen_iface_names = {r0["name"] for r0 in interfaces}
 
         # VRFs (VSX only) - uses Mgmt-API
@@ -29188,18 +30556,18 @@ def _collect_checkpoint_via_mgmt(device: dict) -> dict:
     # Without this, a single-gateway source derives zones only for its
     # directly-connected networks (found scripting the CP demo video;
     # the QA campaign's CP source was a cluster, which always fetched).
-    if device.get("gaia_user") and device.get("gaia_password"):
+    if gaia_device.get("gaia_user") and gaia_device.get("gaia_password"):
         needs_gaia_routes = True
-    elif not needs_gaia_routes:
+    elif not needs_gaia_routes and gaia_device is device:
         warnings.append(
             "routes: static routes not collected. Check Point stores them "
             "in Gaia, not the management object. Add Gaia credentials to "
             "the device and re-fetch")
     gaia_filled = False
-    if needs_gaia_routes and device.get("gaia_user") and device.get("gaia_password"):
+    if needs_gaia_routes and gaia_device.get("gaia_user") and gaia_device.get("gaia_password"):
         try:
             _have = {(r.get("prefix"), r.get("vr") or "default") for r in routes}
-            raw_routes = CheckpointDriver()._list_static_routes_via_gaia(device)
+            raw_routes = CheckpointDriver()._list_static_routes_via_gaia(gaia_device)
             for r in raw_routes:
                 try:
                     net = ipaddress.ip_network(r["prefix"], strict=False)
@@ -30851,7 +32219,10 @@ def _normalize_device_to_logs(device_id: int, import_ts, conn) -> int:
     # the flows hang on a sender like observed ones do and a Device delete
     # reaches them through it (docs/DEVICE_IDENTITY_PLAN.md, phase 4, D2).
     # An import sender left under this host name by a row no Device
-    # answered to at the migration goes with it.
+    # answered to at the migration goes with it. The sender's serial is the
+    # Device's row id: another Device may carry the same host name (a
+    # gateway registered again after a reinstall), and the sender's unique
+    # key is (type, host, address, serial).
     conn.execute(text(
         "DELETE f FROM fw_flows f JOIN fw_log_senders s ON s.id = f.sender_id "
         "WHERE s.source_type = 'api_import' AND (s.device_id = :d "
@@ -30864,8 +32235,9 @@ def _normalize_device_to_logs(device_id: int, import_ts, conn) -> int:
     sender_id = conn.execute(text(
         "INSERT INTO fw_log_senders (source_type, header_host, source_addr, vendor_serial, "
         "vendor, device_id, first_seen, last_seen, line_count) "
-        "VALUES ('api_import', :h, '', '', :v, :d, :ts, :ts, 0)"),
-        {"h": dev["host_name"], "v": vendor, "d": device_id, "ts": import_ts}).lastrowid
+        "VALUES ('api_import', :h, '', :serial, :v, :d, :ts, :ts, 0)"),
+        {"h": dev["host_name"], "serial": str(device_id), "v": vendor, "d": device_id,
+         "ts": import_ts}).lastrowid
 
     def _jloads(v):
         return json.loads(v) if isinstance(v, str) else (v or [])
@@ -31105,6 +32477,50 @@ def _panw_raw_objects(sections: list) -> list[dict]:
     return out
 
 
+def _panw_vsys_of(device: dict) -> str:
+    """The vsys a PAN-OS Device row addresses: `config.panw.vsys`, `vsys1` by default,
+    `shared` for the root scope of a multi-vsys box (docs/VIRTUAL_INSTANCES_PLAN.md)."""
+    try:
+        cfg = device.get("config")
+        cfg = json.loads(cfg or "{}") if isinstance(cfg, str) else (cfg or {})
+    except ValueError:
+        cfg = {}
+    return str(((cfg or {}).get("panw") or {}).get("vsys") or "vsys1").strip() or "vsys1"
+
+
+def _panw_is_instance_row(device: dict) -> bool:
+    try:
+        cfg = device.get("config")
+        cfg = json.loads(cfg or "{}") if isinstance(cfg, str) else (cfg or {})
+    except ValueError:
+        return False
+    return bool((cfg or {}).get("instance"))
+
+
+def _panw_vsys_scope(interfaces: list[dict], routes: list[dict], vrfs: list[dict],
+                     import_ifaces: set | None, import_vrs: set | None) -> tuple[list, list, list]:
+    """What a vsys owns of the device-level network: the interfaces of its import
+    list (a parent stays when one of its units is imported, a zone-bound interface
+    is the vsys's own), the virtual routers of its import list and their routes.
+    None for the lists = a single-vsys row, everything stays."""
+    if import_ifaces is None and import_vrs is None:
+        return interfaces, routes, vrfs
+    kept_names: set[str] = set()
+    for i in interfaces:
+        n = str(i.get("name") or "")
+        if i.get("zone") or (import_ifaces is not None and n in import_ifaces):
+            kept_names.add(n)
+    for n in list(kept_names):
+        if "." in n:
+            kept_names.add(n.split(".", 1)[0])
+    ifs = [i for i in interfaces if str(i.get("name") or "") in kept_names]
+    if import_vrs is None:
+        return ifs, routes, vrfs
+    vr_ok = {v for v in import_vrs}
+    return (ifs, [r for r in routes if str(r.get("vr") or r.get("vr_name") or "default") in vr_ok],
+            [v for v in vrfs if str(v.get("name") or "") in vr_ok])
+
+
 def _run_panw_import(device: dict) -> dict:
     """
     Fetch security rules and objects from a PAN-OS device via XML API.
@@ -31117,7 +32533,12 @@ def _run_panw_import(device: dict) -> dict:
     _panw_auth_preflight(base_url, api_key)
 
     dev_xpath = "/config/devices/entry[@name='localhost.localdomain']"
-    vsys_xpath = f"{dev_xpath}/vsys/entry[@name='vsys1']"
+    # The vsys this row reads (docs/VIRTUAL_INSTANCES_PLAN.md, F-3): a firewall row
+    # vsys1, an instance row its vsys, the shared root row /config/shared. A vsys
+    # instance also draws the shared objects (D4), the root row carries no rules.
+    _inst_vsys = _panw_vsys_of(device)
+    vsys_xpath = "/config/shared" if _inst_vsys == "shared" else f"{dev_xpath}/vsys/entry[@name='{_inst_vsys}']"
+    _shared_objects = _inst_vsys not in ("vsys1", "shared") or (_inst_vsys == "vsys1" and _panw_is_instance_row(device))
     net_xpath = f"{dev_xpath}/network"  # IPSec crypto profiles are network-level
 
     obj_fetches = [
@@ -31173,6 +32594,11 @@ def _run_panw_import(device: dict) -> dict:
             pool.submit(_panw_get, base_url, api_key, xpath): (label, parser)
             for label, xpath, parser in obj_fetches
         }
+        if _shared_objects:      # the objects of /config/shared every vsys may reference
+            for label, xpath, parser in obj_fetches:
+                if xpath.startswith(vsys_xpath) and not xpath.endswith("/zone"):
+                    obj_future_map[pool.submit(_panw_get, base_url, api_key,
+                                               "/config/shared" + xpath[len(vsys_xpath):])] = (label, parser)
 
         # Regular rules first - defines seq_num baseline
         try:
@@ -31201,8 +32627,8 @@ def _run_panw_import(device: dict) -> dict:
             # parser (canned XML) so the count matches the box GUI and the
             # schema stays parser-consistent.
             _have_names = {r["rule_name"] for r in _parsed_defaults}
-            _missing = [n for n in ("intrazone-default", "interzone-default")
-                        if n not in _have_names]
+            _missing = [] if _inst_vsys == "shared" else [n for n in ("intrazone-default", "interzone-default")
+                                                           if n not in _have_names]
             if _missing:
                 _synth_xml = "<result><rules>" + "".join(
                     f'<entry name="{n}"><from><member>any</member></from>'
@@ -31336,10 +32762,24 @@ def _run_panw_import(device: dict) -> dict:
         except Exception:
             pass
 
+    # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3, D10): read after the
+    # rules are assembled, keyed by the rule name of the vsys, NAT by name; a
+    # failed read declares and the rules land without counters.
+    box_usage = None
+    if rules and _inst_vsys != "shared":
+        try:
+            _reading = _panw_read_hit_counts(base_url, api_key, _inst_vsys)
+        except Exception as exc:
+            _reading = hitcounts.declared(f"show rule-hit-count failed: {str(exc)[:200]}")
+            errors.append(f"hit_counts: {str(exc)[:200]}")
+        hitcounts.attach(rules, _reading, key="rule_name", nats=nat_rules)
+        box_usage = hitcounts.usage_of(_reading, rules)
+
     return {"rules": rules, "nat_rules": nat_rules, "pbf_rules": pbf_rules,
             "ssl_rules": ssl_rules, "vpn_tunnels": vpn_tunnels,
             "active_routes": active_routes,
             "objects": objects, "tags": tags, "raw_objects": raw_objects,
+            "box_usage": box_usage,
             "errors": errors, "hostname": hostname_future.result()}
 
 
@@ -31381,17 +32821,18 @@ _CP_SID_LOCK = threading.Lock()
 _CP_SID_TTL = 300.0  # 5 min - well under CP's default 10-min idle timeout
 
 
-def _cp_sid_key(mgmt_ip: str, port: int, api_key: str) -> str:
+def _cp_sid_key(mgmt_ip: str, port: int, api_key: str, domain: str | None = None) -> str:
     h = hashlib.sha256()
-    h.update(f"{mgmt_ip}:{port}:{api_key}".encode())
+    h.update(f"{mgmt_ip}:{port}:{api_key}:{domain or ''}".encode())
     return h.hexdigest()
 
 
-def _cp_get_sid(mgmt_ip: str, port: int, api_key: str) -> tuple[str, str]:
+def _cp_get_sid(mgmt_ip: str, port: int, api_key: str, domain: str | None = None) -> tuple[str, str]:
     """Return (sid, base_url) for the given Mgmt-Server, reusing a cached
-    session when fresh. On miss: login via the existing driver helper."""
+    session when fresh. On miss: login via the existing driver helper. A
+    Multi-Domain management is entered in `domain` (sessions are per domain)."""
     from deploy.checkpoint import _login as cp_login
-    key = _cp_sid_key(mgmt_ip, port, api_key)
+    key = _cp_sid_key(mgmt_ip, port, api_key, domain)
     now = time.time()
     with _CP_SID_LOCK:
         cached = _CP_SID_CACHE.get(key)
@@ -31411,15 +32852,16 @@ def _cp_get_sid(mgmt_ip: str, port: int, api_key: str) -> tuple[str, str]:
         "mgmt_ip": _host or mgmt_ip,
         "mgmt_port": _port or port,
         "api_key": api_key,
-        "config": {"cp": {"mgmt": {"ip": _host or mgmt_ip, "port": _port or port, "path": _path}}},
+        "config": {"cp": {"mgmt": {"ip": _host or mgmt_ip, "port": _port or port, "path": _path},
+                          **({"domain": domain} if domain else {})}},
     })
     with _CP_SID_LOCK:
         _CP_SID_CACHE[key] = (sid, base_url, now + _CP_SID_TTL)
     return sid, base_url
 
 
-def _cp_invalidate_sid(mgmt_ip: str, port: int, api_key: str) -> None:
-    key = _cp_sid_key(mgmt_ip, port, api_key)
+def _cp_invalidate_sid(mgmt_ip: str, port: int, api_key: str, domain: str | None = None) -> None:
+    key = _cp_sid_key(mgmt_ip, port, api_key, domain)
     with _CP_SID_LOCK:
         _CP_SID_CACHE.pop(key, None)
 
@@ -31644,6 +33086,7 @@ def _parse_cp_access_rules(rulebase: list[dict], odict: dict | None = None) -> l
 
         out.append({
             "rule_name":      rule_name,
+            "source_vendor_id": rule.get("uid") or rule_name,
             "seq_num":        seq,
             "action":         agnostic_action,
             "src_zones":      [],
@@ -31677,6 +33120,89 @@ def _parse_cp_access_rules(rulebase: list[dict], odict: dict | None = None) -> l
             extras["default_rule"] = "cp-cleanup"
             last["raw_extras"] = extras
     return out
+
+
+def _cp_read_hit_counts(base_url: str, sid: str, layer: str, target: str | None) -> "hitcounts.Reading":
+    """The hits the management keeps per access rule for one gateway, cluster
+    or virtual system (docs/HIT_COUNTS_PLAN.md, D1, D5, measured on API 1.9
+    2026-11-05): show-access-rulebase with show-hits carries `hits` on every
+    rule (value, and first-date/last-date once the value is above zero),
+    `hits-settings.target` names the object whose counters are asked for.
+    The NAT rulebase refuses show-hits, so NAT stays unread. The read is the
+    import's and the refresh's only: a target's collect never asks."""
+    from deploy.checkpoint import _call as cp_call
+    read_at = hitcounts.utcnow()
+    found: dict[str, dict] = {}
+
+    names: dict[str, list] = {}
+
+    def _walk(items):
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            if it.get("type") == "access-section" or isinstance(it.get("rulebase"), list):
+                _walk(it.get("rulebase") or [])
+                continue
+            uid, hits = it.get("uid"), it.get("hits")
+            if uid and isinstance(hits, dict):
+                found[str(uid)] = hitcounts.entry(hits.get("value"),
+                                                  first=hitcounts.from_cp_date(hits.get("first-date")),
+                                                  last=hitcounts.from_cp_date(hits.get("last-date")))
+                # the name the parser gives the rule, as a second key for rows imported
+                # before the uid was stored (D3: the fallback is the rule name)
+                name = (it.get("name") or "").strip() or f"cp-rule-{str(uid)[:8]}"
+                names.setdefault(name, []).append(str(uid))
+
+    offset, limit = 0, 500
+    while True:
+        payload = {"name": layer, "limit": limit, "offset": offset, "details-level": "standard",
+                   "use-object-dictionary": False, "show-hits": True}
+        if target:
+            payload["hits-settings"] = {"target": target}
+        resp = cp_call(base_url, sid, "show-access-rulebase", payload)
+        items = resp.get("rulebase") or []
+        _walk(items)
+        offset += limit
+        if not items or offset >= int(resp.get("total") or 0):
+            break
+    for name, uids in names.items():
+        if len(uids) == 1 and name not in found:
+            found[name] = found[uids[0]]
+    return hitcounts.Reading(rules=found, read_at=read_at)
+
+
+def _cp_hits_target(device: dict, base_url: str, sid: str) -> str | None:
+    """The object whose hits are asked for (docs/HIT_COUNTS_PLAN.md, D5): the
+    virtual system of an instance row by name, else the pinned gateway or
+    cluster by its uid through the gateways-and-servers listing. None for a
+    row without a pin."""
+    from deploy.checkpoint import _find_gateway_object
+    try:
+        cp_cfg = (json.loads(device.get("config") or "{}") or {}).get("cp") or {}
+    except Exception:
+        cp_cfg = {}
+    if cp_cfg.get("vs"):
+        return str(cp_cfg["vs"])
+    uid = cp_cfg.get("gateway_uid")
+    if not uid:
+        return None
+    obj = _find_gateway_object(base_url, sid, str(uid))
+    return (obj or {}).get("name") or None
+
+
+def _cp_hits(device: dict) -> "hitcounts.Reading":
+    """The refresh's read of a Check Point row (docs/HIT_COUNTS_PLAN.md, D3):
+    its own login, the pinned package's layer, the pinned object as target."""
+    from deploy.checkpoint import _login as cp_login, _logout as cp_logout
+    sid, base_url = cp_login(device)
+    try:
+        _pkg, layer, _info = _cp_resolve_package_and_layer(device, base_url, sid)
+        target = _cp_hits_target(device, base_url, sid)
+        if not target:
+            return hitcounts.declared("no gateway pinned on this row: add the Device through the Check Point wizard")
+        return _cp_read_hit_counts(base_url, sid, layer, target)
+    finally:
+        cp_logout(base_url, sid)
 
 
 def _cp_resolve_package_and_layer(device: dict, base_url: str, sid: str) -> tuple[str, str, list[str]]:
@@ -32780,6 +34306,7 @@ def _run_checkpoint_import(device: dict) -> dict:
     tp_rules: list[dict] = []
     tp_warnings: list[str] = []
     errors: list[str] = []
+    box_usage: dict | None = None
 
     try:
         sid, base_url = cp_login(device)
@@ -33093,6 +34620,23 @@ def _run_checkpoint_import(device: dict) -> dict:
         except Exception as exc:
             errors.append(f"parse_rules: {exc}")
 
+        # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3, D5, D10): the
+        # pinned gateway, cluster or virtual system as the hits target, read in
+        # this session after the rules; a row without a pin or a failed read
+        # declares and the rules land without counters.
+        if rules:
+            try:
+                _hits_target = _cp_hits_target(device, base_url, sid)
+                if not _hits_target:
+                    _reading = hitcounts.declared("no gateway pinned on this row: add the Device through the Check Point wizard")
+                else:
+                    _reading = _cp_read_hit_counts(base_url, sid, layer, _hits_target)
+            except Exception as exc:
+                _reading = hitcounts.declared(f"show-access-rulebase show-hits failed: {str(exc)[:200]}")
+                errors.append(f"hit_counts: {str(exc)[:200]}")
+            hitcounts.attach(rules, _reading)
+            box_usage = hitcounts.usage_of(_reading, rules)
+
         # Parse NAT rulebase (S3). The NAT objects-dictionary is independent
         # from the access dictionary, so we keep them separate.
         try:
@@ -33175,6 +34719,7 @@ def _run_checkpoint_import(device: dict) -> dict:
     return {"rules": rules, "nat_rules": nat_rules, "objects": objects,
             "tags": tags, "ssl_rules": ssl_rules, "vpn_tunnels": vpn_tunnels,
             "tp_rules": tp_rules, "tp_warnings": tp_warnings, "drops": drops,
+            "box_usage": box_usage,
             "errors": errors, "hostname": hostname}
 
 
@@ -33375,14 +34920,67 @@ def _run_opnsense_import(device: dict) -> dict:
         errors.append("the configuration holds no firewall rules: check "
                       "that this is the right device")
 
+    # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3, D10): pf's counters
+    # by rule uuid when the row has credentials, else declared.
+    box_usage = None
+    if result["rules"]:
+        try:
+            _reading = _opnsense_read_hit_counts(device)
+        except Exception as exc:
+            _reading = hitcounts.declared(f"rule_stats failed: {str(exc)[:200]}")
+            errors.append(f"hit_counts: {str(exc)[:200]}")
+        _n = hitcounts.attach(result["rules"], _reading)
+        # Counters that matched no rule (measured 2026-11-09 on a Device whose
+        # upload predated a rebuild of the box): pf keys them by the box's
+        # rule uuids, the ruleset came from somewhere else. Declared with the
+        # reason and the remedy instead of "re-import the Device", which
+        # would read the same upload again.
+        try:
+            _uploaded = bool(((json.loads(device.get("config") or "{}")).get("opnsense") or {}).get("config_xml"))
+        except (ValueError, TypeError, AttributeError):
+            _uploaded = False
+        _reading = hitcounts.mismatch(_reading, _n, (
+            f"the Device at {device.get('mgmt_ip')} answered its counters and none matched a rule of this import: "
+            + ("the uploaded configuration is not the Device's current one, upload the current configuration backup"
+               if _uploaded else "the Device's rule ids changed between the two reads, re-import the Device")))
+        box_usage = hitcounts.usage_of(_reading, result["rules"])
+
     return {
         "rules":     result["rules"],
         "nat_rules": result["nat_rules"],
         "objects":   result["objects"],
         "drops":     result["drops"],
+        "box_usage": box_usage,
         "errors":    errors,
         "hostname":  ident.get("hostname") or device.get("host_name"),
     }
+
+
+def _opnsense_read_hit_counts(device: dict) -> "hitcounts.Reading":
+    """pf's per-rule counters through the firewall API (docs/HIT_COUNTS_PLAN.md,
+    D1, D4, the reference: /api/firewall/filter_util/rule_stats runs pfctl -sr
+    -v and sums the expanded pf rules of one rule, the helper prefixes /api/
+    itself): keyed by the rule's uuid,
+    the packets the rule matched as the hits, no first or last hit, counted
+    since the last ruleset load (the since-time stays unknown). The read
+    needs credentials: a Device with an uploaded configuration alone declares."""
+    from deploy import _opnsense_common as _opn
+    if not (device.get("mgmt_ip") and device.get("api_key")):
+        return hitcounts.declared("the configuration was uploaded, no API session to read the pf counters")
+    read_at = hitcounts.utcnow()
+    sess = _opn.session_for(device)
+    body = _opn.api_get(sess, device, "firewall/filter_util/rule_stats") or {}
+    stats = body.get("stats") if isinstance(body, dict) else None
+    found: dict[str, dict] = {}
+    for uuid, st in (stats or {}).items():
+        if isinstance(st, dict):
+            found[str(uuid)] = hitcounts.entry(st.get("packets"))
+    return hitcounts.Reading(rules=found, read_at=read_at)
+
+
+def _opnsense_hits(device: dict) -> "hitcounts.Reading":
+    """The refresh's read of an OPNsense row (docs/HIT_COUNTS_PLAN.md, D3)."""
+    return _opnsense_read_hit_counts(device)
 
 
 _IMPORT_HANDLERS["opnsense"] = _run_opnsense_import
@@ -33453,6 +35051,42 @@ def _forti_auth_preflight(base_url: str, token: str, vdom: str) -> None:
                 f"API access denied (HTTP {code}): check the API token")
     except requests.RequestException as exc:
         raise _ImportAuthError(f"device unreachable: {exc}")
+
+
+def _forti_read_hit_counts(base_url: str, token: str, vdom: str, policy_based: bool = False) -> "hitcounts.Reading":
+    """The VDOM's policy counters from the monitor API (docs/HIT_COUNTS_PLAN.md,
+    D1, D4, measured on FortiOS 7.6.8): one record per enabled policy with
+    hit_count, first_used and last_used (epoch seconds, absent or 0 when
+    never) and creation_time (epoch seconds), keyed by policyid, the implicit
+    deny as policyid 0. A disabled policy has no record, the box keeps no
+    counter for it. A box in NGFW policy-based mode answers for its security
+    policies, which are its ruleset. The since-time is the policy's creation
+    time, the closest the API offers to a counter start. Read-only:
+    clear_counters is never called."""
+    path = ("/api/v2/monitor/firewall/security-policy" if policy_based
+            else "/api/v2/monitor/firewall/policy")
+    read_at = hitcounts.utcnow()
+    found: dict[str, dict] = {}
+    for e in (_forti.api_get(base_url, token, path, vdom).get("results") or []):
+        if not isinstance(e, dict) or e.get("policyid") is None:
+            continue
+        found[str(e["policyid"])] = hitcounts.entry(e.get("hit_count"),
+                                                    first=hitcounts.from_epoch(e.get("first_used")),
+                                                    last=hitcounts.from_epoch(e.get("last_used")),
+                                                    since=hitcounts.from_epoch(e.get("creation_time")))
+    return hitcounts.Reading(rules=found, read_at=read_at)
+
+
+def _forti_hits(device: dict) -> "hitcounts.Reading":
+    """The refresh's read of a FortiGate row (docs/HIT_COUNTS_PLAN.md, D3): the
+    VDOM of the row, the policy mode read from the VDOM's settings."""
+    base_url = _forti.base_url_for(device)
+    token = device.get("api_key") or ""
+    vdom = _forti.vdom_for(device)
+    _forti_auth_preflight(base_url, token, vdom)
+    _st = _forti.api_get(base_url, token, "/api/v2/cmdb/system/settings", vdom).get("results") or {}
+    policy_based = ((_st.get("ngfw-mode") or "").strip().lower() == "policy-based")
+    return _forti_read_hit_counts(base_url, token, vdom, policy_based)
 
 
 def _run_fortigate_import(device: dict) -> dict:
@@ -33700,6 +35334,7 @@ def _run_fortigate_import(device: dict) -> dict:
         "applications": [], "description":
             "FortiOS implicit deny (synthesized default rule)",
         "disabled": 0, "tags": [],
+        "source_vendor_id": "0",   # the monitor API's record of the implicit deny (hit counts)
         "negate_source": 0, "negate_destination": 0, "negate_service": 0,
         "schedule": None, "source_identities": [],
         "raw_extras": {"default_rule": "fgt-implicit-deny"},
@@ -33871,6 +35506,18 @@ def _run_fortigate_import(device: dict) -> dict:
         except Exception:
             pass
 
+    # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3, D10): the VDOM's
+    # policy counters by policyid, read after the rules; a failed read declares.
+    box_usage = None
+    if rules:
+        try:
+            _reading = _forti_read_hit_counts(base_url, token, vdom, policy_based)
+        except Exception as exc:
+            _reading = hitcounts.declared(f"monitor firewall/policy failed: {str(exc)[:200]}")
+            errors.append(f"hit_counts: {str(exc)[:200]}")
+        hitcounts.attach(rules, _reading)
+        box_usage = hitcounts.usage_of(_reading, rules)
+
     return {
         "rules":     rules,
         "nat_rules": nat_rules,
@@ -33880,6 +35527,7 @@ def _run_fortigate_import(device: dict) -> dict:
         "vpn_tunnels": vpn_tunnels,
         "active_routes": active_routes,
         "drops":     drops,
+        "box_usage": box_usage,
         "errors":    errors,
         "hostname":  hostname_future.result(),
     }
@@ -34003,6 +35651,37 @@ def _ftd_session(device: dict) -> tuple[str, str]:
     return base_url, token
 
 
+def _ftd_read_hit_counts(base_url: str, token: str, policy_ids: list) -> "hitcounts.Reading":
+    """The Device Manager's hit counts per access rule (docs/HIT_COUNTS_PLAN.md,
+    D1, D4, the reference: GET /policy/accesspolicies/{id}/operational/hitcounts
+    answers hitCount, firstHitTimeStamp, lastHitTimeStamp, lastFetchTimeStamp
+    and the rule reference), keyed by the rule's id. The read time is the
+    Manager's last fetch where it states one. Read-only: no PUT (fetch) and
+    no DELETE (reset)."""
+    read_at = hitcounts.utcnow()
+    found: dict[str, dict] = {}
+    fetched = None
+    for pid in policy_ids:
+        for it in _ftd.api_get_items(base_url, token, f"/policy/accesspolicies/{pid}/operational/hitcounts"):
+            rid = (it.get("rule") or {}).get("id") if isinstance(it.get("rule"), dict) else None
+            if not rid:
+                continue
+            found[str(rid)] = hitcounts.entry(it.get("hitCount"),
+                                              first=hitcounts.from_iso(it.get("firstHitTimeStamp")),
+                                              last=hitcounts.from_iso(it.get("lastHitTimeStamp")))
+            f = hitcounts.from_iso(it.get("lastFetchTimeStamp"))
+            if f and (fetched is None or f > fetched):
+                fetched = f
+    return hitcounts.Reading(rules=found, read_at=fetched or read_at)
+
+
+def _ftd_hits(device: dict) -> "hitcounts.Reading":
+    """The refresh's read of a Device Manager row (docs/HIT_COUNTS_PLAN.md, D3)."""
+    base_url, token = _ftd_session(device)
+    pols = _ftd.api_get_items(base_url, token, "/policy/accesspolicies")
+    return _ftd_read_hit_counts(base_url, token, [p["id"] for p in pols if isinstance(p, dict) and p.get("id")])
+
+
 def _run_ftd_import(device: dict) -> dict:
     """Pull FTD config via FDM REST API.
 
@@ -34076,6 +35755,19 @@ def _run_ftd_import(device: dict) -> dict:
     except Exception as exc:
         errors.append(f"access_rules: {exc}")
 
+    # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3, D10): the Manager's
+    # hit counts per access policy, keyed by rule id; a failed read declares.
+    box_usage = None
+    if rules:
+        try:
+            _reading = _ftd_read_hit_counts(base_url, token,
+                                            [p["id"] for p in (payloads.get("access_policies") or []) if p.get("id")])
+        except Exception as exc:
+            _reading = hitcounts.declared(f"hitcounts failed: {str(exc)[:200]}")
+            errors.append(f"hit_counts: {str(exc)[:200]}")
+        hitcounts.attach(rules, _reading)
+        box_usage = hitcounts.usage_of(_reading, rules)
+
     # NAT: FTD evaluates Before-manual → object(auto) → After-manual.
     # The manual containers are named NGFW-Before-/After-Auto-NAT-Policy.
     try:
@@ -34083,12 +35775,15 @@ def _run_ftd_import(device: dict) -> dict:
         before = [p for p in manual_pols if "before" in (p.get("name") or "").lower()]
         after = [p for p in manual_pols if "after" in (p.get("name") or "").lower()]
         leftover = [p for p in manual_pols if p not in before and p not in after]
+        _port_of = {o["name"]: str((o.get("value") or {}).get("port") or "") for o in objects
+                    if o.get("obj_type") == "service" and isinstance(o.get("value"), dict)
+                    and str(o["value"].get("port") or "").isdigit()}.get   # the translated port as a number
         for pol in before + leftover:
             nat_rules.extend(_ftd.parse_manual_nat_rules(
                 _ftd.api_get_items(
                     base_url, token,
                     f"/policy/manualnatpolicies/{pol['id']}/manualnatrules"),
-                position_base=len(nat_rules)))
+                position_base=len(nat_rules), port_of=_port_of))
         for pol in payloads.get("object_nat_policies") or []:
             nat_rules.extend(_ftd.parse_object_nat_rules(
                 _ftd.api_get_items(
@@ -34100,7 +35795,7 @@ def _run_ftd_import(device: dict) -> dict:
                 _ftd.api_get_items(
                     base_url, token,
                     f"/policy/manualnatpolicies/{pol['id']}/manualnatrules"),
-                position_base=len(nat_rules)))
+                position_base=len(nat_rules), port_of=_port_of))
     except Exception as exc:
         errors.append(f"nat: {exc}")
 
@@ -34109,6 +35804,7 @@ def _run_ftd_import(device: dict) -> dict:
         "nat_rules": nat_rules,
         "objects":   objects,
         "drops":     drops,
+        "box_usage": box_usage,
         "errors":    errors,
         "hostname":  hostname_future.result(),
     }
@@ -34227,7 +35923,7 @@ def device_import_page(request: Request, device_id: int, imported: int = 0,
             "FROM fw_devices WHERE id = :id"
         ), {"id": device_id}).mappings().fetchone()
         if not row:
-            return RedirectResponse("/projects", status_code=303)
+            return RedirectResponse("/devices", status_code=303)
         device = dict(row)
 
         # Last import timestamp - probe rules first, then objects/drops.
@@ -34458,10 +36154,38 @@ _MGR_TABS = [("address", "Addresses"), ("address_group", "Address groups"),
              ("schedule", "Schedules"), ("url_category", "URL categories")]
 
 
-@app.post("/devices/{device_id}/import")
-async def device_import_run(request: Request, device_id: int):
-    # An import started on a project's Overview tab returns there (form
-    # field `next`, a local path); the Projects page stays the default.
+# Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3): the refresh's reader per
+# platform, each with the session facts the import uses. A platform missing
+# here declares by default (the file import, the cloud sources).
+_HITS_READERS: dict[str, callable] = {
+    "panw": _panw_hits, "checkpoint": _cp_hits, "fortigate": _forti_hits,
+    "firepower": _ftd_hits, "opnsense": _opnsense_hits,
+}
+HITS_REFRESH_PLATFORMS = frozenset(_HITS_READERS)
+
+
+def _read_box_hits(device: dict) -> "hitcounts.Reading":
+    """One Device's counters for the refresh: the platform's reader, every
+    failure as a declaration with its message (D10), never an exception."""
+    reader = _HITS_READERS.get(str(device.get("platform") or ""))
+    if reader is None:
+        return hitcounts.declared(hitcounts.default_declaration(device.get("platform")))
+    try:
+        return reader(device)
+    except _ImportAuthError as exc:
+        return hitcounts.declared(str(exc)[:300])
+    except Exception as exc:
+        return hitcounts.declared(f"{exc.__class__.__name__}: {str(exc)[:200]}")
+
+
+@app.post("/devices/{device_id}/hits")
+async def device_hits_refresh(request: Request, device_id: int):
+    """Read hit counts (docs/HIT_COUNTS_PLAN.md, D3): the box's own counters
+    again, written onto the rows of the latest import by the vendor's rule id,
+    without a re-import and without touching the pipeline. A box that runs
+    instances fans out like the import. One log row of kind hits, the outcome
+    in its summary, a failure also as the toast of the page the operator
+    came from (form field `next`)."""
     _next = "/projects"
     try:
         _nxt = (await request.form()).get("next") or ""
@@ -34479,153 +36203,277 @@ async def device_import_run(request: Request, device_id: int):
     if not row:
         return RedirectResponse(_next, status_code=303)
     device = _device_dict(row)
+    _sep = "&" if "?" in _next else "?"
 
     def _fail(msg: str) -> RedirectResponse:
-        # One log: a failed import lands as a red row in the registry log
-        # (summary = the seq-0 failed event). The page the user lands on
-        # shows the same sentence once as a toast, so a failed import is
-        # never silent (measured 2026-10-18: an AWS account without a
-        # region looked like a click that did nothing).
-        _record_device_log(device_id, "import", device.get("platform"),
-                           False, msg)
-        sep = "&" if "?" in _next else "?"
-        return RedirectResponse(f"{_next}{sep}form_error=" + urllib.parse.quote(msg), status_code=303)
+        _record_device_log(device_id, "hits", device.get("platform"), False, msg)
+        return RedirectResponse(_with_flash(_next, form_error=msg), status_code=303)
 
     if device.get("_credential_error"):
         return _fail(device["_credential_error"])
+    if device.get("device_kind") == "manager-source":
+        return _fail("Hit counts of a manager's scopes are not read in this version")
+    if str(device.get("platform") or "") not in _HITS_READERS:
+        return _fail("Hit counts not read: " + hitcounts.default_declaration(device.get("platform")))
+    with engine.connect() as conn:
+        _instances = instancesource.instance_rows(conn, device_id) if not device.get("device_kind") else []
+    targets = ([(inst["id"], inst["name"], instancesource.instance_device(device, inst)) for inst in _instances]
+               or [(device_id, device.get("display_name") or device.get("host_name") or str(device_id), device)])
+    read, declared = [], []
+    for tid, tname, tdev in targets:
+        reading = _read_box_hits(tdev)
+        with engine.begin() as conn:
+            out = hitcounts.refresh_rows(conn, tid, reading)
+        if reading.declared:
+            declared.append(f"{tname}: {reading.declared}")
+        elif not out["rules"]:
+            declared.append(f"{tname}: nothing imported yet")
+        else:
+            read.append(f"{tname}: {out['matched']} of {out['rules']} rules"
+                        + (f" and {out['nats_matched']} NAT rules" if out["nats_matched"] else ""))
+    summary = ("Hit counts read for " + ", ".join(read) if read else "Hit counts not read") \
+        + (". Not read for " + ", ".join(declared) if declared else "")
+    _record_device_log(device_id, "hits", device.get("platform"), bool(read), summary)
+    if not read:
+        return RedirectResponse(_with_flash(_next, form_error=summary), status_code=303)
+    return RedirectResponse(_next, status_code=303)
 
-    # A Strata Cloud Manager tenant (config.scm, EE add dialog) is a manager
-    # by declaration: no probe, the EE import fans it into folder, snippet
-    # and device scopes (docs/CLOUD_MANAGERS_PLAN.md, C4).
+
+@app.post("/devices/{device_id}/import")
+async def device_import_run(request: Request, device_id: int):
+    # An import started on a project's Overview tab returns there (form
+    # field `next`, a local path); one started on the Devices page returns
+    # there, where the row sits (D74, the default said /projects since D30).
+    _next = "/devices"
     try:
-        _scm = (json.loads(device.get("config") or "{}").get("scm") or {})
+        _nxt = (await request.form()).get("next") or ""
+        if isinstance(_nxt, str) and _nxt.startswith("/") and not _nxt.startswith("//"):
+            _next = _nxt
     except Exception:
-        _scm = {}
-    if device["platform"] == "panw" and isinstance(_scm, dict) and str(_scm.get("tsg_id") or "").strip():
-        if _SCM_SOURCE_IMPORT is None:
-            return _fail("This is a Strata Cloud Manager tenant: importing it as a "
-                         "migration source (folders, snippets, devices) needs the "
-                         "Enterprise module.")
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
-                              "WHERE id = :id"), {"id": device_id})
-        device["device_kind"] = "manager-source"
-        try:
-            _SCM_SOURCE_IMPORT(device)   # fan into scope-devices + inheritance edges
-        except Exception as exc:
-            return _fail(f"Strata Cloud Manager import failed: {exc}")
-        _record_device_log(device_id, "import", device.get("platform"), True,
-                           "management source imported, fanned into scopes")
-        return RedirectResponse(f"/manager/{device_id}", status_code=303)
+        pass
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, host_name, display_name, platform, role, mgmt_ip, mgmt_port, "
+                "       api_key, gaia_user, gaia_password, config, device_kind "
+                "FROM fw_devices WHERE id = :id"
+            ), {"id": device_id}).mappings().fetchone()
+        if not row:
+            return RedirectResponse(_next, status_code=303)
+        device = _device_dict(row)
 
-    # A Panorama has no vsys - the firewall import would 'No such node' on every
-    # section. Detect it up front and route to the Panorama-SOURCE import (fan into
-    # shared / device-group / template scope-devices) instead of failing cryptically.
-    if (device["platform"] == "panw"
-            and device.get("device_kind") in (None, "manager-source")
-            and _panw_is_panorama(device)):
-        host = device["host_name"]
-        if _PANW_SOURCE_IMPORT is None:
-            return _fail("This is a Panorama: importing it as a migration "
-                         "source (device-groups + templates) needs the "
-                         "Enterprise module.")
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
-                              "WHERE id = :id"), {"id": device_id})
-        device["device_kind"] = "manager-source"
-        try:
-            _PANW_SOURCE_IMPORT(device)   # fan into scope-devices + inheritance edges
-        except Exception as exc:
-            return _fail(f"Panorama-source import failed: {exc}")
-        # Land in the Panorama's MANAGER-VIEW (its multi-scope device context: the scope
-        # tree + cross-scope analysis). Per-scope editing is a drill-down into /rules.
-        _record_device_log(device_id, "import", device.get("platform"), True,
-                           "management source imported, fanned into scopes")
-        return RedirectResponse(f"/manager/{device_id}", status_code=303)
+        def _fail(msg: str) -> RedirectResponse:
+            # One log: a failed import lands as a red row in the registry log
+            # (summary = the seq-0 failed event). The page the user lands on
+            # shows the same sentence once as a toast, so a failed import is
+            # never silent (measured 2026-10-18: an AWS account without a
+            # region looked like a click that did nothing).
+            _record_device_log(device_id, "import", device.get("platform"),
+                               False, msg)
+            return RedirectResponse(_with_flash(_next, form_error=msg), status_code=303)
 
-    # A FortiManager (added as a 'fortigate' device) speaks JSON-RPC over ADOMs/packages, not the
-    # FortiGate REST cmdb - the firewall import would fail. Detect it + route to the FMG-SOURCE
-    # import (fan into global / ADOM / package scope-devices), mirroring the Panorama branch.
-    if (device["platform"] == "fortigate"
-            and device.get("device_kind") in (None, "manager-source")
-            and _forti_is_fmg(device)):
-        host = device["host_name"]
-        if _FORTI_SOURCE_IMPORT is None:
-            return _fail("This is a FortiManager: importing it as a migration "
-                         "source (ADOMs + policy packages) needs the "
-                         "Enterprise module.")
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
-                              "WHERE id = :id"), {"id": device_id})
-        device["device_kind"] = "manager-source"
-        try:
-            _FORTI_SOURCE_IMPORT(device)   # fan into scope-devices + inheritance edges
-        except Exception as exc:
-            return _fail(f"FortiManager-source import failed: {exc}")
-        _record_device_log(device_id, "import", device.get("platform"), True,
-                           "management source imported, fanned into scopes")
-        return RedirectResponse(f"/manager/{device_id}", status_code=303)
+        if device.get("_credential_error"):
+            return _fail(device["_credential_error"])
 
-    # A Check Point MANAGEMENT SERVER (added plain, no pinned gateway) is a source manager - an
-    # MDS (fans per domain) or a SmartCenter (single management context). Route to the CP-SOURCE
-    # import; the discovery picks MDS vs SmartCenter. A wizard-pinned gateway (config.cp.gateway_uid)
-    # keeps the standalone gateway-as-device import below.
-    _cp_cfg = {}
-    try:
-        _cp_cfg = (json.loads(device.get("config") or "{}").get("cp") or {})
-    except Exception:
+        # A Cisco Secure Firewall Management Center (config.fmc): the CE fans it
+        # into domain, access-policy and device scopes (docs/FMC_SOURCE_PLAN.md).
+        if device["platform"] == "firepower":
+            import fmcsource as _fmcs
+            if _fmcs.fmc_cfg(device):
+                with engine.begin() as conn:
+                    conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
+                                      "WHERE id = :id"), {"id": device_id})
+                device["device_kind"] = "manager-source"
+                try:
+                    _res = _fmcs.import_fmc_source(device)
+                except _ImportAuthError as exc:
+                    return _fail(str(exc))
+                except (_fmcs.FmcImportError, _ImportAuthError) as exc:
+                    return _fail(f"Management Center import failed: {exc}")
+                except Exception as exc:
+                    return _fail(f"Management Center import failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+                _n = len(_res.get("scopes") or [])
+                _record_device_log(device_id, "import", device.get("platform"), True,
+                                   f"Management Center imported, fanned into {_n} scopes")
+                return RedirectResponse(_manager_href(device_id) or _next, status_code=303)
+
+        # A Strata Cloud Manager tenant (config.scm, EE add dialog) is a manager
+        # by declaration: no probe, the EE import fans it into folder, snippet
+        # and device scopes (docs/CLOUD_MANAGERS_PLAN.md, C4).
+        try:
+            _scm = (json.loads(device.get("config") or "{}").get("scm") or {})
+        except Exception:
+            _scm = {}
+        if device["platform"] == "panw" and isinstance(_scm, dict) and str(_scm.get("tsg_id") or "").strip():
+            if _SCM_SOURCE_IMPORT is None:
+                return _fail("This is a Strata Cloud Manager tenant: importing it as a "
+                             "migration source (folders, snippets, devices) needs the "
+                             "Enterprise module.")
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
+                                  "WHERE id = :id"), {"id": device_id})
+            device["device_kind"] = "manager-source"
+            try:
+                _SCM_SOURCE_IMPORT(device)   # fan into scope-devices + inheritance edges
+            except Exception as exc:
+                return _fail(f"Strata Cloud Manager import failed: {exc}")
+            _record_device_log(device_id, "import", device.get("platform"), True,
+                               "management source imported, fanned into scopes")
+            return RedirectResponse(f"/manager/{device_id}", status_code=303)
+
+        # A Panorama has no vsys - the firewall import would 'No such node' on every
+        # section. Detect it up front and route to the Panorama-SOURCE import (fan into
+        # shared / device-group / template scope-devices) instead of failing cryptically.
+        if (device["platform"] == "panw"
+                and device.get("device_kind") in (None, "manager-source")
+                and _panw_is_panorama(device)):
+            host = device["host_name"]
+            if _PANW_SOURCE_IMPORT is None:
+                return _fail("This is a Panorama: importing it as a migration "
+                             "source (device-groups + templates) needs the "
+                             "Enterprise module.")
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
+                                  "WHERE id = :id"), {"id": device_id})
+            device["device_kind"] = "manager-source"
+            try:
+                _PANW_SOURCE_IMPORT(device)   # fan into scope-devices + inheritance edges
+            except Exception as exc:
+                return _fail(f"Panorama-source import failed: {exc}")
+            # Land in the Panorama's MANAGER-VIEW (its multi-scope device context: the scope
+            # tree + cross-scope analysis). Per-scope editing is a drill-down into /rules.
+            _record_device_log(device_id, "import", device.get("platform"), True,
+                               "management source imported, fanned into scopes")
+            return RedirectResponse(f"/manager/{device_id}", status_code=303)
+
+        # A FortiManager (added as a 'fortigate' device) speaks JSON-RPC over ADOMs/packages, not the
+        # FortiGate REST cmdb - the firewall import would fail. Detect it + route to the FMG-SOURCE
+        # import (fan into global / ADOM / package scope-devices), mirroring the Panorama branch.
+        if (device["platform"] == "fortigate"
+                and device.get("device_kind") in (None, "manager-source")
+                and _forti_is_fmg(device)):
+            host = device["host_name"]
+            if _FORTI_SOURCE_IMPORT is None:
+                return _fail("This is a FortiManager: importing it as a migration "
+                             "source (ADOMs + policy packages) needs the "
+                             "Enterprise module.")
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
+                                  "WHERE id = :id"), {"id": device_id})
+            device["device_kind"] = "manager-source"
+            try:
+                _FORTI_SOURCE_IMPORT(device)   # fan into scope-devices + inheritance edges
+            except Exception as exc:
+                return _fail(f"FortiManager-source import failed: {exc}")
+            _record_device_log(device_id, "import", device.get("platform"), True,
+                               "management source imported, fanned into scopes")
+            return RedirectResponse(f"/manager/{device_id}", status_code=303)
+
+        # A Check Point MANAGEMENT SERVER (added plain, no pinned gateway) is a source manager - an
+        # MDS (fans per domain) or a SmartCenter (single management context). Route to the CP-SOURCE
+        # import; the discovery picks MDS vs SmartCenter. A wizard-pinned gateway (config.cp.gateway_uid)
+        # keeps the standalone gateway-as-device import below.
         _cp_cfg = {}
-    if (device["platform"] == "checkpoint"
-            and device.get("device_kind") in (None, "manager-source")
-            and not _cp_cfg.get("gateway_uid")):
-        host = device["host_name"]
-        if _CP_SOURCE_IMPORT is None:
-            return _fail("Importing a Check Point management server "
-                         "(MDS / SmartCenter) as a migration source needs "
-                         "the Enterprise module.")
-        with engine.begin() as conn:
-            conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
-                              "WHERE id = :id"), {"id": device_id})
-        device["device_kind"] = "manager-source"
         try:
-            _CP_SOURCE_IMPORT(device)      # fan into scope-devices (MDS domains or SmartCenter)
-        except Exception as exc:
-            return _fail(f"Check Point management import failed: {exc}")
-        _record_device_log(device_id, "import", device.get("platform"), True,
-                           "management source imported, fanned into scopes")
-        return RedirectResponse(f"/manager/{device_id}", status_code=303)
+            _cp_cfg = (json.loads(device.get("config") or "{}").get("cp") or {})
+        except Exception:
+            _cp_cfg = {}
+        if (device["platform"] == "checkpoint"
+                and device.get("device_kind") in (None, "manager-source")
+                and not _cp_cfg.get("gateway_uid")):
+            host = device["host_name"]
+            if _CP_SOURCE_IMPORT is None:
+                return _fail("Importing a Check Point management server "
+                             "(MDS / SmartCenter) as a migration source needs "
+                             "the Enterprise module.")
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE fw_devices SET device_kind = 'manager-source' "
+                                  "WHERE id = :id"), {"id": device_id})
+            device["device_kind"] = "manager-source"
+            try:
+                _CP_SOURCE_IMPORT(device)      # fan into scope-devices (MDS domains or SmartCenter)
+            except Exception as exc:
+                return _fail(f"Check Point management import failed: {exc}")
+            _record_device_log(device_id, "import", device.get("platform"), True,
+                               "management source imported, fanned into scopes")
+            return RedirectResponse(f"/manager/{device_id}", status_code=303)
 
-    handler = _IMPORT_HANDLERS.get(device["platform"])
-    if not handler:
-        return _fail(f"No import handler for platform "
-                     f"{device['platform'] or 'unknown'}")
+        handler = _IMPORT_HANDLERS.get(device["platform"])
+        if not handler:
+            return _fail(f"No import handler for platform "
+                         f"{device['platform'] or 'unknown'}")
+        # Virtual instances (docs/VIRTUAL_INSTANCES_PLAN.md, D2): a box that runs several
+        # becomes the container of one scope per instance, each imported through the same
+        # handler and persisted as a Device row of its own. A box with one instance: as before.
+        if not device.get("device_kind"):
+            try:
+                _found = instancesource.instances_of(device)
+            except Exception as exc:
+                return _fail(f"Import failed, nothing imported: {_reach_error(exc)}")
+            if _found:
+                with engine.begin() as conn:
+                    _rows = instancesource.sync_instance_rows(conn, device, _found)
+                _done, _errs = [], []
+                for _inst in _rows:
+                    _idev = instancesource.instance_device(device, _inst)
+                    try:
+                        _res = handler(_idev)
+                        _persist_firewall_import(_inst["id"], _idev, _res, _next)
+                        _done.append(_inst["name"])
+                    except Exception as exc:
+                        _errs.append(f"{_inst['name']}: {exc}")
+                with engine.begin() as conn:
+                    instancesource.clear_box_content(conn, device_id)
+                _skipped = list(_found.get("skipped") or [])
+                _record_device_log(device_id, "import", device.get("platform"), not _errs,
+                                   f"{len(_done)} instance(s) imported as scopes: {', '.join(_done) or 'none'}"
+                                   + (f". Skipped: {'; '.join(_skipped)}" if _skipped else "")
+                                   + ". The Device row is the container, its instances carry the content.",
+                                   errors=_errs or None)
+                return RedirectResponse(f"/scopes/{device_id}", status_code=303)
 
-    try:
-        result = handler(device)
-    except _ImportAuthError as exc:
-        return _fail(str(exc))
+        try:
+            result = handler(device)
+        except _ImportAuthError as exc:
+            return _fail(str(exc))
 
-    # Short-circuit on setup-required / fully-failed imports: if no rules,
-    # no objects, no NAT came back AND there are errors, treat as failed
-    # - don't wipe existing rows and don't reset the global pipeline
-    # config. This protects against destructive side-effects when a CP
-    # import bails out on multi-package setups that need user config.
-    if (result.get("errors")
-            and not result.get("rules")
-            and not result.get("objects")
-            and not result.get("nat_rules")):
-        errs = result["errors"]
-        # Safety net behind the pre-flight: a key revoked MID-import still fails
-        # every section identically - collapse the wall to one message.
-        if len(errs) >= 3 and all("Invalid Credential" in e for e in errs):
-            errs = ["API access denied (Invalid Credential): check the API key"]
-        _record_device_log(device_id, "import", device.get("platform"),
-                           False, "import failed, nothing imported",
-                           errors=errs)
-        sep = "&" if "?" in _next else "?"
-        return RedirectResponse(f"{_next}{sep}form_error=" + urllib.parse.quote(
-            f"Import failed, nothing imported: {errs[0]}"), status_code=303)
+        # Short-circuit on setup-required / fully-failed imports: if no rules,
+        # no objects, no NAT came back AND there are errors, treat as failed
+        # - don't wipe existing rows and don't reset the global pipeline
+        # config. This protects against destructive side-effects when a CP
+        # import bails out on multi-package setups that need user config.
+        if (result.get("errors")
+                and not result.get("rules")
+                and not result.get("objects")
+                and not result.get("nat_rules")):
+            errs = result["errors"]
+            # Safety net behind the pre-flight: a key revoked MID-import still fails
+            # every section identically - collapse the wall to one message.
+            if len(errs) >= 3 and all("Invalid Credential" in e for e in errs):
+                errs = ["API access denied (Invalid Credential): check the API key"]
+            _record_device_log(device_id, "import", device.get("platform"),
+                               False, "import failed, nothing imported",
+                               errors=errs)
+            return RedirectResponse(_with_flash(_next, form_error=f"Import failed, nothing imported: {errs[0]}"),
+                                    status_code=303)
 
+        return _persist_firewall_import(device_id, device, result, _next)
+    return await run_in_threadpool(_work)
+
+
+
+
+def _persist_firewall_import(device_id: int, device: dict, result: dict, _next: str) -> RedirectResponse:
+    """What an import handler's result becomes in the database: the rows of the
+    Device, the collect after the import, the normalisation, the drops, the log.
+    One path for a firewall row and for each instance row of a box that runs
+    several (docs/VIRTUAL_INSTANCES_PLAN.md, D2), moved out of the import route
+    unchanged on 2026-11-04."""
+    engine = get_engine()
     # Truncate to seconds - avoids microsecond precision mismatch on the MAX(import_ts) lookup
     import_ts = datetime.datetime.utcnow().replace(microsecond=0)
 
@@ -34665,13 +36513,15 @@ async def device_import_run(request: Request, device_id: int):
                      src_zones, dst_zones, sources, destinations,
                      services, applications, description, disabled, tags,
                      negate_source, negate_destination, negate_service,
-                     schedule, source_identities, raw_extras, source_vendor_id)
+                     schedule, source_identities, raw_extras, source_vendor_id,
+                     box_hits, box_first_hit, box_last_hit, box_hits_since, box_hits_read_at)
                 VALUES
                     (:did, :ts, :name, :seq, :action,
                      :sz, :dz, :src, :dst,
                      :svc, :app, :desc, :dis, :tags,
                      :nsrc, :ndst, :nsvc,
-                     :sched, :idents, :extras, :svid)
+                     :sched, :idents, :extras, :svid,
+                     :bhits, :bfirst, :blast, :bsince, :bread)
             """), [
                 {
                     "did":    device_id,
@@ -34695,6 +36545,7 @@ async def device_import_run(request: Request, device_id: int):
                     "idents": json.dumps(rule["source_identities"]) if rule.get("source_identities") else None,
                     "extras": json.dumps(rule["raw_extras"]) if rule.get("raw_extras") else None,
                     "svid":   rule.get("source_vendor_id") or rule["rule_name"],
+                    **hitcounts.params(rule),
                 }
                 for rule in result["rules"]
             ])
@@ -34722,6 +36573,19 @@ async def device_import_run(request: Request, device_id: int):
                 }
                 for field, names in drops_agg.items()
             ])
+
+        # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D8): a source whose
+        # counters were not read says so, with the reason, never a silent zero.
+        # The importers that read attach the five fields to every rule and
+        # answer `box_usage`; one that attaches nothing declares by platform.
+        _box_usage = result.get("box_usage")
+        _box_declared = (_box_usage.get("declared") if isinstance(_box_usage, dict)
+                         else hitcounts.default_declaration(device.get("platform")))
+        _box_row = hitcounts.declaration_params(device_id, import_ts, _box_declared, result.get("rules") or [])
+        if _box_row:
+            conn.execute(text(
+                "INSERT INTO fw_import_drops (device_id, import_ts, field, rule_count, sample_names) "
+                "VALUES (:did, :ts, :field, :cnt, :samples)"), _box_row)
 
         # Optimization O-0: persist the verbatim raw snapshot (PA only for now;
         # other handlers don't return raw_objects → skipped). current-only.
@@ -34789,14 +36653,16 @@ async def device_import_run(request: Request, device_id: int):
                      orig_src, orig_dst, orig_service,
                      trans_src, trans_src_type, trans_dst, trans_dst_port,
                      description, properties,
-                     negate_source, negate_destination, negate_service)
+                     negate_source, negate_destination, negate_service,
+                     box_hits, box_first_hit, box_last_hit, box_hits_since, box_hits_read_at)
                 VALUES
                     (:did, :pos, :name, :type, :dis,
                      :sz, :dz, :iface,
                      :osrc, :odst, :osvc,
                      :tsrc, :tstype, :tdst, :tdport,
                      :desc, :props,
-                     :nsrc, :ndst, :nsvc)
+                     :nsrc, :ndst, :nsvc,
+                     :bhits, :bfirst, :blast, :bsince, :bread)
             """), [
                 {
                     "did":    device_id,
@@ -34824,6 +36690,7 @@ async def device_import_run(request: Request, device_id: int):
                     "nsrc":   int(n.get("negate_source")      or 0),
                     "ndst":   int(n.get("negate_destination") or 0),
                     "nsvc":   int(n.get("negate_service")     or 0),
+                    **hitcounts.params(n),
                 }
                 for n in result["nat_rules"]
             ])
@@ -35087,7 +36954,6 @@ async def device_import_run(request: Request, device_id: int):
                        warnings=collect_warnings or None)
     return RedirectResponse(_next, status_code=303)
 
-
 def _panw_scope_collect(device: dict) -> dict:
     """Network collect for a Panorama SCOPE row (device_kind='scope').
 
@@ -35127,7 +36993,7 @@ def _panw_scope_collect(device: dict) -> dict:
 
 
 @app.post("/devices/{device_id}/collect")
-async def device_collect_run(device_id: int):
+def device_collect_run(device_id: int):
     """Collect interface→zone and routing data from device (Eingabe step)."""
     engine = get_engine()
     with engine.connect() as conn:
@@ -35137,14 +37003,14 @@ async def device_collect_run(device_id: int):
             "FROM fw_devices WHERE id = :id"
         ), {"id": device_id}).mappings().fetchone()
     if not row:
-        return RedirectResponse("/projects", status_code=303)
+        return RedirectResponse("/devices", status_code=303)
     device = _device_dict(row)
 
     def _failc(msg: str) -> RedirectResponse:
         # One log: failed collects land in the registry log, not a banner.
         _record_device_log(device_id, "collect", device.get("platform"),
                            False, msg)
-        return RedirectResponse("/projects", status_code=303)
+        return RedirectResponse("/devices", status_code=303)
 
     if device.get("_credential_error"):
         return _failc(device["_credential_error"])
@@ -35193,6 +37059,35 @@ async def device_collect_run(device_id: int):
     if not handler:
         return _failc(f"No collect handler for platform "
                       f"{device['platform'] or 'unknown'}")
+    # Virtual instances (docs/VIRTUAL_INSTANCES_PLAN.md, D2): the network of every
+    # instance lands on its own row, the box row stays the container.
+    if not device.get("device_kind"):
+        try:
+            _found = instancesource.instances_of(device)
+        except Exception as exc:
+            return _failc(f"Network fetch failed, nothing fetched: {_reach_error(exc)}")
+        if _found:
+            with engine.begin() as conn:
+                _rows = instancesource.sync_instance_rows(conn, device, _found, clear_content=False)
+            _n_if = _n_rt = 0
+            _errs: list[str] = []
+            for _inst in _rows:
+                _idev = instancesource.instance_device(device, _inst)
+                try:
+                    _res = handler(_idev)
+                except Exception as exc:
+                    _errs.append(f"{_inst['name']}: {exc}")
+                    continue
+                with engine.begin() as conn:
+                    _write_collect_result(conn, _inst["id"], _res)
+                _n_if += len(_res["interfaces"])
+                _n_rt += len(_res["routes"])
+            with engine.begin() as conn:
+                instancesource.clear_box_network(conn, device_id)
+            _record_device_log(device_id, "collect", device.get("platform"), not _errs,
+                               f"{len(_rows)} instance(s): {_n_if} interfaces, {_n_rt} routes collected",
+                               errors=_errs or None)
+            return RedirectResponse("/devices", status_code=303)
 
     try:
         if device["platform"] == "panw" and device.get("device_kind") == "scope":
@@ -35211,11 +37106,11 @@ async def device_collect_run(device_id: int):
                        f"{n_ifaces} interfaces, {n_routes} routes collected",
                        errors=result["errors"] or None,
                        warnings=result.get("warnings") or None)
-    return RedirectResponse("/projects", status_code=303)
+    return RedirectResponse("/devices", status_code=303)
 
 
 @app.post("/network/source/{device_id}/refetch")
-async def network_source_refetch(device_id: int):
+def network_source_refetch(device_id: int):
     """Re-import network data (interfaces, zones, routes, VRFs) from a source.
 
     Hard wipe-and-replace via _write_collect_result - same path the initial
@@ -35322,7 +37217,11 @@ def device_renormalize(device_id: int):
 # `"cluster" in type.lower()` (checkpoint.py _fetch, main.py wizard-save), which
 # already covers CpmiGatewayCluster → this allowlist is the only exact gate.
 _CP_SUPPORTED_GW_TYPES = ("simple-gateway", "simple-cluster", "CpmiGatewayPlain",
-                          "CpmiClusterMember", "CpmiGatewayCluster")
+                          "CpmiClusterMember", "CpmiGatewayCluster",
+                          # a VSX gateway or cluster is the container of its virtual
+                          # systems (docs/VIRTUAL_INSTANCES_PLAN.md, F-4): registered
+                          # as the box, its virtual systems become instance scopes
+                          "CpmiVsxNetobj", "CpmiVsxClusterNetobj")
 
 
 def _is_htmx(request: Request) -> bool:
@@ -35377,89 +37276,96 @@ def cp_wizard_step1(request: Request):
 async def cp_wizard_probe(request: Request):
     """Step 1: validate Mgmt-Creds, return policy list + existing-device hints."""
     form = await request.form()
-    mgmt_ip = (form.get("mgmt_ip") or "").strip()
-    try:
-        mgmt_port = int(form.get("mgmt_port") or 443)
-    except (ValueError, TypeError):
-        mgmt_port = 443
-    api_key = (form.get("api_key") or "").strip()
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        mgmt_ip = (form.get("mgmt_ip") or "").strip()
+        try:
+            mgmt_port = int(form.get("mgmt_port") or 443)
+        except (ValueError, TypeError):
+            mgmt_port = 443
+        api_key = (form.get("api_key") or "").strip()
+        domain  = (form.get("domain") or "").strip() or None      # Multi-Domain management: the domain to enter
 
-    htmx = _is_htmx(request)
-    form_ctx = {
-        "form_mgmt_ip":   mgmt_ip,
-        "form_mgmt_port": mgmt_port,
-        "form_api_key":   api_key,
-    }
+        htmx = _is_htmx(request)
+        form_ctx = {
+            "form_mgmt_ip":   mgmt_ip,
+            "form_mgmt_port": mgmt_port,
+            "form_api_key":   api_key,
+            "form_domain":    domain or "",
+        }
 
-    # BACK from step 2 → re-show step 1 with the creds prefilled (no re-probe). Without this the
-    # Back button re-posted valid creds and landed on step 2 again - looked like a no-op.
-    if (form.get("back") or "").strip() and htmx:
-        return _cp_wizard_render(request, "_cp_wizard_step1.html", form_ctx)
+        # BACK from step 2 → re-show step 1 with the creds prefilled (no re-probe). Without this the
+        # Back button re-posted valid creds and landed on step 2 again - looked like a no-op.
+        if (form.get("back") or "").strip() and htmx:
+            return _cp_wizard_render(request, "_cp_wizard_step1.html", form_ctx)
 
-    if not mgmt_ip or not api_key:
+        if not mgmt_ip or not api_key:
+            if htmx:
+                return _cp_wizard_render(request, "_cp_wizard_step1.html",
+                                         {**form_ctx, "error": "mgmt_ip and api_key required"})
+            return JSONResponse({"ok": False, "error": "mgmt_ip and api_key required"}, status_code=400)
+
+        from deploy.checkpoint import _call as cp_call
+        try:
+            sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, api_key, domain)
+        except Exception as exc:
+            if htmx:
+                return _cp_wizard_render(request, "_cp_wizard_step1.html",
+                                         {**form_ctx, "error": f"login: {exc}"})
+            return JSONResponse({"ok": False, "error": f"login: {exc}"}, status_code=200)
+
+        try:
+            with fail_fast_transport():
+                pkg_resp = cp_call(base_url, sid, "show-packages",
+                                   {"limit": 200, "details-level": "standard"})
+                gw_resp = cp_call(base_url, sid, "show-gateways-and-servers",
+                                  {"limit": 200, "details-level": "full"})
+        except Exception as exc:
+            _cp_invalidate_sid(mgmt_ip, mgmt_port, api_key, domain)
+            if htmx:
+                return _cp_wizard_render(request, "_cp_wizard_step1.html",
+                                         {**form_ctx, "error": f"probe: {exc}"})
+            return JSONResponse({"ok": False, "error": f"probe: {exc}"}, status_code=200)
+
+        # Count gateways per policy for the step2 hint.
+        counts: dict[str, int] = {}
+        for obj in gw_resp.get("objects") or []:
+            if (obj.get("type") or "") == "checkpoint-host":
+                continue
+            installed = ((obj.get("policy") or {}).get("access-policy-name") or "")
+            if installed:
+                counts[installed] = counts.get(installed, 0) + 1
+
+        packages = []
+        for pkg in pkg_resp.get("packages") or []:
+            name = pkg.get("name")
+            if not name:
+                continue
+            packages.append({
+                "name": name,
+                "uid":  pkg.get("uid"),
+                "installed_on": counts.get(name, 0),
+            })
+
+        engine = get_engine()
+        with engine.connect() as conn:
+            from deploy.checkpoint import split_mgmt_address as _cp_split
+            existing = _cp_existing_devices_for_mgmt(conn, _cp_split(mgmt_ip)[0] or mgmt_ip)
+
         if htmx:
-            return _cp_wizard_render(request, "_cp_wizard_step1.html",
-                                     {**form_ctx, "error": "mgmt_ip and api_key required"})
-        return JSONResponse({"ok": False, "error": "mgmt_ip and api_key required"}, status_code=400)
-
-    from deploy.checkpoint import _call as cp_call
-    try:
-        sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, api_key)
-    except Exception as exc:
-        if htmx:
-            return _cp_wizard_render(request, "_cp_wizard_step1.html",
-                                     {**form_ctx, "error": f"login: {exc}"})
-        return JSONResponse({"ok": False, "error": f"login: {exc}"}, status_code=200)
-
-    try:
-        with fail_fast_transport():
-            pkg_resp = cp_call(base_url, sid, "show-packages",
-                               {"limit": 200, "details-level": "standard"})
-            gw_resp = cp_call(base_url, sid, "show-gateways-and-servers",
-                              {"limit": 200, "details-level": "full"})
-    except Exception as exc:
-        _cp_invalidate_sid(mgmt_ip, mgmt_port, api_key)
-        if htmx:
-            return _cp_wizard_render(request, "_cp_wizard_step1.html",
-                                     {**form_ctx, "error": f"probe: {exc}"})
-        return JSONResponse({"ok": False, "error": f"probe: {exc}"}, status_code=200)
-
-    # Count gateways per policy for the step2 hint.
-    counts: dict[str, int] = {}
-    for obj in gw_resp.get("objects") or []:
-        if (obj.get("type") or "") == "checkpoint-host":
-            continue
-        installed = ((obj.get("policy") or {}).get("access-policy-name") or "")
-        if installed:
-            counts[installed] = counts.get(installed, 0) + 1
-
-    packages = []
-    for pkg in pkg_resp.get("packages") or []:
-        name = pkg.get("name")
-        if not name:
-            continue
-        packages.append({
-            "name": name,
-            "uid":  pkg.get("uid"),
-            "installed_on": counts.get(name, 0),
-        })
-
-    engine = get_engine()
-    with engine.connect() as conn:
-        from deploy.checkpoint import split_mgmt_address as _cp_split
-        existing = _cp_existing_devices_for_mgmt(conn, _cp_split(mgmt_ip)[0] or mgmt_ip)
-
-    if htmx:
-        return _cp_wizard_render(request, "_cp_wizard_step2.html", {
-            **form_ctx,
+            return _cp_wizard_render(request, "_cp_wizard_step2.html", {
+                **form_ctx,
+                "packages": packages,
+                "existing_devices": existing,
+            })
+        return JSONResponse({
+            "ok": True,
             "packages": packages,
             "existing_devices": existing,
         })
-    return JSONResponse({
-        "ok": True,
-        "packages": packages,
-        "existing_devices": existing,
-    })
+    return await run_in_threadpool(_work)
 
 
 @app.post("/devices/add/cp/gateways")
@@ -35473,6 +37379,7 @@ async def cp_wizard_gateways(request: Request):
         mgmt_port = 443
     api_key = (form.get("api_key") or "").strip()
     package = (form.get("package") or "").strip()
+    domain  = (form.get("domain") or "").strip() or None
 
     htmx = _is_htmx(request)
     form_ctx = {
@@ -35480,6 +37387,7 @@ async def cp_wizard_gateways(request: Request):
         "form_mgmt_port": mgmt_port,
         "form_api_key":   api_key,
         "form_package":   package,
+        "form_domain":    domain or "",
     }
 
     if not mgmt_ip or not api_key or not package:
@@ -35494,14 +37402,14 @@ async def cp_wizard_gateways(request: Request):
     # installation-targets can be the string "all" (no list to iterate),
     # and even when listed, it's only the *intended* install scope, not
     # the *actual* current assignment.
-    from deploy.checkpoint import _call as cp_call
+    from deploy.checkpoint import _call as cp_call, _is_vs_type as _cp_is_vs
     try:
-        sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, api_key)
+        sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, api_key, domain)
         with fail_fast_transport():
             gw_resp = cp_call(base_url, sid, "show-gateways-and-servers",
                           {"limit": 200, "details-level": "full"})
     except Exception as exc:
-        _cp_invalidate_sid(mgmt_ip, mgmt_port, api_key)
+        _cp_invalidate_sid(mgmt_ip, mgmt_port, api_key, domain)
         if htmx:
             return _cp_wizard_render(request, "_cp_wizard_step3.html",
                                      {**form_ctx, "gateways": [],
@@ -35521,6 +37429,10 @@ async def cp_wizard_gateways(request: Request):
         if installed and installed != package:
             continue
         supported = gw_type in _CP_SUPPORTED_GW_TYPES
+        reason = None
+        if not supported:
+            reason = ("a virtual system is imported as a scope of its VSX gateway: register the VSX gateway"
+                      if _cp_is_vs(gw_type) else f"type '{gw_type}' not yet supported")
         gateways.append({
             "uid":       obj.get("uid"),
             "name":      obj.get("name"),
@@ -35528,7 +37440,7 @@ async def cp_wizard_gateways(request: Request):
             "ipv4":      obj.get("ipv4-address"),
             "supported": supported,
             "installed": bool(installed),
-            "reason":    None if supported else f"type '{gw_type}' not yet supported",
+            "reason":    reason,
         })
 
     if htmx:
@@ -35541,181 +37453,199 @@ async def cp_wizard_gateways(request: Request):
 async def cp_wizard_save(request: Request):
     """Step 3: re-validate the selected gateway and create fw_devices row."""
     form = await request.form()
-    mgmt_ip = (form.get("mgmt_ip") or "").strip()
-    try:
-        mgmt_port = int(form.get("mgmt_port") or 443)
-    except (ValueError, TypeError):
-        mgmt_port = 443
-    api_key      = (form.get("api_key") or "").strip()
-    package      = (form.get("package") or "").strip()
-    gateway_uid  = (form.get("gateway_uid") or "").strip()
-    gateway_type = (form.get("gateway_type") or "").strip()
-    gaia_user    = (form.get("gaia_user") or "").strip() or None
-    gaia_pw      = (form.get("gaia_password") or "").strip() or None
-    # Step3 labels gaia_user as optional, so users tend to leave it blank
-    # while filling in the password. Default to "admin" - CP's stock Gaia
-    # account - so the credentials remain usable for "defined-by-routing"
-    # topology lookups instead of silently storing pw without user.
-    if gaia_pw and not gaia_user:
-        gaia_user = "admin"
-    role         = "both"
-
-    htmx = _is_htmx(request)
-    form_ctx = {
-        "form_mgmt_ip":   mgmt_ip,
-        "form_mgmt_port": mgmt_port,
-        "form_api_key":   api_key,
-        "form_package":   package,
-    }
-
-    def _step3_with_error(err: str, gateways: list[dict] | None = None,
-                          existing_id: int | None = None):
-        return _cp_wizard_render(request, "_cp_wizard_step3.html", {
-            **form_ctx,
-            "gateways": gateways or [],
-            "error": err,
-            "existing_device_id": existing_id,
-        })
-
-    if not (mgmt_ip and api_key and package and gateway_uid and gateway_type):
-        if htmx:
-            return _step3_with_error("missing required fields, pick a gateway")
-        return JSONResponse({"ok": False, "error": "missing required fields"}, status_code=400)
-    if gateway_type not in _CP_SUPPORTED_GW_TYPES:
-        if htmx:
-            return _step3_with_error(f"unsupported gateway type {gateway_type!r}")
-        return JSONResponse({"ok": False, "error": f"unsupported gateway type {gateway_type!r}"}, status_code=400)
-
-    # Re-validate via CP API - fetch canonical name/IP, never trust client.
-    from deploy.checkpoint import _call as cp_call
-    show_cmd = "show-simple-cluster" if "cluster" in gateway_type.lower() else "show-simple-gateway"
-    try:
-        sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, api_key)
-        gw_resp = cp_call(base_url, sid, show_cmd,
-                          {"uid": gateway_uid, "details-level": "full"})
-    except Exception as exc:
-        _cp_invalidate_sid(mgmt_ip, mgmt_port, api_key)
-        if htmx:
-            return _step3_with_error(f"{show_cmd}: {exc}")
-        return JSONResponse({"ok": False, "error": f"{show_cmd}: {exc}"}, status_code=200)
-
-    gw_name = gw_resp.get("name") or ""
-    gw_ipv4 = gw_resp.get("ipv4-address") or ""
-    gw_canonical_type = gw_resp.get("type") or gateway_type
-    if not gw_name or not gw_ipv4:
-        if htmx:
-            return _step3_with_error("gateway has no name or ipv4-address in CP")
-        return JSONResponse({"ok": False, "error": "gateway has no name or ipv4-address in CP"}, status_code=200)
-
-    # Probe the Gaia credentials NOW (fail-fast): a wrong password otherwise
-    # only surfaces much later as cryptic route/interface-collect failures
-    # (CE FGT->CP find). Blocking when creds were given - leave both fields
-    # empty to consciously register without network-strand support.
-    if gaia_pw:
+    # the request is read, the rest runs in the threadpool: it works the Device or
+    # the database for seconds and must not block the event loop (the catalogue reads
+    # held every other request, product finding 2 of 2026-11-13)
+    def _work():
+        mgmt_ip = (form.get("mgmt_ip") or "").strip()
         try:
-            gw_ipv4 = management_host(gw_ipv4, "Gaia")
-        except ManagementAddressError as exc:
+            mgmt_port = int(form.get("mgmt_port") or 443)
+        except (ValueError, TypeError):
+            mgmt_port = 443
+        api_key      = (form.get("api_key") or "").strip()
+        package      = (form.get("package") or "").strip()
+        gateway_uid  = (form.get("gateway_uid") or "").strip()
+        gateway_type = (form.get("gateway_type") or "").strip()
+        gaia_user    = (form.get("gaia_user") or "").strip() or None
+        gaia_pw      = (form.get("gaia_password") or "").strip() or None
+        # Step3 labels gaia_user as optional, so users tend to leave it blank
+        # while filling in the password. Default to "admin" - CP's stock Gaia
+        # account - so the credentials remain usable for "defined-by-routing"
+        # topology lookups instead of silently storing pw without user.
+        if gaia_pw and not gaia_user:
+            gaia_user = "admin"
+        role         = "both"
+        domain       = (form.get("domain") or "").strip() or None
+
+        htmx = _is_htmx(request)
+        form_ctx = {
+            "form_mgmt_ip":   mgmt_ip,
+            "form_mgmt_port": mgmt_port,
+            "form_api_key":   api_key,
+            "form_package":   package,
+            "form_domain":    domain or "",
+        }
+
+        def _step3_with_error(err: str, gateways: list[dict] | None = None,
+                              existing_id: int | None = None):
+            return _cp_wizard_render(request, "_cp_wizard_step3.html", {
+                **form_ctx,
+                "gateways": gateways or [],
+                "error": err,
+                "existing_device_id": existing_id,
+            })
+
+        if not (mgmt_ip and api_key and package and gateway_uid and gateway_type):
             if htmx:
-                return _step3_with_error(str(exc))
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=200)
+                return _step3_with_error("missing required fields, pick a gateway")
+            return JSONResponse({"ok": False, "error": "missing required fields"}, status_code=400)
+        if gateway_type not in _CP_SUPPORTED_GW_TYPES:
+            if htmx:
+                return _step3_with_error(f"unsupported gateway type {gateway_type!r}")
+            return JSONResponse({"ok": False, "error": f"unsupported gateway type {gateway_type!r}"}, status_code=400)
+
+        # Re-validate via CP API - fetch canonical name/IP, never trust client.
+        from deploy.checkpoint import _call as cp_call, _is_vsx_type, _find_gateway_object
+        if _is_vsx_type(gateway_type):
+            # a VSX gateway or cluster answers neither simple-gateway read: its
+            # record comes from the gateways-and-servers listing (F-4)
+            show_cmd = "show-gateways-and-servers"
+        else:
+            show_cmd = "show-simple-cluster" if "cluster" in gateway_type.lower() else "show-simple-gateway"
         try:
-            _gr = requests.post(f"https://{gw_ipv4}:443/gaia_api/login",
-                                json={"user": gaia_user, "password": gaia_pw},
-                                verify=False, timeout=(6, 20))
-            if _gr.status_code == 200 and (_gr.json() or {}).get("sid"):
-                try:
-                    requests.post(f"https://{gw_ipv4}:443/gaia_api/logout",
-                                  headers={"X-chkp-sid": _gr.json()["sid"]},
-                                  verify=False, timeout=(6, 10))
-                except Exception:
-                    pass
+            sid, base_url = _cp_get_sid(mgmt_ip, mgmt_port, api_key, domain)
+            if _is_vsx_type(gateway_type):
+                gw_resp = _find_gateway_object(base_url, sid, gateway_uid)
+                if not gw_resp:
+                    raise RuntimeError(f"no gateway object carries uid {gateway_uid}")
             else:
-                _msg = (f"Gaia login failed on {gw_ipv4} (HTTP {_gr.status_code}): "
-                        "check the Gaia user/password and that the Gaia REST API is "
-                        "enabled on the gateway. Clear both Gaia fields to register "
-                        "without network-strand support.")
+                gw_resp = cp_call(base_url, sid, show_cmd,
+                                  {"uid": gateway_uid, "details-level": "full"})
+        except Exception as exc:
+            _cp_invalidate_sid(mgmt_ip, mgmt_port, api_key, domain)
+            if htmx:
+                return _step3_with_error(f"{show_cmd}: {exc}")
+            return JSONResponse({"ok": False, "error": f"{show_cmd}: {exc}"}, status_code=200)
+
+        gw_name = gw_resp.get("name") or ""
+        gw_ipv4 = gw_resp.get("ipv4-address") or ""
+        gw_canonical_type = gw_resp.get("type") or gateway_type
+        if not gw_name or not gw_ipv4:
+            if htmx:
+                return _step3_with_error("gateway has no name or ipv4-address in CP")
+            return JSONResponse({"ok": False, "error": "gateway has no name or ipv4-address in CP"}, status_code=200)
+
+        # Probe the Gaia credentials NOW (fail-fast): a wrong password otherwise
+        # only surfaces much later as cryptic route/interface-collect failures
+        # (CE FGT->CP find). Blocking when creds were given - leave both fields
+        # empty to consciously register without network-strand support.
+        if gaia_pw:
+            try:
+                gw_ipv4 = management_host(gw_ipv4, "Gaia")
+            except ManagementAddressError as exc:
+                if htmx:
+                    return _step3_with_error(str(exc))
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=200)
+            try:
+                _gr = requests.post(f"https://{gw_ipv4}:443/gaia_api/login",
+                                    json={"user": gaia_user, "password": gaia_pw},
+                                    verify=False, timeout=(6, 20))
+                if _gr.status_code == 200 and (_gr.json() or {}).get("sid"):
+                    try:
+                        requests.post(f"https://{gw_ipv4}:443/gaia_api/logout",
+                                      headers={"X-chkp-sid": _gr.json()["sid"]},
+                                      verify=False, timeout=(6, 10))
+                    except Exception:
+                        pass
+                else:
+                    _msg = (f"Gaia login failed on {gw_ipv4} (HTTP {_gr.status_code}): "
+                            "check the Gaia user/password and that the Gaia REST API is "
+                            "enabled on the gateway. Clear both Gaia fields to register "
+                            "without network-strand support.")
+                    if htmx:
+                        return _step3_with_error(_msg)
+                    return JSONResponse({"ok": False, "error": _msg}, status_code=200)
+            except requests.exceptions.RequestException as exc:
+                _msg = (f"Gaia API on {gw_ipv4} not reachable ({exc.__class__.__name__}): "
+                        "enable the Gaia REST API on the gateway or clear both Gaia "
+                        "fields to register without network-strand support.")
                 if htmx:
                     return _step3_with_error(_msg)
                 return JSONResponse({"ok": False, "error": _msg}, status_code=200)
-        except requests.exceptions.RequestException as exc:
-            _msg = (f"Gaia API on {gw_ipv4} not reachable ({exc.__class__.__name__}): "
-                    "enable the Gaia REST API on the gateway or clear both Gaia "
-                    "fields to register without network-strand support.")
-            if htmx:
-                return _step3_with_error(_msg)
-            return JSONResponse({"ok": False, "error": _msg}, status_code=200)
 
-    # The management address as typed may be a Smart-1 Cloud tenant URL: the
-    # row keeps host, port and tenant path apart (deploy.checkpoint._api_url
-    # puts the path between host and web_api).
-    from deploy.checkpoint import split_mgmt_address as _cp_split
-    _mgmt_host, _mgmt_port, _mgmt_path = _cp_split(mgmt_ip)
-    mgmt_ip = _mgmt_host or mgmt_ip
-    mgmt_port = _mgmt_port or mgmt_port
-    cfg = {
-        "cp": {
-            "mgmt": {"ip": mgmt_ip, "port": mgmt_port, **({"path": _mgmt_path} if _mgmt_path else {})},
-            "gateway_uid":    gateway_uid,
-            "gateway_type":   gw_canonical_type,
-            "policy_package": package,
+        # The management address as typed may be a Smart-1 Cloud tenant URL: the
+        # row keeps host, port and tenant path apart (deploy.checkpoint._api_url
+        # puts the path between host and web_api).
+        from deploy.checkpoint import split_mgmt_address as _cp_split
+        _mgmt_host, _mgmt_port, _mgmt_path = _cp_split(mgmt_ip)
+        mgmt_ip = _mgmt_host or mgmt_ip
+        mgmt_port = _mgmt_port or mgmt_port
+        cfg = {
+            "cp": {
+                "mgmt": {"ip": mgmt_ip, "port": mgmt_port, **({"path": _mgmt_path} if _mgmt_path else {})},
+                "gateway_uid":    gateway_uid,
+                "gateway_type":   gw_canonical_type,
+                "policy_package": package,
+                **({"domain": domain} if domain else {}),
+            }
         }
-    }
-    display_name = f"{gw_name} ({package})"
+        display_name = f"{gw_name} ({domain}/{package})" if domain else f"{gw_name} ({package})"
 
-    engine = get_engine()
-    with engine.begin() as conn:
-        # Uniqueness check: same (mgmt.ip, gateway_uid, policy_package) → 409
-        dup = conn.execute(text("""
+        engine = get_engine()
+        with engine.begin() as conn:
+            # Uniqueness check: same (mgmt.ip, gateway_uid, policy_package) → 409
+            dup = conn.execute(text("""
             SELECT id, host_name FROM fw_devices
              WHERE platform = 'checkpoint'
                AND JSON_EXTRACT(config, '$.cp.mgmt.ip')      = :mip
                AND JSON_EXTRACT(config, '$.cp.gateway_uid')  = :guid
                AND JSON_EXTRACT(config, '$.cp.policy_package') = :pkg
         """), {"mip": mgmt_ip, "guid": gateway_uid, "pkg": package}).mappings().fetchone()
-        if dup:
-            if htmx:
-                return _step3_with_error(
-                    f"device already exists as #{dup['id']} ({dup['host_name']})",
-                    existing_id=dup["id"],
-                )
-            return JSONResponse({
-                "ok": False,
-                "error": "device already exists",
-                "existing_device_id": dup["id"],
-                "existing_host_name": dup["host_name"],
-            }, status_code=409)
+            if dup:
+                if htmx:
+                    return _step3_with_error(
+                        f"device already exists as #{dup['id']} ({dup['host_name']})",
+                        existing_id=dup["id"],
+                    )
+                return JSONResponse({
+                    "ok": False,
+                    "error": "device already exists",
+                    "existing_device_id": dup["id"],
+                    "existing_host_name": dup["host_name"],
+                }, status_code=409)
 
-        # The gateway's name is the host name; a second (mgmt, package) pair
-        # of the same gateway is a second Device under the same name, told
-        # apart by its display name (docs/DEVICE_IDENTITY_PLAN.md, phase 5).
-        host_candidate = gw_name
+            # The gateway's name is the host name; a second (mgmt, package) pair
+            # of the same gateway is a second Device under the same name, told
+            # apart by its display name (docs/DEVICE_IDENTITY_PLAN.md, phase 5).
+            host_candidate = gw_name
 
-        result = conn.execute(text("""
+            result = conn.execute(text("""
             INSERT INTO fw_devices (host_name, display_name, platform, role,
                                     mgmt_ip, mgmt_port, api_key,
                                     gaia_user, gaia_password, config, tenant_id)
             VALUES (:hn, :dn, 'checkpoint', :role, :ip, :port, :key,
                     :gu, :gp, :cfg, :tn)
         """), {
-            "hn": host_candidate, "dn": display_name, "role": role,
-            "ip": gw_ipv4, "port": 443,
-            "key": secrets_util.protect(api_key),
-            "gu": gaia_user, "gp": secrets_util.protect(gaia_pw),
-            "cfg": json.dumps(cfg),
-            "tn": _form_tenant(request, form, conn),
-        })
-        new_id = result.lastrowid
+                "hn": host_candidate, "dn": display_name, "role": role,
+                "ip": gw_ipv4, "port": 443,
+                "key": secrets_util.protect(api_key),
+                "gu": gaia_user, "gp": secrets_util.protect(gaia_pw),
+                "cfg": json.dumps(cfg),
+                "tn": _form_tenant(request, form, conn),
+            })
+            new_id = result.lastrowid
 
-    if htmx:
-        return Response(status_code=204, headers={"HX-Redirect": _add_done_url(form, new_id)})
-    return JSONResponse({
-        "ok": True,
-        "device_id":  new_id,
-        "host_name":  host_candidate,
-        "display_name": display_name,
-        "mgmt_ip":    gw_ipv4,
-        "redirect":   "/devices",
-    })
+        if htmx:
+            return Response(status_code=204, headers={"HX-Redirect": _add_done_url(form, new_id)})
+        return JSONResponse({
+            "ok": True,
+            "device_id":  new_id,
+            "host_name":  host_candidate,
+            "display_name": display_name,
+            "mgmt_ip":    gw_ipv4,
+            "redirect":   "/devices",
+        })
+    return await run_in_threadpool(_work)
 
 
 # ── Cisco ASA wizard ─────────────────────────────────────────────────
@@ -35747,9 +37677,9 @@ async def asa_wizard_upload(
     if result["errors"]:
         # Pre-persist parse failure: no device row to log against - this is
         # form feedback, so it stays a banner.
-        return RedirectResponse(
-            "/projects?form_error=" + urllib.parse.quote("; ".join(result["errors"])),
-            status_code=303)
+        # back to the page the wizard was opened from (block E, 2026-11-16)
+        return RedirectResponse(_with_flash(next_url or "/devices", form_error=". ".join(result["errors"])),
+                                status_code=303)
 
     hostname = result["hostname"]
     warning = "; ".join(result["warnings"]) if result["warnings"] else None
@@ -35763,12 +37693,9 @@ async def asa_wizard_upload(
             "SELECT id FROM fw_devices WHERE host_name = :hn AND tenant_id = :tn"
         ), {"hn": hostname, "tn": _form_tenant(request, None, conn)}).fetchone()
         if existing:
-            return RedirectResponse(
-                "/projects?form_error=" + urllib.parse.quote(
-                    f"A device with host_name '{hostname}' already exists "
-                    f"(id #{existing[0]}). Edit it, or change the "
-                    f"`hostname` line in the config and re-upload."),
-                status_code=303)
+            return RedirectResponse(_with_flash(next_url or "/devices", form_error=(
+                f"A Device named '{hostname}' exists already. Delete it first, or change the "
+                "hostname line of the file and upload it again.")), status_code=303)
 
         res = conn.execute(text("""
             INSERT INTO fw_devices (host_name, display_name, platform, role,

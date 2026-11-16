@@ -127,29 +127,38 @@ def psk_tokens(values) -> set[str]:
     return out
 
 
-def detached_tokens(values, stored_hashes, has_secrets=None) -> list[str]:
-    """The tunnels in a push whose key this Device holds under ANOTHER tunnel.
-
-    A token with no stored secret while the Device has secrets stored at all
-    means a key detached from its tunnel: the tunnel was renamed on the
-    source and re-imported under the new name, and the key stayed under the
-    old one. Substituting the placeholder there, which is what the push did,
-    installs a tunnel that never comes up and says nothing
-    (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2). A Device with no stored
-    secret at all is the other case, the operator never entered one, and
-    keeps the placeholder. `stored_hashes` are the hashes of the tunnels
-    that have a key; `has_secrets` says whether the Device stores any key at
-    all, including one whose tunnel is gone (which has no hash to list), and
-    defaults to "some hash is stored". Returns the detached hashes, sorted,
-    empty when the push is clean.
+def unkeyed_tokens(values, stored_hashes) -> list[str]:
+    """The tunnels in a push with no stored pre-shared key: the token hashes
+    no key is stored under. `stored_hashes` are the hashes of the tunnels that
+    have a key. The push substitutes the placeholder for them and its record
+    names them, unless a key of the Device is orphaned (`detached_tokens`).
+    Sorted, empty when every tunnel has its key or the push carries no tunnel.
     """
     wanted = psk_tokens(values)
     stored = {(h or "").lower() for h in (stored_hashes or ()) if h}
-    if has_secrets is None:
-        has_secrets = bool(stored)
-    if not wanted or not has_secrets:
-        return []
     return sorted(wanted - stored)
+
+
+def detached_tokens(values, stored_hashes, orphan_keys=()) -> list[str]:
+    """The tunnels in a push whose key this Device may hold under ANOTHER name.
+
+    The secrets key on the tunnel's name. A key under a name no tunnel of the
+    Device carries any more (an orphan key, `orphan_keys` are those names) was
+    left behind by a rename on the source and a re-import under the new name,
+    and substituting the placeholder for the renamed tunnel, which is what the
+    push did, installs a tunnel that never comes up and says nothing
+    (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2). With an orphan key stored,
+    every tunnel without a key is returned, because which of them was renamed
+    is not knowable. Without one, the tunnels without a key never got one,
+    whether the Device holds keys for other tunnels or none at all, and the
+    push keeps the placeholder path (`unkeyed_tokens`). Until 2026-11-11 any
+    stored key made every tunnel without one a detachment, which refused a
+    push with the keys of some tunnels entered (the 0.9.5 rc matrix, cp2cp).
+    Returns the detached hashes, sorted, empty when the push is clean.
+    """
+    if not orphan_keys:
+        return []
+    return unkeyed_tokens(values, stored_hashes)
 
 
 def _safe_cert_name(s: str) -> str:

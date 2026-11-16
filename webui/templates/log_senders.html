@@ -20,7 +20,7 @@
           onsubmit="const b=this.querySelector('button[type=submit]');b.disabled=true;b.textContent='Scanning…';">
       <button type="submit" class="btn" title="Read the receiver's spool and refresh this list. Registers nothing">Scan for senders</button>
     </form>
-    <a href="/projects" class="btn">Devices</a>
+    <a href="/projects" class="btn">Projects</a>
   </div>
 </div>
 
@@ -64,7 +64,7 @@
         </td>
         <td style="text-align:right;white-space:nowrap;">
           {% if s.device_id %}
-          <button type="button" class="btn danger" onclick="senderDetach({{ s.id }}, {{ (s.device_name or '') | tojson }}, {{ s.override_rows }})"
+          <button type="button" class="btn danger" onclick='senderDetach({{ s.id }}, {{ (s.device_name or "") | tojson }}, {{ s.override_rows }})'
                   title="Release the mapping. The lines stay with the sender, the Device is rebuilt without them">Detach</button>
           {% else %}
           <select id="sender-dev-{{ s.id }}" class="inp" style="font-size:var(--fs-small);padding:4px 8px;width:auto;">

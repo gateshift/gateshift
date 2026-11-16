@@ -1139,6 +1139,22 @@ _VSYS  = f"{_DEV}/vsys/entry[@name='vsys1']"
 _NET   = f"{_DEV}/network"
 
 
+def _vsys_of(device: dict) -> str:
+    """The vsys a Device row addresses (`config.panw.vsys`, docs/VIRTUAL_INSTANCES_PLAN.md
+    F-3): `vsys1` for a firewall row, the instance's vsys for an instance row, `shared` for
+    the root scope. Only a value other than vsys1 changes an XPath."""
+    try:
+        cfg = device.get("config")
+        cfg = json.loads(cfg or "{}") if isinstance(cfg, str) else (cfg or {})
+    except (ValueError, AttributeError):
+        cfg = {}
+    return str(((cfg or {}).get("panw") or {}).get("vsys") or "vsys1").strip() or "vsys1"
+
+
+def _vsys_root(vsys: str) -> str:
+    return "/config/shared" if vsys == "shared" else f"{_DEV}/vsys/entry[@name='{vsys}']"
+
+
 def _scope_xpath(device: dict, xpath: str) -> str:
     """Rewrite a firewall-shaped config xpath to a Panorama SCOPE's root.
 
@@ -1154,6 +1170,9 @@ def _scope_xpath(device: dict, xpath: str) -> str:
     sc = device.get("pano_scope") or {}
     stype, name = sc.get("type"), sc.get("name")
     if not stype or not name:
+        vsys = _vsys_of(device)
+        if vsys != "vsys1" and xpath.startswith(_VSYS):     # a vsys instance row of a multi-vsys box
+            return _vsys_root(vsys) + xpath[len(_VSYS):]
         return xpath
     if stype in ("template", "template-stack"):
         root = (f"{_DEV}/{stype}/entry[@name='{name}']"
@@ -1689,10 +1708,10 @@ class PanwDriver(DeployDriver):
 
     def list_target_addresses(self, *, device: dict) -> list[dict]:
         """Read PA address-objects via vsys/address."""
-        try:
-            result = self._api_get(device, f"{_VSYS}/address")
-        except Exception:
-            return []
+        # A missing node is an empty result already (_api_get), everything else is a
+        # failure the operator must see: a refused key read as '0 entries fetched'
+        # until 2026-11-16 (product finding 8).
+        result = self._api_get(device, f"{_VSYS}/address")
         out: list[dict] = []
         root = result.find("address") or result
         for entry in root.findall("entry"):
@@ -1712,10 +1731,10 @@ class PanwDriver(DeployDriver):
 
     def list_target_services(self, *, device: dict) -> list[dict]:
         """Read PA service-objects via vsys/service."""
-        try:
-            result = self._api_get(device, f"{_VSYS}/service")
-        except Exception:
-            return []
+        # A missing node is an empty result already (_api_get), everything else is a
+        # failure the operator must see: a refused key read as '0 entries fetched'
+        # until 2026-11-16 (product finding 8).
+        result = self._api_get(device, f"{_VSYS}/service")
         out: list[dict] = []
         root = result.find("service") or result
         for entry in root.findall("entry"):
@@ -1743,10 +1762,10 @@ class PanwDriver(DeployDriver):
         Zone Mapping > Interfaces to populate the
         ``pa_zone_protection_profile`` catalog dropdown.
         """
-        try:
-            result = self._api_get(device, f"{_NET}/profiles/zone-protection-profile")
-        except Exception:
-            return []
+        # A missing node is an empty result already (_api_get), everything else is a
+        # failure the operator must see: a refused key read as '0 entries fetched'
+        # until 2026-11-16 (product finding 8).
+        result = self._api_get(device, f"{_NET}/profiles/zone-protection-profile")
         out: list[dict] = []
         root = result.find("zone-protection-profile") or result
         for entry in root.findall("entry"):
@@ -2386,8 +2405,15 @@ class PanwDriver(DeployDriver):
         _ipv6_objs = {str(o.get("name") or "") for o in (address_objects or [])
                       if any(":" in v for v in object_values(o.get("value")))}
         _ipv6_objs |= {str(g.get("name") or "") for g in (_ds_groups or [])}
+        # zone -> the interfaces this render binds to it: the egress of an
+        # interface-address NAT rule whose source names none
+        _zone_ifaces: dict[str, list[str]] = {}
+        for _i in (interfaces or []):
+            if _i.get("zone_name") and _i.get("interface_name") and not _i.get("deploy_skip"):
+                _zone_ifaces.setdefault(str(_i["zone_name"]), []).append(str(_i["interface_name"]))
         sections["NAT Rules"] = self._gen_nat_rules(
-            nat_rules, dropped, _ext_zone, addr_lookup, svc_lookup, ipv6_names=_ipv6_objs)
+            nat_rules, dropped, _ext_zone, addr_lookup, svc_lookup, ipv6_names=_ipv6_objs,
+            zone_ifaces=_zone_ifaces)
         # PBF may need service objects that no rule referenced - materialize
         # them into the service list and RE-RENDER the services section.
         _pbf_svc_extra: list[dict] = []
@@ -2969,8 +2995,28 @@ class PanwDriver(DeployDriver):
                               "PAN-OS cannot resolve the egress (candidate "
                               "validation fails)")
                     fallback = "not pushed: bind its interface in Network > Routing"
-                dropped.append(DroppedField(rule_id=_prefix_of(r), field="next_hop" if not other_vr else "interface",
+                # A whole route gone is filed under the routes kind of the Review
+                # (route_device, as the FortiOS driver declares a route without an
+                # egress): declared as "interface" it counted against the
+                # interfaces row and left the routes row one short (azure2pa,
+                # 0.9.5 matrix). The on-link case above keeps "interface": the
+                # route is pushed, only its binding is left out.
+                dropped.append(DroppedField(rule_id=_prefix_of(r), field="next_hop" if not other_vr else "route_device",
                                             reason=reason, fallback=fallback))
+            elif dropped is not None:
+                # No next hop and an interface this VR does not carry (unbound,
+                # not pushed, or none named): PAN-OS has nothing to resolve the
+                # egress with. Left out silently until 0.9.5 (a cloud source's
+                # subnet route to an interface the operator has not mapped yet,
+                # 2026-11-16): declared like every other route that is gone.
+                dropped.append(DroppedField(
+                    rule_id=_prefix_of(r), field="route_device",
+                    reason=(f"interface '{pa_name}' is not a member of VR '{raw_name}' and the route "
+                            "names no next hop: PAN-OS cannot resolve the egress"
+                            if pa_name else
+                            f"the route names neither an interface of VR '{raw_name}' nor a next hop: "
+                            "PAN-OS cannot resolve the egress"),
+                    fallback="not pushed: bind its interface in Network > Routing"))
         if not usable_routes:
             return
         rt_table = ET.SubElement(parent, "routing-table")
@@ -3551,7 +3597,8 @@ class PanwDriver(DeployDriver):
                        external_zone: str | None = None,
                        addr_lookup: dict[str, str] | None = None,
                        svc_lookup: dict[tuple[str, str], str] | None = None,
-                       ipv6_names: set[str] | None = None) -> str:
+                       ipv6_names: set[str] | None = None,
+                       zone_ifaces: dict[str, list[str]] | None = None) -> str:
         """Generate PAN-OS <rulebase><nat><rules> XML.
 
         Renders the agnostic fw_nat_rules schema into PAN-OS NAT entries.
@@ -3562,9 +3609,13 @@ class PanwDriver(DeployDriver):
         addr_lookup/svc_lookup let raw IPs/services be rewritten to object
         names - same mechanism used by the security-rule renderer, so NAT
         rules and regular rules share the same object pool at the target.
+        zone_ifaces (zone name -> the interfaces bound to it in this render)
+        names the egress of an interface-address rule whose source carries no
+        `iface|ip` literal (the FTD readers before 2026-11-04).
         """
         addr_lookup = addr_lookup or {}
         svc_lookup = svc_lookup or {}
+        zone_ifaces = zone_ifaces or {}
 
         def _rewrite_addrs(items: list[str]) -> list[str]:
             return [addr_lookup.get(x, x) for x in items]
@@ -3627,7 +3678,7 @@ class PanwDriver(DeployDriver):
                         rule_id=name, field="nat_rule",
                         reason="no destination zone and no zone flagged external "
                                "on the source: PAN-OS NAT needs a concrete zone",
-                        fallback="not pushed: set the zone in Target Settings"))
+                        fallback="not pushed: set the zone under Network > Zones"))
                     root.remove(entry)
                     return
             to_el = ET.SubElement(entry, "to")
@@ -3665,6 +3716,26 @@ class PanwDriver(DeployDriver):
             if _ts_ref:
                 trans_src = _ts_ref
                 trans_src_type = "static-ip"
+
+            # An interface-address rule without the `iface|ip` literal (a source
+            # that names no egress) takes the one interface of its destination
+            # zone. Without that it is not pushed: a NAT rule rendered without
+            # its translation would match the traffic and translate nothing,
+            # silently (lab finding 2026-11-04, fmc2pa).
+            if nat_type in ("snat", "static") and trans_src_type == "interface-address" and not trans_src:
+                _cands = [i for i in (zone_ifaces.get(_dz[0]) or []) if i] if len(_dz) == 1 else []
+                if len(_cands) == 1:
+                    trans_src = _cands[0]
+                else:
+                    dropped.append(DroppedField(
+                        rule_id=rid, field="trans_src",
+                        reason="interface-address NAT without an egress interface: the source "
+                               "names no interface and the destination zone "
+                               + (f"{_dz[0]!r} binds {len(_cands)} interfaces" if len(_dz) == 1 else "is not a single zone")
+                               + ", so PAN-OS could not pick the address to hide behind",
+                        fallback="not pushed: name the interface in the rule's translated source"))
+                    root.remove(entry)
+                    return
 
             # Source translation (snat / static)
             if nat_type in ("snat", "static") and trans_src:
@@ -4330,12 +4401,17 @@ class PanwDriver(DeployDriver):
         push). The enterprise Panorama driver overrides this to route via a
         Panorama (device-group + template)."""
         return {"panorama": False, "base_url": _api_url(device),
-                "api_key": device.get("api_key") or ""}
+                "api_key": device.get("api_key") or "", "vsys": _vsys_of(device)}
 
     def _reroot(self, xpath: str, ctx: dict, strand: str) -> str:
-        """Map a push xpath for the deploy context. CE: identity (direct push).
-        The enterprise Panorama driver overrides this to re-root onto a
+        """Map a push xpath for the deploy context. CE: identity (direct push),
+        except a vsys instance row, whose vsys subtree replaces vsys1 (the
+        device-level network and the shared objects stay where they are). The
+        enterprise Panorama driver overrides this to re-root onto a
         device-group / template."""
+        vsys = str(ctx.get("vsys") or "vsys1")
+        if vsys != "vsys1" and xpath.startswith(_VSYS):
+            return _vsys_root(vsys) + xpath[len(_VSYS):]
         return xpath
 
     # The push stages into the firewall's candidate configuration, which it

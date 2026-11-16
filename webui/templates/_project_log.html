@@ -1,0 +1,122 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# ── The project's log as a view of its own (docs/UI_USABILITY_PLAN.md, D31,
+     2026-11-10): one row per job (imports, builds, pushes, collects), newest
+     first, the complete record of a job in a dialog. Moved from the foot of the
+     Overview, which is the Dashboard since D26. Included by rules.html inside
+     #primary-log, loaded on page load and on every switch into the view. ── #}
+<style>
+  .ov-log-view { padding:14px 20px 22px; max-width:1100px; }
+  .ov-log-row { display:flex; gap:8px; align-items:baseline; padding:6px 0; border-bottom:1px solid var(--line); cursor:pointer; font-size:var(--fs-body); }
+  .ov-log-row:last-child { border-bottom:none; }
+  .ov-log-row:hover { background:var(--bg2); }
+  .ov-log-row .when { color:var(--tx3); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .ov-log-row .kind { color:var(--tx2); white-space:nowrap; }
+  .ov-log-row .st { font-weight:600; white-space:nowrap; }
+  .ov-log-row .sum { color:var(--tx3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1 1 auto; }
+  #ov-log-modal { position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; background:rgba(4,7,11,0.6); }
+  #ov-log-modal.hidden { display:none; }
+  #ov-log-modal .box { background:var(--bg1); border:1px solid var(--line2); padding:20px; max-width:760px; width:100%; margin:0 16px; box-shadow:var(--shadow-pop); }
+  #ov-log-body { font-size:var(--fs-body); line-height:1.6; color:var(--tx2); max-height:70vh; overflow:auto; }
+  #ov-log-body pre { margin:0 0 10px; white-space:pre-wrap; word-break:break-word; font-family:var(--mono, monospace); font-size:var(--fs-small); color:var(--tx); }
+  #ov-log-body .ev { padding:2px 0; border-bottom:1px solid var(--line); }
+  #ov-log-body .ev.fail { color:#e05c5c; }
+</style>
+<div class="ov-log-view">
+    <div>
+      <div class="sec-hd"><h2>Log</h2><div class="count"><span class="n" id="ov-log-count">0</span><span class="lbl" id="ov-log-lbl">entries</span></div>
+        <div class="actions"><button type="button" class="btn" onclick="ovLoadLog()" title="Read the log again">Refresh</button></div>
+      </div>
+      <div id="ov-log-list" style="border:1px solid var(--line);background:var(--surface);padding:0 10px;">
+        <div class="mut" style="font-size:var(--fs-body);padding:8px 0;">loading&hellip;</div>
+      </div>
+    </div>
+</div>
+
+{# ── log record dialog: the complete message and every step of one job ── #}
+<div id="ov-log-modal" class="hidden" onclick="if (event.target === this) ovLogClose();">
+  <div class="box">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;">
+      <h2 id="ov-log-title" style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);"></h2>
+      <button type="button" onclick="ovLogClose()" class="x" aria-label="Close">&times;</button>
+    </div>
+    <div id="ov-log-body"></div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var pid = {{ ov_project.id }};
+    function esc(s) { var d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; }
+    // ── the project's log: one row per job, the record in a dialog ──
+    // Status words are signals, not chips - they keep real colors (same
+    // literals as gs-log.js, where the reskin aliased the legacy tokens).
+    var TONE = {done: 'var(--accent)', failed: '#e05c5c', refused: '#e05c5c',
+                running: 'var(--accent)', staged: '#d4a017', interrupted: 'var(--tx3)'};
+    var SRC_ONLY = {generate: 1, 'import': 1, collect: 1, upload: 1, pipeline: 1, backup: 1, restore: 1};
+    var _jobs = {};
+    function cap(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+    function rowHtml(j) {
+      var kind = SRC_ONLY[j.kind] ? j.kind : (j.strand || j.kind || 'push');
+      var tone = TONE[j.status] || 'var(--tx2)';
+      var dur = (j.duration_s != null && j.status !== 'running') ? (j.duration_s + 's') : '';
+      return '<div class="ov-log-row" data-job="' + esc(j.job_id) + '" onclick="ovLogOpen(this.dataset.job)" title="Open the complete record">'
+        + '<span class="when">' + esc(j.created_at) + '</span>'
+        + '<span class="kind">' + esc(cap(kind)) + '</span>'
+        + '<span class="st" style="color:' + tone + ';">' + esc(cap(j.status)) + '</span>'
+        + (dur ? '<span class="when">' + esc(dur) + '</span>' : '')
+        + '<span class="sum">' + esc(cap(j.summary || '')) + '</span>'
+        + '</div>';
+    }
+    window.ovLoadLog = function () {
+      var box = document.getElementById('ov-log-list'); if (!box) return;
+      fetch('/deploy/history?project_id=' + pid + '&limit=100')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var jobs = (d && d.jobs) || [];
+          _jobs = {};
+          jobs.forEach(function (j) { _jobs[j.job_id] = j; });
+          var n = document.getElementById('ov-log-count'); if (n) n.textContent = jobs.length;
+          var nl = document.getElementById('ov-log-lbl'); if (nl) nl.textContent = jobs.length === 1 ? 'entry' : 'entries';
+          if (!jobs.length) { box.innerHTML = '<div class="mut" style="font-size:var(--fs-body);padding:8px 0;">No generate or push yet.</div>'; return; }
+          box.innerHTML = jobs.map(rowHtml).join('');
+        })
+        .catch(function () { box.innerHTML = '<div class="mut" style="font-size:var(--fs-body);padding:8px 0;">Log unavailable</div>'; });
+    };
+    function _ovLogEsc(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); ovLogClose(); } }
+    window.ovLogClose = function () {
+      var m = document.getElementById('ov-log-modal'); if (m) m.classList.add('hidden');
+      document.removeEventListener('keydown', _ovLogEsc, true);
+    };
+    window.ovLogOpen = function (jobId) {
+      var j = _jobs[jobId] || {};
+      var kind = SRC_ONLY[j.kind] ? j.kind : ((j.kind || 'push') + (j.strand ? ' ' + j.strand : ''));
+      document.getElementById('ov-log-title').textContent = [cap(kind), cap(j.status), j.created_at].filter(Boolean).join(' · ');
+      var body = document.getElementById('ov-log-body');
+      body.innerHTML = '<div class="mut">Loading&hellip;</div>';
+      var m = document.getElementById('ov-log-modal'); m.classList.remove('hidden');
+      document.addEventListener('keydown', _ovLogEsc, true);
+      fetch('/deploy/push/' + encodeURIComponent(jobId))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var html = '', meta = [];
+          if (j.source_name) meta.push('source ' + esc(j.source_name));
+          if (j.target_name && !SRC_ONLY[j.kind]) meta.push('target ' + esc(j.target_name));
+          if (j.duration_s != null && j.status !== 'running') meta.push(j.duration_s + ' s');
+          var events = (d && d.events) || [];
+          meta.push(events.length + ' step' + (events.length === 1 ? '' : 's'));
+          if (d && d.needs_commit) meta.push('staged, not yet published');
+          html += '<div class="mut" style="margin-bottom:8px;">' + meta.join(' &middot; ') + '</div>';
+          var msg = (d && d.error_text) || j.summary || '';
+          if (msg) html += '<pre>' + esc(msg) + '</pre>';
+          events.forEach(function (e) {
+            html += '<div class="ev' + (e.success ? '' : ' fail') + '">' + (e.success ? '[OK] ' : '[FAIL] ')
+              + esc(e.step) + (e.detail ? ' - ' + esc(e.detail) : '') + '</div>';
+          });
+          if (!msg && !events.length) html += '<div class="mut">No record beyond the row itself.</div>';
+          body.innerHTML = html;
+        })
+        .catch(function () { body.innerHTML = '<div class="mut">Record unavailable</div>'; });
+    };
+    document.addEventListener('DOMContentLoaded', function () { ovLoadLog(); });
+  })();
+</script>

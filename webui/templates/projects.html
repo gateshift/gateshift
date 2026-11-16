@@ -1,31 +1,33 @@
 {# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
 
 {% extends "base.html" %}
-{% set ws_nav = true %}{# version + logout live in the tree's foot, not the header #}
-{% block title %}Projects - Gateshift{% endblock %}
+{% set ws_nav = true %}{# the tree carries the brand, the version and Logout: no header bar (D33) #}
+{% set _view = page_view if page_view is defined else 'projects' %}
+{% block title %}{{ 'Devices' if _view == 'devices' else 'Projects' }} - Gateshift{% endblock %}
 {# the navigation tree sits flush with the edge: no main gutter (U14) #}
 {% block main_class %}{% endblock %}
 {% block content %}
 
-{# Projects-first IA (docs/PROJECTS_UI_DESIGN.md, U6 layout): the landing
-   page shows the tenant's PROJECTS on the left and its DEVICES on the right.
+{# Projects-first IA (docs/PROJECTS_UI_DESIGN.md, U6 layout), split in two views
+   on 2026-11-10 (docs/UI_USABILITY_PLAN.md, D30): /projects shows the tenant's
+   PROJECTS, /devices its DEVICES (the inventory), both from this template.
    One project = one (source, target) pair with its decisions; a pair whose
    target is its source is an OPTIMIZATION (the device is curated and pushed
-   back to itself), everything else a migration. Devices are added from the
-   device column (shared modal) or on the inventory page, where edit, import
-   and delete live; the new-project dialog only picks from what exists. #}
+   back to itself), everything else a migration. Devices are added, edited,
+   imported and deleted on the Devices page; the new-project dialog only picks
+   from what exists. #}
 <style>
-  /* column gap 40px (twice the page gutter) so the two tables read as two areas */
-  /* projects 2fr : devices 3fr - the inventory row (name, platform line, four actions) needs the room (U14, beside the tree) */
-  .pl-grid { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,3fr); gap:22px 40px; padding:14px 20px 22px; align-items:start; }
-  /* the tree takes 236px: the two columns stack 236px earlier than before (U14) */
-  /* beside the 236px tree two columns need a wide window; smaller ones stack projects over devices */
-  @media (max-width: 1560px) { .pl-grid { grid-template-columns:1fr; } }
+  /* one column per view since D30: the projects on /projects, the inventory on /devices */
+  .pl-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:22px 40px; padding:14px 20px 22px; align-items:start; }
   /* the tables (and empty states) span exactly their column, flush with the header row above */
   .pl-grid .twrap { margin:0 0 22px; }
   .pl-grid .empty { margin:0 0 22px; }
   /* column headers = the shared .sec-hd (tokens.css) */
   .pl-sub { font-size:var(--fs-small); color:var(--tx3); }
+  /* the status chip (docs/UI_USABILITY_PLAN.md, D8): the step model's word for the project */
+  .pl-status { display:inline-block; font-size:var(--fs-caption); padding:2px 7px; border:1px solid var(--line2); color:var(--tx2); white-space:nowrap; }
+  .pl-status.pushed, .pl-status.verified { color:var(--accent); border-color:var(--accent); }
+  .pl-status.closed { color:var(--tx3); }
   .np-mode { display:inline-flex; align-items:center; gap:6px; font-size:var(--fs-small);  padding:3px 8px; border:1px solid var(--line2); color:var(--tx2); }
   .np-mode.optimization { color:var(--green); border-color:var(--green); }
   .np-mode.migration { color:var(--tx); border-color:var(--line2); }
@@ -48,32 +50,34 @@
     {# ── Page head, same place and style as the workspace views (user request
          2026-10-05). This page has one view, so the path is the entry itself
          and renders server-side instead of from the nav. ── #}
-    <div id="ws-crumb" class="ws-crumb"><span class="cur">Projects &amp; Devices</span></div>
+    <div class="ws-head">
+      <div id="ws-crumb" class="ws-crumb"><span class="cur">{{ 'Devices' if _view == 'devices' else 'Projects' }}</span></div>
+      {# the next step of the picked project, or the first thing to do without one (D33) #}
+      {% include "_ws_next.html" %}
+    </div>
     <div class="ws-top">
       <div id="ws-hint" class="ws-hint">
-        <div class="ws-hint-body"><span class="ws-hint-cap">What you can do here</span><span id="ws-hint-text">Open a project to work in it. Register and import devices on the right. The lists belong to the tenant picked below.</span></div>
-        <button type="button" class="ws-hint-x" onclick="wsHints(false)" title="Hide these hints on every view">Hide</button>
-        <button type="button" class="ws-hint-show" onclick="wsHints(true)" title="Show the view hints again">Show Hints</button>
+        <div class="ws-hint-body"><span class="ws-hint-cap" title="What you can do here">&#8505;&#65039;</span>{% if _view == 'devices' %}<span id="ws-hint-text">Create and manage the API connections to your Devices, or upload their configuration files.</span>{% else %}<span id="ws-hint-text">Create and manage your migration and optimization projects. A project pairs a source and a target Device, the same Device on both ends makes an optimization.</span>{% endif %}</div>
       </div>
     </div>
-{# ── Tenant: header in the shared .sec-hd style; the controls (select, rename,
-     +Add Tenant, delete-when-empty) and the filter on the next row (user request
-     2026-10-04). ── #}
-<div class="sec-hd" style="padding:14px 20px 0;">
-  <h1>Tenant</h1>
-  <div class="count"><span class="n">{{ tenants | length }}</span><span class="lbl">tenant{{ '' if tenants|length == 1 else 's' }}</span></div>
-</div>
-<div class="toolbar" style="padding-top:6px;">
-  {% include "_tenant_switcher.html" %}
+{# ── The tenant row left the page (D66, 2026-11-13): the tenant picker sits in the
+     navigation once a second tenant exists, the tenants are managed in the dialog of
+     _tenant_modal.html behind the Tenants button of the Devices page (D76). The toolbar keeps the
+     text filter of the Devices page (user request 2026-10-04, the project list
+     without it since 2026-11-11). ── #}
+{% if _view == 'devices' %}
+<div class="toolbar" style="padding-top:14px;">
   <div class="sp"></div>
-  {# One filter for both columns: project rows and device rows carry a
-     data-text with everything the eye would search for. #}
+  {# The text filter over the device rows (data-text carries everything the eye
+     would search for). #}
   <input type="search" id="pf-text" class="inp" placeholder="Filter" autocomplete="off"
          style="font-size:var(--fs-body);padding:5px 8px;width:240px;" oninput="pfApply()">
 </div>
+{% endif %}
 
 <div class="pl-grid">
-  {# ── Projects column ── #}
+  {% if _view == 'projects' %}
+  {# ── Projects ── #}
   <section>
     <div class="sec-hd">
       <h1>Projects</h1>
@@ -83,7 +87,7 @@
       </div>
       <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button type="button" onclick="openNewProjectModal()" class="btn"
-                {% if not sources %}disabled title="Register a source device first"{% endif %}>+Add Project</button>
+                {% if not sources %}disabled title="Register a source Device first"{% endif %}>+Add Project</button>
       </div>
     </div>
 
@@ -94,6 +98,8 @@
           <tr>
             <th>Name</th>
             <th>Source &rarr; Target</th>
+            <th>Status</th>
+            <th style="text-align:right;">Snapshots</th>
             <th style="text-align:right;"></th>
           </tr>
         </thead>
@@ -103,19 +109,19 @@
               data-mode="{{ p.mode }}" data-name="{{ p.name }}" data-text="{{ (p.name ~ ' ' ~ p.source_name ~ ' ' ~ p.target_name ~ ' ' ~ p.status) | lower }}">
             <td style="max-width:280px;white-space:normal;overflow-wrap:anywhere;">
               {# the name is the row's link, dotted like a device name; "open" below does the same #}
-              <a href="{{ p.url }}" onclick="showNavOverlay()" class="pl-dev-link" title="Open this project: its workspace lands on the Overview tab">{{ p.name }}</a>
+              <a href="{{ p.url }}" onclick="showNavOverlay()" class="pl-dev-link" title="Open this project: its workspace lands on the Dashboard">{{ p.name }}</a>
             </td>
             <td style="min-width:160px;white-space:normal;">
+              {# the pair on one line, the sub-line and the Last Activity column went (operator, 2026-11-13, D65) #}
               {{ p.source_name }} <span class="mut">&middot; {{ p.source_platform | plat }}</span>
-              {% if p.mode == 'optimization' %}
-              <div class="pl-sub">&rarr; same device</div>
-              {% else %}
-              <div class="pl-sub">&rarr; {{ p.target_name }} &middot; {{ p.target_platform | plat }}</div>
-              {% endif %}
+              <span class="mut">&rarr;</span>
+              {% if p.mode == 'optimization' %}same Device{% else %}{{ p.target_name }} <span class="mut">&middot; {{ p.target_platform | plat }}</span>{% endif %}
             </td>
+            <td><span class="pl-status {{ p.status }}" title="draft, curated with the first edit, generated with a build, pushed, verified by the operator, or closed">{{ p.status }}</span></td>
+            <td style="text-align:right;font-variant-numeric:tabular-nums;">{{ p.snapshot_count }}</td>
             <td style="text-align:right;white-space:nowrap;">
               <a href="{{ p.url }}" onclick="showNavOverlay()" class="btn" title="Open the workspace of this project">Open</a>
-              <button type="button" class="btn danger" title="Delete this project and every edit it holds (the devices stay)"
+              <button type="button" class="btn danger" title="Delete this project and every edit it holds (the Devices stay)"
                       onclick="projectDelete({{ p.id }}, this.closest('tr').dataset.name, {{ p.decision_total }})">Delete</button>
             </td>
           </tr>
@@ -129,16 +135,17 @@
       {% if sources %}
       <div style="margin-top:12px;"><button type="button" onclick="openNewProjectModal()" class="btn">+Add Project</button></div>
       {% else %}
-      <div class="mut" style="margin-top:8px;font-size:var(--fs-body);">Add a device on the right first.</div>
+      <div class="mut" style="margin-top:8px;font-size:var(--fs-body);">Register a Device under <a href="/devices" class="pl-dev-link">Devices</a> first.</div>
       {% endif %}
     </div>
     {% endif %}
   </section>
-
-  {# ── Devices column = the inventory (U7) ── #}
+  {% else %}
+  {# ── Devices = the inventory (U7), a page of its own again (D30) ── #}
   <section>
     {% include "_device_inventory.html" %}
   </section>
+  {% endif %}
 </div>
 
 {# The global job log (imports, generates, pushes of every device) stays
@@ -190,7 +197,8 @@
   </div>
 </div>
 
-{% include "_add_device_modal.html" %}
+{% if _view == 'devices' %}{% include "_add_device_modal.html" %}{% endif %}
+{% include "_tenant_modal.html" %}
 
 <script>
   // U16: the tree items on this page open the picked project at that view -
@@ -202,7 +210,6 @@
     showNavOverlay(); window.location.href = _NAV_PROJECT_URL;
   }
   function wsNav(primary, rb, sub, obj) { _wsGo([primary, rb, sub, obj].filter(Boolean).join(':')); }
-  function switchConfiguration() { _wsGo('network:interfaces'); }
   function switchOrgSub() { /* the navigation above already left this page */ }
   // ── One text filter over both columns (project rows + device rows) ──
   function pfApply() {
@@ -256,9 +263,10 @@
   function npAutoName() {
     var s = npName(NP.source, NP.sources), t = npName(NP.target, NP.targets);
     var m = npMode();
-    if (m === 'optimization') return 'Optimize ' + s;
-    if (m === 'migration') return s + ' -> ' + t;
-    if (m === 'choose') return s + ' -> ';
+    // the name reads as a sentence (operator, 2026-11-15): '<source> to <target> migration', '<Device> optimization'
+    if (m === 'optimization') return s + ' optimization';
+    if (m === 'migration') return s + ' to ' + t + ' migration';
+    if (m === 'choose') return s + ' to ';
     return '';
   }
   function npNameTyped() {
@@ -275,7 +283,7 @@
     badge.className = 'np-mode ' + (m === 'optimization' || m === 'migration' ? m : '');
     badge.textContent = m === 'pick' ? 'Mode' : (m === 'optimization' ? 'Optimization' : 'Migration');
     var s = npName(NP.source, NP.sources), t = npName(NP.target, NP.targets);
-    hint.textContent = m === 'pick' ? 'Pick the device to read. A device that can also be a target starts as an optimization.'
+    hint.textContent = m === 'pick' ? 'Pick a source and a target Device. The same Device on both ends makes an optimization project.'
       : m === 'optimization' ? 'Optimization: ' + s + ' is curated and pushed back to itself. Pick another target to migrate instead.'
       : m === 'migration' ? 'Migration: the configuration of ' + s + ' is curated and pushed onto ' + t + '.'
       : 'Migration: ' + s + ' can only be read: pick the target it migrates to.';
@@ -315,10 +323,14 @@
     return false;
   }
   function projectRename(pid, current) {
-    var name = window.prompt('Project name', current);
-    if (name === null) return;
-    name = name.trim();
-    if (!name || name === current) return;
+    gsNameModal('Rename Project', 'Project name', current, function (name) {
+      name = (name || '').trim();
+      if (!name || name === current) return true;
+      _projectRenameReq(pid, name);
+      return true;
+    });
+  }
+  function _projectRenameReq(pid, name) {
     fetch('/projects/' + pid + '/rename', {method: 'POST', headers: {'Content-Type': 'application/json'},
                                            body: JSON.stringify({name: name})})
       .then(function (r) { return r.json(); })
@@ -331,7 +343,7 @@
     confirmModal({
       title: 'Delete project "' + name + '"?',
       body: [decisions + ' edit(s) go with it (renames, zone bindings, rule settings, snapshots)',
-             'the devices and their imported data stay',
+             'the Devices and their imported data stay',
              'its push history stays, without a project'],
       confirmLabel: 'Delete project', danger: true
     }).then(function (ok) {

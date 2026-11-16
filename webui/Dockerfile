@@ -19,6 +19,12 @@ RUN apt-get update \
       "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-${TC_ARCH}" \
  && chmod +x /usr/local/bin/tailwindcss
 
+# pip comes from the base image and lags behind its own security
+# releases (12 advisories open in 25.0.1 on 2026-10-22). It is build
+# tooling, never run at runtime, but the install below goes through it,
+# so it is patched first.
+RUN pip install --no-cache-dir --upgrade pip
+
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 

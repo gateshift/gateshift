@@ -1,14 +1,14 @@
 {# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
 
 {% extends "base.html" %}
-{% set ws_nav = true %}{# version + logout live in the tree's foot, not the header #}
+{% set ws_nav = true %}{# the tree carries the brand, the version and Logout: no header bar (D33) #}
 {% from "_macros.html" import zone_badge, empty_hero %}
 {# Phase C: which states should mask each primary panel.
    Network/Objects do not need a successful generate - they read from the
    import / collector layer. Ruleset/Deploy depend on consolidated tables. #}
 {% set _hero_for_no_data         = empty_state in ('no_source_picked', 'no_data') %}
 {% set _hero_for_no_data_or_gen  = empty_state != 'ready' %}
-{% block title %}Rules - Gateshift{% endblock %}
+{% block title %}{% if selected_project %}{{ selected_project.name }} - {% endif %}Gateshift{% endblock %}
 {% block toolbar %}{% endblock %}
 {% block main_class %}{% endblock %}
 
@@ -43,9 +43,9 @@
 <div class="tag warn" style="display:flex;width:auto;margin:8px 20px;padding:10px 14px;border-radius:0;font-size:var(--fs-body);line-height:1.55;">
   <span style="font-weight:600;margin-right:6px;">Setup incomplete.</span>
   {% if not has_target_capable %}
-    Register at least one device: one with a supported vendor and API key will serve as push target.
+    Register at least one Device: one with a supported platform and an API key will serve as the push target.
   {% else %}
-    No source device registered yet.
+    No source Device registered yet.
   {% endif %}
   <a href="/projects" style="margin-left:8px;text-decoration:underline;color:var(--amber);">Go to Projects &rarr;</a>
 </div>
@@ -56,21 +56,26 @@
 <div class="ws-layout">
 {% with nav_mode='workspace' %}{% include "_ws_nav.html" %}{% endwith %}
   <div id="ws-main">
+    {# ── Page head (user request 2026-10-05, D33): the full menu path of the active
+         view on the left, built by _wsCrumbSync() from the marked nav items, and
+         the next step of the project in its box on the right (_ws_next.html, from
+         the header bar that pages with the tree no longer have). The manager scope
+         pickers follow on a row of their own (_ws_scopes.html). ── #}
+    <div class="ws-head">
+      <div id="ws-crumb" class="ws-crumb"></div>
+      {% include "_ws_next.html" %}
+    </div>
+    {% include "_ws_scopes.html" %}
     {# ── View hint (user request 2026-10-03): two to five sentences on what the
          active view is for and what you can do in it. Text per item in
-         _WS_HINTS, picked by _wsHintSync() from the active path; "hide" keeps
-         a slim "show hints" line (state in localStorage ws-hints). ── #}
-    {# ── Page head (user request 2026-10-05): the full menu path of the active
-         view, above the hint, so the page itself says where you are. Built by
-         _wsCrumbSync() from the same marked nav items the hint reads. ── #}
-    <div id="ws-crumb" class="ws-crumb"></div>
+         _WS_HINTS, picked by _wsHintSync() from the active path. The caption is
+         the light bulb and the box is always shown: Hide and Show Hints
+         went on 2026-11-10 (operator decision, D25). ── #}
     <div class="ws-top">
       <div id="ws-hint" class="ws-hint">
-        <div class="ws-hint-body"><span class="ws-hint-cap">What you can do here</span><span id="ws-hint-text"></span></div>
-        <button type="button" class="ws-hint-x" onclick="wsHints(false)" title="Hide these hints on every view">Hide</button>
-        <button type="button" class="ws-hint-show" onclick="wsHints(true)" title="Show the view hints again">Show Hints</button>
+        <div class="ws-hint-body"><span class="ws-hint-cap" title="What you can do here">&#8505;&#65039;</span><span id="ws-hint-text"></span></div>
       </div>
-      {# +Add Snapshot moved into the header, right of the project picker (block header_actions) #}
+      {# +Add Snapshot sits on the Overview's snapshot card (docs/UI_USABILITY_PLAN.md, D3) #}
     </div>
 
 <div id="agg-panel">
@@ -78,7 +83,6 @@
   {# ── Network sub-tab bar - token .seg pattern + fetch buttons on the right.
        Phase-4 removed Network>Zones; zone definitions + iface→zone bindings
        live in Enrichment > Zone Mapping. ── #}
-  {% set _routing_locked = false %}
   <div id="network-subtab-bar" style="gap:12px;">
     {# the tabs live in the navigation tree (U13); this row carries the actions #}
 
@@ -145,6 +149,10 @@
     <div id="primary-overview" class="hidden">
       {% include "_project_overview.html" %}
     </div>
+    {# ══ Logs panel (D31) - the project's jobs and their records; only with a project ══ #}
+    <div id="primary-log" class="hidden">
+      {% include "_project_log.html" %}
+    </div>
     {% endif %}
 
     {# ══ Network panel - Interfaces / Routing (VRFs + Static Routing) ══ #}
@@ -190,11 +198,11 @@
             {% elif selected_target %}
               <span style="color:var(--amber);opacity:0.85;">Target <span style="">{{ selected_target.platform | plat }}</span> doesn't expose network config via API.</span>
             {% else %}
-              <span style="color:var(--amber);opacity:0.85;">Pick a target device above to discover network config from it.</span>
+              <span style="color:var(--amber);opacity:0.85;">The target Device needs an API key to fetch its interfaces.</span>
             {% endif %}
             {% if _can_refetch_source %}
               <button type="button" id="btn-refetch-source" onclick="refetchFromSource()" class="btn"
-                      title="Reset interfaces, zones, VRFs and routes to the source device's current configuration, wipe-and-replace. User renames are lost.">
+                      title="Reset interfaces, zones, VRFs and routes to the source Device's current configuration, wipe-and-replace. User renames are lost.">
                 Reset
               </button>
             {% endif %}
@@ -710,12 +718,6 @@
               {% set _vr_members = _vr_members + (iface_zones | rejectattr('vr_name') | map(attribute='interface_name') | list) %}
               {% endif %}
               {% set _iface_names = _vr_members or _all_ifaces %}
-              {% if routing_locked %}
-              <div class="dash" style="padding:8px 0;font-size:var(--fs-body);">
-                Assign at least one interface IP in the <strong style="color:var(--tx);">Interfaces</strong> tab to enable connected-route auto-derivation.
-              </div>
-              {% endif %}
-
               {# ── Toolbar - Add + Bulk-Delete + Bulk-Change-Interface.
                    Selection state lives per-VR in window._routeSel so two
                    VRs don't fight over the same set. ── #}
@@ -914,7 +916,7 @@
         {% endfor %}
         {% if not vrfs_list %}
         <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-          No VRFs yet. A <code style="color:var(--tx);">default</code> VRF is auto-created when a device is registered.
+          No VRFs yet. A <code style="color:var(--tx);">default</code> VRF is auto-created when a Device is registered.
         </div>
         {% endif %}
       </div>
@@ -927,6 +929,18 @@
 
     {# ── Policy Routing (PBF) - agnostic route view (Phase 3) ── #}
     <div id="main-policy-routing" class="hidden">
+      {# Rules | Target Settings (D57, 2026-11-13): the PAN-OS fields of the policy routing rules sit
+         with the rules. The second button opens the enrichment pane (rulebase 'routing'), PAN-OS
+         target with an API key only. #}
+      {% set _pbf_target_bar = (not _right_locked) and selected_target and selected_target.platform == 'panw' %}
+      {% if _pbf_target_bar %}
+      <div class="gs-mode-bar" style="display:flex;align-items:center;padding:8px 20px;border-bottom:1px solid var(--line);background:var(--bg2);">
+        <div class="seg">
+          <button type="button" class="on" onclick="wsNav('network', null, 'policy-routing')">Rules</button>
+          <button type="button" onclick="wsNav('enrichment', 'routing')">Target Settings</button>
+        </div>
+      </div>
+      {% endif %}
       {% if not pbf_rules %}
         <div class="px-6 py-5 text-gray-500 text-xs">
           No policy routes imported.
@@ -996,7 +1010,7 @@
                 </td>
                 <td>
                   <select onchange="pbfEdit('{{ p.pbf_hash }}', 'egress_interface', this.value || null)" style="{{ _pbf_sel }}" {% if not _fwd or p.deleted %}disabled{% endif %} title="Egress interface (forward only)">
-                    <option value="">&mdash;</option>
+                    <option value="">-</option>
                     {% for i in _pbf_ifaces %}
                     <option value="{{ i.interface_name }}" {% if p.egress_interface == i.interface_name %}selected{% endif %}>{{ i.interface_name }}</option>
                     {% endfor %}
@@ -1006,7 +1020,7 @@
                   </select>
                 </td>
                 <td>
-                  <input type="text" value="{{ p.next_hop or '' }}" placeholder="&mdash;"
+                  <input type="text" value="{{ p.next_hop or '' }}" placeholder="-"
                          onchange="pbfEdit('{{ p.pbf_hash }}', 'next_hop', this.value || null)"
                          style="{{ _pbf_sel }}width:96px;" {% if not _fwd or p.deleted %}disabled{% endif %}>
                 </td>
@@ -1037,10 +1051,10 @@
          is pushed. ── #}
     <div id="main-vpn" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see VPN config.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform in ('panw', 'fortigate', 'checkpoint') %}
         {% if not vpn_tunnels %}
@@ -1081,6 +1095,18 @@
             <button onclick="vpnBulk('remove')" class="btn danger">Remove</button>
             <span id="vpn-sel-count" class="mut" style="font-size:var(--fs-body);margin-left:4px;">0 selected</span>
           </div>
+          {# Keys stored under a name no tunnel carries any more (docs/DEVICE_IDENTITY_PLAN.md,
+             one-way door 2): left behind by a rename on the source and a re-import under the
+             new name. A network push with a tunnel without a key is refused while one exists,
+             so they are listed here, each with its Discard. #}
+          {% if vpn_orphan_keys %}
+          <div id="vpn-orphan-keys" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px;font-size:var(--fs-body);">
+            <span class="dash" style="color:var(--amber);">(!) {{ vpn_orphan_keys|length }} stored pre-shared key(s) belong to no tunnel of this Device, a rename or re-import left them behind. Set the key on the renamed tunnel, then discard:</span>
+            {% for _ok in vpn_orphan_keys %}
+            <span style="white-space:nowrap;color:var(--tx);">{{ _ok.name }} <button data-orphan-did="{{ _ok.device_id }}" data-orphan-name="{{ _ok.name }}" onclick="vpnDiscardOrphanKey(this)" class="btn danger" title="Discard the key stored under this name">Discard</button></span>
+            {% endfor %}
+          </div>
+          {% endif %}
           <table id="vpn-table" style="width:100%;border-collapse:collapse;font-size:var(--fs-body);">
             <thead><tr style="text-align:left;color:var(--tx3);border-bottom:1px solid var(--line);">
               <th style="padding:6px 8px;text-align:center;width:28px;"><input type="checkbox" onclick="bulkSelectAll('vpn-table',this,'vpn-sel-count')" title="Select all (filtered)"></th>
@@ -1228,13 +1254,26 @@
     {% if _hero_for_no_data_or_gen %}
       {# named so switchMain can step it aside for the subs that live outside
          it (Decryption, Threat Prevention) #}
-      <div id="ruleset-hero">{{ empty_hero(empty_state, 'Firewall rules, NAT and policy routing') }}</div>
+      <div id="ruleset-hero">{{ empty_hero(empty_state, 'Firewall rules and NAT') }}</div>
     {% else %}
 
     {# ── NAT - editable list fragment (Phase C, project_nat_full_scope_plan).
          JS-glue (natStartRename, natToggleDisabled, natDelete, natBulkApply, …)
          lives further down in the script block. ── #}
     <div id="main-nat" class="hidden">
+      {# Rules | Target Settings (D57, 2026-11-13): the target's NAT fields per rule sit with the
+         ruleset, as Zones pairs Zones & Interfaces with Rule Mapping. The second button opens the
+         enrichment pane (primary 'enrichment', rulebase 'nat') and shows while a target with an
+         API key is usable. Each pane carries its own bar with its own button on. #}
+      {% set _nat_target_bar = (not _right_locked) and selected_target and selected_target.platform in ('panw', 'checkpoint', 'fortigate') %}
+      {% if _nat_target_bar %}
+      <div class="gs-mode-bar" style="display:flex;align-items:center;padding:8px 20px;border-bottom:1px solid var(--line);background:var(--bg2);">
+        <div class="seg">
+          <button type="button" class="on" onclick="wsNav('ruleset', null, 'nat')">Rules</button>
+          <button type="button" onclick="wsNav('enrichment', 'nat')">Target Settings</button>
+        </div>
+      </div>
+      {% endif %}
       <div class="px-6 py-4">
         {% with mode = 'editor' %}
         {% include "nat_rules_fragment.html" %}
@@ -1480,7 +1519,7 @@
       {% endif %}
       {% if ruleset_locked %}
       <div class="px-6 py-5 text-gray-500 text-xs">
-        No pipeline data yet. Run <strong>Ingest</strong> and <strong>Generate</strong> to build the ruleset.
+        No consolidated ruleset yet. It is built right after the import. If this stays, re-import the source Device on the Dashboard.
       </div>
       {% endif %}
     </div>{# end main-security #}
@@ -1502,10 +1541,10 @@
          target (ref-only). ── #}
     <div id="main-decryption" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see decryption config.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform in ('panw', 'checkpoint') %}
         {# PA/CP: the decryption RULEBASE. #}
@@ -1564,7 +1603,7 @@
               <th style="padding:6px 8px;">Action</th><th style="padding:6px 8px;">Type</th>
               <th style="padding:6px 8px;">Source</th><th style="padding:6px 8px;">Destination</th>
               <th style="padding:6px 8px;">Service</th><th style="padding:6px 8px;">URL Category</th>
-              <th style="padding:6px 8px;">Cert</th><th style="padding:6px 8px;text-align:center;">On</th>
+              <th style="padding:6px 8px;text-align:center;">On</th>
               <th style="padding:6px 8px;"></th></tr></thead>
             <tbody>
             {% for r in ssl_rules %}
@@ -1584,11 +1623,6 @@
                 <td style="padding:6px 8px;color:var(--tx2);">{{ (r.dst_zones + r.destinations)|join(', ') or 'any' }}</td>
                 <td style="padding:6px 8px;color:var(--tx2);">{{ r.services|join(', ') or 'any' }}</td>
                 <td style="padding:6px 8px;color:var(--tx2);">{{ r.url_categories|join(', ') or 'any' }}</td>
-                <td style="padding:6px 8px;">
-                  <input type="text" value="{{ r.cert_ref or '' }}" placeholder="-"
-                         onchange="sslEdit('{{ r.ssl_hash }}','cert_ref',this.value)" {% if r.deleted %}disabled{% endif %}
-                         class="inp" style="font-size:var(--fs-small);padding:3px 6px;width:120px;">
-                </td>
                 <td style="padding:6px 8px;text-align:center;">
                   <input type="checkbox" {% if not r.disabled %}checked{% endif %} {% if r.deleted %}disabled{% endif %}
                          onchange="sslEdit('{{ r.ssl_hash }}','disabled',!this.checked)" title="Enable / disable">
@@ -1609,8 +1643,8 @@
         {% endif %}
       {% elif selected_target.platform == 'fortigate' %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        FortiGate has no decryption rulebase: TLS inspection is a reusable
-        <strong style="color:var(--tx);">ssl-ssh-profile</strong> attached per security policy.
+        FortiGate has no decryption ruleset: TLS inspection is a reusable
+        <strong style="color:var(--tx);">ssl-ssh-profile</strong> attached per firewall policy.
         Attach an existing target profile under <em>UTM Profiles → SSL/SSH Inspection</em>.
       </div>
       {% else %}
@@ -1625,10 +1659,10 @@
          - same code path as Push, so the preview reflects what Deploy emits. ── #}
     <div id="main-tp" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see Threat-Prevention config.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform == 'checkpoint' %}
         <div style="padding:16px 20px;display:flex;flex-direction:column;gap:16px;">
@@ -1646,7 +1680,7 @@
             </select>
             {% if selected_device and selected_device.platform == 'checkpoint' and cp_tp_import_layers %}
             <select id="cp-tp-source-layer" class="inp hidden" style="font-size:var(--fs-body);padding:6px 10px;"
-                    title="Source TP layer to re-render (imported from the source device)">
+                    title="Source TP layer to re-render (imported from the source Device)">
               {% for l in cp_tp_import_layers %}
               <option value="{{ l.layer }}">{{ l.layer }} · {{ l.rules }} rule(s){% if l.exceptions %} + {{ l.exceptions }} exception(s){% endif %}</option>
               {% endfor %}
@@ -1715,7 +1749,7 @@
     {# ── Objects ── #}
     <div id="main-objects">
       {% if not objects.address and not objects.address_group and not objects.service and not objects.service_group %}
-        <div class="px-6 py-5 text-gray-500 text-xs">No objects available for this device.</div>
+        <div class="px-6 py-5 text-gray-500 text-xs">No objects available for this Device.</div>
       {% else %}
         {# the kind switcher lives in the navigation tree (U13) #}
         {# ── Addresses ── #}
@@ -2150,7 +2184,7 @@
            read-only catalog). ─────────────────────────────────── #}
       <div id="obj-url_category" class="hidden px-6 py-4">
         {% if not objects.url_category %}
-        <div class="dash" style="padding:8px 0;font-size:var(--fs-body);">No URL categories imported for this device.</div>
+        <div class="dash" style="padding:8px 0;font-size:var(--fs-body);">No URL categories imported for this Device.</div>
         {% else %}
         <table class="w-full text-xs obj-table">
           <thead>
@@ -2206,7 +2240,7 @@
            Edit path V2 (now read-only catalog). ──────────────── #}
       <div id="obj-schedule" class="hidden px-6 py-4">
         {% if not objects.schedule %}
-        <div class="dash" style="padding:8px 0;font-size:var(--fs-body);">No schedules imported for this device.</div>
+        <div class="dash" style="padding:8px 0;font-size:var(--fs-body);">No schedules imported for this Device.</div>
         {% else %}
         {# Filter (Unused / Dup Names) + delete, mirroring the service pane.
            A schedule still referenced by a rule's (effective) schedule field is
@@ -2339,10 +2373,10 @@
     {# ── Security Profiles - per-target catalog (PA today). ── #}
     <div id="main-security-profiles" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform == 'panw' %}
         <div style="padding:16px 20px;">
@@ -2410,10 +2444,10 @@
     {# ── Applications - per-target catalog (PA today; CP via separate panel) ── #}
     <div id="main-applications" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform == 'panw' %}
         <div style="padding:16px 20px;">
@@ -2442,7 +2476,7 @@
           <span class="dash" style="display:block;font-size:var(--fs-body);margin-bottom:10px;">
             Policy-based NGFW mode on the target: applications are matched per policy.
             Auto-assign takes a source application only when the FortiGuard catalog carries the same name,
-            everything else stays for you to pick here, the push declares what found no match.
+            everything else stays as imported, the push declares what found no match.
           </span>
           <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
             <span class="hdr-cap" style="white-space:nowrap;">Set Application</span>
@@ -2468,7 +2502,7 @@
           This FortiGate runs in <strong style="color:var(--tx);">profile-based</strong> NGFW mode{% if not selected_target.ngfw_mode %} (mode not read yet, a generate probes it){% endif %}:
           a policy matches no applications of its own, application control is the
           <strong style="color:var(--tx);">Application Control</strong> profile in UTM Profiles.
-          Per-policy applications need the box in policy-based NGFW mode.
+          Per-policy applications need the Device in policy-based NGFW mode.
         </div>
       {% elif selected_target.platform == 'checkpoint' %}
         <div style="padding:16px 20px;">
@@ -2492,10 +2526,10 @@
     {# ── UTM Profiles - Forti-only per-rule UTM slot overrides ── #}
     <div id="main-utm-profiles" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform == 'fortigate' %}
         <div style="padding:16px 20px;display:flex;flex-direction:column;gap:16px;">
@@ -2543,10 +2577,10 @@
          .btn Clear + .mut status. ── #}
     <div id="main-logging" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header (next to the source picker) to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform == 'panw' %}
         <div style="padding:16px 20px;">
@@ -2574,10 +2608,6 @@
         </div>
       {% elif selected_target.platform == 'checkpoint' %}
         <div style="padding:16px 20px;">
-          <span class="dash" style="display:block;margin-bottom:12px;font-size:var(--fs-body);">
-            CP rule-track: pick a track type and per-session/per-connection flags,
-            then apply to the selected rules. Default is <code style="color:var(--tx);">Log</code>.
-          </span>
           <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
             <select id="track-apply-type" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
               <option value="">- Pick track -</option>
@@ -2663,10 +2693,10 @@
          schedule (or none). ── #}
     <div id="main-schedule-enrichment" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header (next to the source picker) to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform not in ('panw', 'checkpoint', 'fortigate') %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
@@ -2677,17 +2707,18 @@
           <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
             <select id="schedule-apply-name" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
               <option value="">- Pick schedule -</option>
+              <option value="__none__">none (the rule runs always)</option>
               {% for s in objects.schedule %}
               <option value="{{ s.name }}">{{ s.name }}</option>
               {% endfor %}
             </select>
             <button onclick="applySchedule()" id="schedule-apply-btn" class="btn">Apply to Selection</button>
-            <button onclick="applySchedule(true)" class="btn">Clear</button>
+            <button onclick="applySchedule(true)" class="btn" title="Back to the imported schedule">Clear</button>
             <span id="schedule-apply-status" class="mut" style="font-size:var(--fs-body);margin-left:4px;"></span>
           </div>
           {% if not objects.schedule %}
           <div class="dash" style="margin-top:8px;font-size:var(--fs-small);font-style:italic;">
-            No schedules imported yet. Re-discover the source device to populate the catalog.
+            No schedules imported yet. Re-import the source Device to fill the catalog.
           </div>
           {% endif %}
         </div>
@@ -2697,10 +2728,10 @@
     {# ── Source-User Identity Enrichment (Phase 2.5) ── #}
     <div id="main-identity-enrichment" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform not in ('panw', 'checkpoint', 'fortigate') %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
@@ -2732,12 +2763,22 @@
          pa_* / cp_* / forti_* properties for push. ── #}
     <div id="main-nat-enrichment" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see vendor-specific NAT properties.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% else %}
+      {# the Target Settings side of Policies > NAT (D57): the same bar as the Rules pane #}
+      {% set _nat_target_bar = (not _right_locked) and selected_target and selected_target.platform in ('panw', 'checkpoint', 'fortigate') %}
+      {% if _nat_target_bar %}
+      <div class="gs-mode-bar" style="display:flex;align-items:center;padding:8px 20px;border-bottom:1px solid var(--line);background:var(--bg2);">
+        <div class="seg">
+          <button type="button" onclick="wsNav('ruleset', null, 'nat')">Rules</button>
+          <button type="button" class="on" onclick="wsNav('enrichment', 'nat')">Target Settings</button>
+        </div>
+      </div>
+      {% endif %}
       <div style="padding:16px 20px;">
         {% with mode = 'enrichment', nat_rules = nat_rules_enr %}
         {% include "nat_rules_fragment.html" %}
@@ -2750,11 +2791,21 @@
          + specials (source-user, symmetric-return) on selected policy-
          routes. Agnostic route lives in Network > Policy Routing. ── #}
     <div id="main-routing-enrichment" class="hidden">
+      {# the Target Settings side of Network > Policy Routing (D57): the same bar as the Rules pane #}
+      {% set _pbf_target_bar = (not _right_locked) and selected_target and selected_target.platform == 'panw' %}
+      {% if _pbf_target_bar %}
+      <div class="gs-mode-bar" style="display:flex;align-items:center;padding:8px 20px;border-bottom:1px solid var(--line);background:var(--bg2);">
+        <div class="seg">
+          <button type="button" onclick="wsNav('network', null, 'policy-routing')">Rules</button>
+          <button type="button" class="on" onclick="wsNav('enrichment', 'routing')">Target Settings</button>
+        </div>
+      </div>
+      {% endif %}
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target or selected_target.platform != 'panw' %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        These target settings are a PAN-OS concept (PBF carries source-user /
+        These settings are a PAN-OS concept (PBF carries source-user /
         application / symmetric-return). FortiGate policy routes have no such fields.
       </div>
       {% elif not pbf_rules %}
@@ -2818,10 +2869,10 @@
          rule-tags (object-level only), Forti has no tag concept. ── #}
     <div id="main-tags-enrichment" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to manage tags.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif selected_target.platform != 'panw' %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
@@ -2848,10 +2899,10 @@
          sub-tabs: Interfaces (foundation) and Rules (per-rule edits). ── #}
     <div id="main-zones-enrichment" class="hidden">
       {% if not selected_device %}
-      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No device selected.</div>
+      <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">No source Device in this view.</div>
       {% elif not selected_target %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
-        Pick a <strong style="color:var(--tx);">target device</strong> in the header to see vendor-specific features.
+        Not available for this project's target. The view needs a target Device whose platform supports it and that carries an API key.
       </div>
       {% elif target_zone_native %}
         {# Catalog (zones + ifaces) embedded server-side, consumed by JS below. #}
@@ -3074,7 +3125,7 @@
       <div style="padding:16px 20px;display:flex;flex-direction:column;gap:36px;">
         {# ── push, on top across both columns (user request 2026-10-04): the target configuration's
            state line (docs/DEPLOY_PAGE_DESIGN.md - it builds by itself, Rebuild is the escape hatch),
-           then the destination settings and the two strands. The history lives on the Overview. ── #}
+           then the destination settings and the two strands. The history lives in the Logs view (D31). ── #}
         <div>
           {# the section is named after the thing, the buttons are the acts on it;
              the tab's own name carries the verbs (user decision 2026-10-05) #}
@@ -3144,12 +3195,12 @@
       {% else %}
       <div class="empty" style="padding:24px 20px;text-align:left;color:var(--tx2);font-size:var(--fs-body);">
         {% if not selected_device %}
-          No source device selected.
+          No source Device in this view.
         {% elif not has_target_capable %}
-          No eligible deploy target. Register a device with a supported platform
-          and an API key under <strong style="color:var(--tx);">Devices</strong>.
+          Review &amp; Deploy needs a target Device with a supported platform and an
+          API key. Add the key in the Device's dialog on the Projects page.
         {% else %}
-          Pick a <strong style="color:var(--tx);">target device</strong> in the header to enable Review &amp; Deploy.
+          Open a project to review and deploy its target configuration.
         {% endif %}
       </div>
       {% endif %}
@@ -3388,8 +3439,7 @@
   :where(.gateshift-td:last-child) { border-right: 0; }
 </style>
 
-{# Shared activity-log widget (rows, step log, loader) - also used by the
-   Device Registry page. Defines _logStep/toggleHistJob/loadPushHistory. #}
+{# The step renderer of the push streams (_logStep). #}
 <script src="/static/gs-log.js?v={{ static_version or '0' }}"></script>
 <script src="/static/gs-backup.js?v={{ static_version or '0' }}"></script>
 
@@ -3428,16 +3478,21 @@
   var _targetPlatform = {{ (selected_target.platform if selected_target else None) | tojson }};
   // FortiGate only: the NGFW mode (pin or last probe) gates the per-policy application features
   var _targetNgfwMode = {{ (selected_target.get('ngfw_mode') if selected_target else None) | tojson }};
+  // Check Point only: the target is a virtual system (the install wording names it)
+  var _targetIsVs = {{ (selected_target.get('is_vs') if selected_target else False) | tojson }};
   var _targetHasApps = (_targetPlatform === 'panw' || _targetPlatform === 'checkpoint'
                         || (_targetPlatform === 'fortigate' && _targetNgfwMode === 'policy-based'));
   window._targetId = _targetId;
   window._targetPlatform = _targetPlatform;
   window._targetNgfwMode = _targetNgfwMode;
+  window._targetIsVs = !!_targetIsVs;
   // The project this page works in (P1.4) - the pair's decisions. Travels
   // as X-Gateshift-Project on every request (base.html), so a pair that
   // carries several projects writes into the one on screen.
   var _projectId = {{ (selected_project.id if selected_project else None) | tojson }};
   window._projectId = _projectId;
+  window._projectName = {{ (selected_project.name if selected_project else None) | tojson }};
+  window._gsNextStep = {{ (ov_progress.next if ov_progress else none) | tojson }};   // the recommended next step as rendered, the baseline for the pulse on change (D15)
   // the landing's tree follows the last opened project (U16)
   if (typeof _projectId === 'number') { try { document.cookie = 'gs_project=' + _projectId + ';path=/;max-age=31536000;SameSite=Lax'; } catch (e) { /* non-fatal */ } }
   // Push-dialog backup reminder (gs-backup.js): the target's label for the
@@ -3476,7 +3531,8 @@
     try {
       var p = localStorage.getItem('primary-tab');
       var s = (p === 'enrichment')
-        ? localStorage.getItem('enrichment-rulebase')
+        ? (localStorage.getItem('enrichment-rulebase') || 'access')
+          + ((localStorage.getItem('enrichment-rulebase') || 'access') === 'access' && typeof _currentMainSub !== 'undefined' && _currentMainSub ? ':' + _currentMainSub : '')
         : ((p === 'overview') ? null
            : (typeof _currentMainSub !== 'undefined' ? _currentMainSub : null));
       if (p && s) sessionStorage.setItem('tab-once', p + ':' + s);
@@ -3660,11 +3716,12 @@
     }
 
     if (val === '__rename__' || val === '__custom__') {
-      var newName = window.prompt('Rename interface "' + sourceName + '" to:', sourceName);
-      if (newName === null) { revert(); return; }
-      newName = newName.trim();
-      if (!newName || newName === sourceName) { revert(); return; }
-      rename(newName);
+      gsNameModal('Rename Interface', 'Name on the target', sourceName, function (newName) {
+        newName = (newName || '').trim();
+        if (!newName || newName === sourceName) { revert(); return true; }
+        rename(newName);
+        return true;
+      }, revert);
       return;
     }
 
@@ -4369,7 +4426,7 @@
   }
 
   // ── Column filters ──────────────────────────────────────────────
-  const filterState = { fname: '', fsrcz: '', fsrc: '', fiden: '', fdstz: '', fdst: '', fsvc: '', faction: '', fapp: '', flog: '', fprof: '', fsched: '', ftag: '', fgtag: '' };
+  const filterState = { fname: '', fsrcz: '', fsrc: '', fiden: '', fdstz: '', fdst: '', fsvc: '', faction: '', fapp: '', flog: '', fprof: '', fsched: '', ftag: '', fgtag: '', fusage: '' };
 
   // ── Rule selection (generic primitive for bulk actions) ─────────
   // Keyed on rhash (hex SHA1 of rule identity, see feedback_rule_identity_hash
@@ -4405,7 +4462,8 @@
         (!s.fprof   || (d.fprof || '').includes(s.fprof)) &&
         (!s.fsched  || (d.fsched || '').includes(s.fsched)) &&
         (!s.ftag    || (d.ftag || '').includes(s.ftag)) &&
-        (!s.fgtag   || (d.fgtag || '').includes(s.fgtag));
+        (!s.fgtag   || (d.fgtag || '').includes(s.fgtag)) &&
+        (!s.fusage  || (d.fusage || '').split(' ').indexOf(s.fusage) !== -1);   // the box counters' usage filter (docs/HIT_COUNTS_PLAN.md, D7)
       const isSelected = !!d.rid && sel.has(d.rid);
       const collapsed = row.classList.contains('group-collapsed');
 
@@ -4496,7 +4554,7 @@
     const status = document.getElementById('rules-bulk-status');
     confirmModal({
       title: 'Delete ' + rhashes.length + ' rule' + (rhashes.length === 1 ? '' : 's') + '?',
-      body: 'Deleted in this project: hidden here and never pushed. The device keeps the rules and other projects still see them. Restore them under Overview > Deleted in This Project.',
+      body: 'Please confirm. Rules can be restored from the project Overview.',
       confirmLabel: 'Delete',
       danger: true,
     }).then(function(ok) {
@@ -4536,7 +4594,7 @@
     const status = document.getElementById('rules-bulk-status');
     confirmModal({
       title: 'Disable ' + rhashes.length + ' rule' + (rhashes.length === 1 ? '' : 's') + '?',
-      body: 'The rules stay in the ruleset (greyed out) and are pushed as disabled. Re-enable any time via the rule editor.',
+      body: 'Please confirm. The rules can be enabled again in the ruleset.',
       confirmLabel: 'Disable',
     }).then(function(ok) {
       if (!ok) return;
@@ -4626,7 +4684,7 @@
     var cnt = document.getElementById('rules-shadow-count');
     var srcId = (typeof _deviceId === 'number') ? _deviceId : null;
     if (srcId === null) {
-      showToast('Select a source device first', 'warn');
+      showToast('Open a project first', 'warn');
       return;
     }
     if (cnt) cnt.textContent = '\u2026';
@@ -4648,8 +4706,20 @@
         : '';
       if (!d.count) {
         if (cnt) cnt.textContent = '0';
+        var sem = [];
+        if (!d.zones_in_match) sem.push('zoneless');
+        if (d.apps_in_match === 'none') sem.push('applications not matched');
+        if (d.apps_in_match === 'override') sem.push('only bound App-Sites matched');
+        if (d.no_cover) {
+          // 15b: nothing could have covered (every rule carries applications
+          // or application-default without resolvable applications), so the
+          // empty result is no clean bill and says why.
+          showToast(d.no_cover + (mute ? ' ' + mute + '.' : ''), 'warn');
+          _shadowChipTitle(d.no_cover);
+          return;
+        }
         showToast('No shadowed rules found'
-                  + (d.zones_in_match ? '' : ' (zoneless target semantics)')
+                  + (sem.length ? ' (target semantics: ' + sem.join(', ') + ')' : '')
                   + (mute ? '. ' + mute : ''), mute ? 'warn' : 'success');
         _shadowChipTitle(mute);
         return;
@@ -4857,12 +4927,11 @@
   }
 
   // ── Main tab switching ──────────────────────────────────────────
-  const _PRIMARY_TABS      = ['overview', 'network', 'ruleset', 'objects', 'enrichment', 'deploy'];
+  const _PRIMARY_TABS      = ['overview', 'network', 'ruleset', 'objects', 'enrichment', 'deploy', 'log'];   // 'log' since D31
   // the Review tab merged into Deploy (docs/DEPLOY_PAGE_DESIGN.md): old links, stored tabs and the
   // harness still say 'review' and land on the one page
   function _normTab(n) { return (n === 'review') ? 'deploy' : n; }
   // The members of the Configuration main tab (U11) - primaries that live in its strip.
-  const _CONFIG_TABS       = ['network', 'ruleset', 'objects', 'enrichment'];
   const _NETWORK_SUBS      = ['interfaces', 'routing', 'policy-routing', 'vpn'];
   // Enrichment is split by rulebase: Access · NAT · (PA) Policy Routing.
   // _ENRICHMENT_SUBS only lists the Access sub-sub-tabs; NAT and Policy
@@ -4896,7 +4965,7 @@
   // Per-primary memory of the last sub-tab so re-entering a primary lands
   // back where the user left it.
   function _subStorageKey(primary) { return 'sub-' + primary; }
-  // Sub-sub key for Rules > Security; remembers Zones/Accumulate/Grouping pick.
+  // Sub-sub key for Policies > Security; remembers Zones/Accumulate/Grouping pick.
   var _SECURITY_SUBSUB_KEY = 'subsub-security';
   var _currentMainSub = 'interfaces';
   var _currentSecuritySub = null;
@@ -4936,7 +5005,9 @@
     _autoGenTimer = setTimeout(function() {
       fetch('/run/status').then(function(r) { return r.json(); }).then(function(s) {
         if (s.running) return;
-        if (!s.needs_generate) {
+        // the stack-wide flag gates the dirty case only: a forced call comes from a source
+        // that was never generated (the fragment's empty state, D80) and runs regardless
+        if (!s.needs_generate && !force) {
           _NEEDS_GEN = false;
           return;
         }
@@ -4949,17 +5020,6 @@
   // The Configuration main tab (U11) opens on its leftmost member, Network -
   // or the first unlocked, visible one - as every primary lands on its
   // leftmost sub-tab.
-  function switchConfiguration() {
-    var cfgBtn = document.getElementById('primary-btn-configuration');
-    if (cfgBtn && cfgBtn.dataset.locked === 'true') {
-      showToast('Register a source and a target device first', 'info');
-      return;
-    }
-    for (var i = 0; i < _CONFIG_TABS.length; i++) {
-      var b = document.getElementById('primary-btn-' + _CONFIG_TABS[i]);
-      if (b && b.dataset.locked !== 'true' && b.style.display !== 'none') { switchPrimary(_CONFIG_TABS[i]); return; }
-    }
-  }
 
   // ── Navigation tree (U13) ───────────────────────────────────
   // wsNav chains the existing switches so any tree item works from anywhere;
@@ -4974,6 +5034,10 @@
     var want = document.getElementById('primary-btn-' + primary);
     if (want && want.dataset.locked === 'true') { switchPrimary(primary); return; }
     if (cur !== primary) switchPrimary(primary);
+    // the head of Profiles & Settings while its panel shows the zones leaf of Network (D28) or a
+    // Target Settings mode of NAT or Policy Routing (D57): the primary is already active, so land
+    // on the branch's own first leaf by hand (2026-11-10, 2026-11-13)
+    else if (primary === 'enrichment' && !rb && !sub && ((typeof _currentMainSub !== 'undefined' && _currentMainSub === 'zones-enrichment') || _wsTargetMode())) switchEnrichmentRulebase('access');
     if (rb) {
       var rbb = document.getElementById('enr-rb-btn-' + rb);
       if (!(rbb && rbb.classList.contains('on'))) switchEnrichmentRulebase(rb);
@@ -4982,12 +5046,20 @@
     if (obj && typeof switchObj === 'function') switchObj(obj);
     _wsNavSync();
   }
+  // The active path is the tree path (D28, 2026-11-10): the entry of the active
+  // panel and every group above it in the tree, whatever panel the entry opens
+  // (Zones sits under Network and opens a Target Settings panel). The breadcrumb
+  // and the hint read these marks.
   function _wsMark(nav, btnId) {
-    var b = document.getElementById(btnId); if (!b) return;
-    var li = b.closest('li'); if (!li) return;
+    var b = document.getElementById(btnId); if (!b) return false;
+    var li = b.closest('li'); if (!li) return false;
     li.classList.add('ws-cur');
     var p = li.parentElement;
-    while (p && p !== nav) { if (p.tagName === 'LI') p.classList.remove('folded'); p = p.parentElement; }
+    while (p && p !== nav) {
+      if (p.tagName === 'LI') { p.classList.remove('folded'); if (p.classList.contains('grp')) p.classList.add('ws-cur'); }
+      p = p.parentElement;
+    }
+    return true;
   }
   function _wsNavSync() {
     var nav = document.getElementById('ws-nav'); if (!nav) return;
@@ -4996,60 +5068,120 @@
     _PRIMARY_TABS.forEach(function (t) { var b = document.getElementById('primary-btn-' + t); if (b && b.classList.contains('active')) prim = t; });
     nav.querySelectorAll('.ws-rail-btn').forEach(function (b) {
       var r = b.getAttribute('data-rail');
-      b.classList.toggle('active', r === prim || (r === 'configuration' && _CONFIG_TABS.indexOf(prim) >= 0));
+      b.classList.toggle('active', r === prim);
     });
-    // Configure folds when you leave it and opens when you are in it (user
-    // request 2026-10-05): its state is derived here, never remembered.
-    var cfgBtn0 = document.getElementById('primary-btn-configuration');
-    if (cfgBtn0 && cfgBtn0.closest('li')) {
-      cfgBtn0.closest('li').classList.toggle('folded', _CONFIG_TABS.indexOf(prim) < 0);
-    }
-    if (!prim) { _wsHintSync(); return; }
-    _wsMark(nav, 'primary-btn-' + prim);
-    if (_CONFIG_TABS.indexOf(prim) >= 0) _wsMark(nav, 'primary-btn-configuration');
-    if (prim === 'network' || prim === 'ruleset') {
-      if (typeof _currentMainSub !== 'undefined' && _currentMainSub) _wsMark(nav, 'main-btn-' + _currentMainSub);
-    } else if (prim === 'objects') {
-      var ob = nav.querySelector('[id^="obj-btn-"].on'); if (ob) _wsMark(nav, ob.id);
-    } else if (prim === 'enrichment') {
+    // Every group folds unless the view is inside it (D12, the rule Configure
+    // had since 2026-10-05, D23): on every sync every group folds, _wsMark
+    // opens the active branch, wsNavNextOpen the branch of the recommended
+    // next step. Nothing folds by hand since the carets went (2026-11-10).
+    nav.querySelectorAll('li.grp').forEach(function (li) { li.classList.add('folded'); });
+    if (!prim) { if (window.wsNavNextOpen) wsNavNextOpen(); _wsHintSync(); return; }
+    // the entry of the active panel: a main sub, an object kind, a rulebase or its
+    // sub, else the primary itself. The path above it comes from the tree.
+    var sub = (typeof _currentMainSub !== 'undefined' && _currentMainSub) ? _currentMainSub : '';
+    var leaf = '';
+    if (prim === 'network' || prim === 'ruleset') { leaf = sub ? 'main-btn-' + sub : ''; }
+    else if (prim === 'objects') { var ob = nav.querySelector('[id^="obj-btn-"].on'); leaf = ob ? ob.id : ''; }
+    else if (prim === 'enrichment') {
       var rb = nav.querySelector('[id^="enr-rb-btn-"].on');
-      if (rb) {
-        _wsMark(nav, rb.id);
-        if (rb.id === 'enr-rb-btn-access' && typeof _currentMainSub !== 'undefined' && _currentMainSub) _wsMark(nav, 'main-btn-' + _currentMainSub);
-      }
+      // the NAT and policy routing settings sit with their rulesets (D57, 2026-11-13): the
+      // Target Settings pane marks the ruleset's leaf, its hint and crumb segment come from the mode
+      if (rb && rb.id === 'enr-rb-btn-nat') leaf = 'main-btn-nat';
+      else if (rb && rb.id === 'enr-rb-btn-routing') leaf = 'main-btn-policy-routing';
+      else if (rb) leaf = (rb.id === 'enr-rb-btn-access' && sub) ? 'main-btn-' + sub : rb.id;
     }
+    if (!leaf || !_wsMark(nav, leaf)) _wsMark(nav, 'primary-btn-' + prim);
+    if (window.wsNavNextOpen) wsNavNextOpen();
+    gsSeen(_wsSeenKey(prim, (typeof _currentMainSub !== 'undefined') ? _currentMainSub : ''));
     _wsHintSync();
   }
+  // The sections the step model counts as gone through once opened (D16):
+  // the view key per primary and sub view, reported once per page and
+  // project, the step model refreshed after the report.
+  var _WS_SEEN_NETWORK = {'routing': 'routing', 'policy-routing': 'pbf', 'vpn': 'vpn'};
+  var _WS_SEEN_RULESET = {'security': 'rules', 'nat': 'nat', 'decryption': 'ssl', 'tp': 'tp'};
+  // the views of Profiles & Settings, one step each (D62); the zones leaf reports 'zones' (D78):
+  // the mapping step wants one look at the bindings when the target uses zones or the source had none
+  var _WS_SEEN_ENRICHMENT = {'security-profiles': 'profiles', 'utm-profiles': 'profiles', 'applications': 'applications',
+                            'logging': 'logging', 'schedule-enrichment': 'schedule', 'identity-enrichment': 'identity',
+                            'tags-enrichment': 'tags', 'zones-enrichment': 'zones'};
+  function _wsSeenKey(prim, sub) {
+    if (prim === 'objects') return 'objects';
+    if (prim === 'enrichment') {
+      var mode = _wsTargetMode();   // the Target Settings modes are steps of their own (D57, D62)
+      if (mode === 'enr-rb-btn-nat') return 'nat_settings';
+      if (mode === 'enr-rb-btn-routing') return 'pbf_settings';
+      return _WS_SEEN_ENRICHMENT[sub] || '';
+    }
+    if (prim === 'network') return _WS_SEEN_NETWORK[sub] || '';
+    if (prim === 'ruleset') return _WS_SEEN_RULESET[sub] || '';
+    return '';
+  }
+  function gsSeen(key) {
+    if (!key || !window._projectId) return;
+    window._gsSeenViews = window._gsSeenViews || {};
+    if (window._gsSeenViews[key]) return;
+    window._gsSeenViews[key] = true;
+    fetch('/projects/' + window._projectId + '/seen', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({view: key})})
+      .then(function () { if (typeof gsProgressRefresh === 'function') gsProgressRefresh(); })
+      .catch(function () { delete window._gsSeenViews[key]; });
+  }
+  window.gsSeen = gsSeen;
+  // The skip of the recommended step and its undo (D20): the step reads
+  // skipped, the path moves on, the path dialog (Hint) offers to resume it.
+  function gsSkip(step, undo) {
+    if (!step || !window._projectId) return;
+    fetch('/projects/' + window._projectId + '/skip', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({step: step, undo: !!undo})})
+      .then(function () { if (typeof gsProgressRefresh === 'function') gsProgressRefresh(); })
+      .catch(function () { if (typeof gsProgressRefresh === 'function') gsProgressRefresh(); });
+  }
+  window.gsSkip = gsSkip;
   // The view hints: keyed by the deepest active item, falling back to its
   // rulebase, then its primary. Gateshift's own words: firewall rule, ruleset,
   // Device; nothing is translated between vendors.
+  {# the fallback ruleset is the PAN-OS driver's setting today (panw.py default_settings, the
+     checkbox in the settings block of Review & Deploy); FortiOS and Check Point are to follow
+     (operator 2026-11-13, CE backlog 24). The two sentences that name it show where the
+     checkbox is, without a platform name (D58 revised): widen this flag when the drivers land. #}
+  {% set _fallback_ruleset_target = selected_target and selected_target.platform == 'panw' %}
   var _WS_HINTS = {
-    'primary-btn-overview': "The project at a glance: devices, snapshots, log. Rename with the pencil.",
-    'main-btn-interfaces': "Interfaces as imported. Rename, bind zones, skip or add interfaces. Fetch the target's inventory. Create a new interface on the target and fetch again to make it available here.",
-    'main-btn-routing': "Virtual routers and static routes. Edit next hops and interfaces, drop routes the target should not carry.",
-    'main-btn-policy-routing': "Policy-based forwarding rules. Review, edit or disable them.",
-    'main-btn-security': "The firewall ruleset in source order. Disable rules, find shadowed ones, filter, open details.",
-    'main-btn-nat': "The NAT ruleset. Edit both sides and ports, disable rules. Review & Deploy names what the target cannot take.",
-    'primary-btn-objects': "Objects, groups, URL categories and schedules. Filter with the chips. Rename, merge or delete, device-wide.",
-    'primary-btn-enrichment': "What the target needs beyond the source, set per firewall rule from the target's own catalogues. A profile, zone or application you create on the target becomes selectable here once its catalog is read again.",
-    'main-btn-zones-enrichment': "Bind source zones and interfaces to the target's zones. This sets the zone columns of every rule. Create a zone on the target and fetch its inventory here to make it available.",
-    'main-btn-security-profiles': "Attach the target's security profiles to selected firewall rules. Create a new profile on the target, then Refresh Profiles here to make it available.",
-    'main-btn-applications': "Set the application match from the target's catalogue. Auto-assign derives it where an equivalent exists. A custom application created on the target becomes available after re-entering this view.",
-    'main-btn-utm-profiles': "Attach FortiOS UTM profiles to selected policies. Create a new UTM profile on the target and re-enter this view to make it available.",
-    'main-btn-logging': "Set logging per rule: at start, at end or none, and the log profile. Create a log-forwarding profile on the target, then Refresh Profiles here to make it available.",
-    'main-btn-schedule-enrichment': "Give rules a schedule from the imported schedule objects. The push creates them on the target.",
-    'main-btn-identity-enrichment': "Map user identity on rules, or drop it. Names are typed, not fetched: the identity has to exist on the target. A Check Point target needs it as an access role, so create it there and name it here.",
-    'main-btn-tags-enrichment': "Edit tags on rules and objects per selection.",
-    'enr-rb-btn-access': "Target settings for the firewall ruleset: pick a knob on the left.",
-    'enr-rb-btn-nat': "Target-specific NAT settings per rule.",
-    'enr-rb-btn-routing': "PAN-OS specifics of policy-based forwarding.",
-    'main-btn-tp': "Check Point threat prevention: generation mode, profile, layer and a preview. Create a profile or layer on the target and re-enter this view to make it available.",
-    'main-btn-decryption': "Decryption rules derived from the source: review, soft-delete, mind the forward-proxy certificate. Certificates are referenced by name: provision the CA on the target, and for a Check Point target fetch its url-category catalog here.",
-    'main-btn-vpn': "Site-to-site tunnels: set pre-shared keys and certificates, see what the target can express.",
-    'primary-btn-deploy': "Review the target configuration, check which findings are open, then push it in full or in picked scopes.",
+    'primary-btn-overview': "View the project's Devices and their counts, re-import a configuration, read hit counts from the source Device, manage snapshots and names.",
+    'main-btn-interfaces': "Rename interfaces and adjust their settings to fit the target. 'Fetch Target Interfaces' offers the target's names, 'Reset' restores the imported interfaces, zones and routes. The type of an interface can be changed: Layer 3, VLAN, Aggregate, Loopback or Tunnel.",
+    'main-btn-routing': "Review and adjust the static routes, virtual routers and VRFs. Deleting a virtual router moves its interfaces and routes to the default router, which cannot be deleted.",
+    'main-btn-policy-routing': "Review and adjust the policy routing rules.",
+    'main-btn-security': "The firewall ruleset in source order. Rename, reorder or disable rules, filter by any column or by hit counts, find shadowed rules.",
+    'main-btn-nat': "Review and adjust the NAT ruleset.",
+    'primary-btn-objects': "Clean up and manage addresses, services, URL categories and schedules. Filter with the chips, rename, merge or delete objects. Start with the groups: deleting an unused group frees its members.",
+    'primary-btn-enrichment': "Attach what the target needs beyond the source to selected rules: profiles, applications, logging, schedules, source users and tags. Zones sit under Network, NAT and policy routing settings with their rulesets. 'Refresh Profiles' reads the target's catalogues again.",
+    'main-btn-zones-enrichment': "Manage zones and attach or detach interfaces under 'Zones & Interfaces'. Under 'Rule Mapping' assign zones or interfaces to the rules, by 'Auto-derive' or manually.",
+    'main-btn-security-profiles': "Attach profile groups or single profiles to selected rules. New profiles and groups can be created on the target and fetched with 'Refresh Profiles'.",
+    'main-btn-applications': "'Auto-assign' matches the target's applications to selected rules.{% if _fallback_ruleset_target %} A fallback ruleset without applications can be appended under Review & Deploy.{% endif %}",
+    'main-btn-utm-profiles': "Attach UTM profiles to selected rules: antivirus, IPS, web filter, DNS filter, application control and SSL/SSH inspection. New profiles created on the FortiGate appear after a page reload, 'Clear' removes the profiles from selected rules.",
+    'main-btn-logging': "Add logging profiles and settings to selected rules. New profiles can be created on the target and fetched with 'Refresh Profiles'. 'Clear' resets selected rules to the target's default.",
+    'main-btn-schedule-enrichment': "Add schedules to selected rules. The schedules come with the source's import, the push creates them on the target. 'Clear' restores the imported schedule, 'none' removes it.",
+    'main-btn-identity-enrichment': "Add users or groups to selected rules by name, reset them to the import or remove them. Nothing is fetched: a Check Point target drops every name without an access role at push time, a rule left without a source is pushed as any.",
+    'main-btn-tags-enrichment': "Add tags or a group tag to selected rules, remove them or create a tag with its colour. The push creates the tags on the target, the objects' imported tags travel as they are.",
+    'enr-rb-btn-nat': "Adjust the NAT settings of selected rules to the target's capabilities.",
+    'enr-rb-btn-routing': "Set source user and symmetric return for selected rules. 'Clear' goes back to the import, application and service stay as imported.",
+    'main-btn-tp': "Pick the layer, profile, mode and track, then generate the preview. The push replaces the layer's rules with the preview, a project without a layer is pushed without threat prevention.",
+    'main-btn-decryption': "Review and adjust the decryption rules, HTTPS forward proxy only. On a Check Point target map the predefined URL categories to the target's. Forward-trust certificates have to be imported on the target Device.",
+    'main-btn-vpn': "Review and adjust site-to-site VPN tunnels. Set each tunnel's pre-shared key or upload its certificate, the import does not carry secrets. A tunnel without a key is pushed with a placeholder key and a warning, a certificate tunnel without its certificate stays declared, Review & Deploy lists both.",
+    'primary-btn-log': "Every import, build, push and collect of this project, newest first. Open a row for the record with its steps, a failed push shows which step failed and what the Device said. 'Refresh' reads the log again.",
+    'primary-btn-deploy': "Build the target configuration, review stats and configs, fix blocking issues and check the warnings and notes.{% if _fallback_ruleset_target %} Append a fallback ruleset for a smoother transition to application matching.{% endif %}",
   };
+  // The guide link at the end of the view hint (D10) went on 2026-11-10 (operator
+  // decision, CE backlog 22: help links deserve a place of their own, not the hint line).
   // The page head: the active view's menu path, from the same marked items the
   // hint reads (user request 2026-10-05). Labels go in as text, never markup.
+  // The Target Settings mode of Policies > NAT and Network > Policy Routing (D57): the
+  // enrichment rulebase whose pane is open while its leaf is the ruleset's. Empty otherwise.
+  function _wsTargetMode() {
+    var pe = document.getElementById('primary-btn-enrichment');
+    if (!pe || !pe.classList.contains('active')) return '';
+    var rb = document.querySelector('#ws-nav [id^="enr-rb-btn-"].on');
+    if (rb && (rb.id === 'enr-rb-btn-nat' || rb.id === 'enr-rb-btn-routing')) return rb.id;
+    return '';
+  }
   function _wsCrumbSync() {
     var el = document.getElementById('ws-crumb'); if (!el) return;
     var nav = document.getElementById('ws-nav');
@@ -5062,8 +5194,17 @@
         if (t) parts.push(t);
       });
     }
+    // the Target Settings mode of NAT and Policy Routing reads as a segment of its own (D57),
+    // the tab title keeps the leaf
+    var titleLeaf = parts.length ? parts[parts.length - 1] : '';
+    if (_wsTargetMode() && parts.length) parts.push('Target Settings');
     el.textContent = '';
     el.style.display = parts.length ? '' : 'none';
+    // the browser tab names the view and the project (docs/UI_USABILITY_PLAN.md, D5)
+    try {
+      document.title = (titleLeaf ? titleLeaf + ' - ' : '')
+        + (window._projectName ? window._projectName + ' - ' : '') + 'Gateshift';
+    } catch (e) {}
     parts.forEach(function (p, i) {
       if (i) {
         var s = document.createElement('span');
@@ -5081,7 +5222,7 @@
     var box = document.getElementById('ws-hint'); if (!box) return;
     var nav = document.getElementById('ws-nav'); if (!nav) return;
     var cur = nav.querySelectorAll('li.ws-cur > .ws-row > .ws-item');
-    var text = '';
+    var text = _WS_HINTS[_wsTargetMode()] || '';   // the Target Settings mode has its own hint (D57)
     for (var i = cur.length - 1; i >= 0 && !text; i--) {
       var id = cur[i].id;
       if (/^obj-btn-/.test(id)) id = 'primary-btn-objects';
@@ -5089,10 +5230,8 @@
     }
     var t = document.getElementById('ws-hint-text'); if (t) t.textContent = text;
     box.style.display = text ? '' : 'none';
-    var off = false; try { off = localStorage.getItem('ws-hints') === 'off'; } catch (e) {}
-    box.classList.toggle('off', off);
   }
-  // wsFold / wsRail / wsHints live in _ws_nav.html (shared with the project list)
+  // wsRail / wsNavNextOpen live in _ws_nav.html (shared with the project list)
   window.wsNav = wsNav;
 
   function switchPrimary(name) {
@@ -5109,9 +5248,9 @@
     if (btn && btn.dataset.locked === 'true') {
       var msg = '';
       if (window._gateLocked) {
-        msg = 'Register a source and a target device first';
+        msg = 'Register a source and a target Device first';
       } else if (name === 'deploy') {
-        msg = 'Review & Deploy requires at least one eligible target device (with API key and supported platform)';
+        msg = 'Review & Deploy needs a target Device with an API key and a supported platform';
       }
       if (msg) showToast(msg, 'info');
       return;
@@ -5130,13 +5269,7 @@
 
     // Show only the sub-tab bar for the active primary (network/enrichment/
     // ruleset/organization), hide all when on objects/deploy (no sub-tabs).
-    // Configuration (U11): the group tab lights up and its strip shows
-    // whenever one of its members is the active primary.
-    var _inCfg = _CONFIG_TABS.indexOf(name) >= 0;
-    var cfgBtn = document.getElementById('primary-btn-configuration');
-    if (cfgBtn) cfgBtn.classList.toggle('active', _inCfg);
-    var cfgBar = document.getElementById('configuration-subtab-bar');
-    if (cfgBar) cfgBar.classList.toggle('hidden', !_inCfg);
+    // The Configure group went on 2026-11-10 (D26): the areas are top-level.
 
     var netBar = document.getElementById('network-subtab-bar');
     var rbBar  = document.getElementById('enrichment-rulebase-bar');
@@ -5177,6 +5310,8 @@
       // Enrichment always lands on its LEFTMOST rulebase (Access), not the
       // last-picked one - consistent with the other primary tabs.
       switchEnrichmentRulebase('access');
+    } else if (name === 'log') {
+      if (window.ovLoadLog) ovLoadLog();   // the log reads again on every entry (D31)
     }
 
     // Rules section visibility is finalized by switchMain (and switchZoneEnrSub
@@ -5184,7 +5319,7 @@
     // (objects, deploy, organization) we explicitly hide here - switchMain
     // won't run to clean up otherwise.
     var rulesSection = document.getElementById('rules-section');
-    if (rulesSection && (name === 'objects' || name === 'deploy' || name === 'overview')) {
+    if (rulesSection && (name === 'objects' || name === 'deploy' || name === 'overview' || name === 'log')) {
       rulesSection.classList.add('hidden');
     }
 
@@ -5333,8 +5468,17 @@
       if (accessSubBar) accessSubBar.classList.remove('hidden');
       if (natPane) natPane.classList.add('hidden');
       if (routingPane) routingPane.classList.add('hidden');
-      // Always land on the leftmost access sub-sub-tab (Zone Mapping).
-      var savedSub = 'zones-enrichment';
+      // Land on the first entry of the Profiles & Settings branch: Zones sits under Network
+      // since D28, so the head of the branch opens its own first leaf (found 2026-11-10:
+      // the head landed on the zones panel, the path read Network > Zones and the
+      // branch stayed folded). The zones panel stays the fallback without any other.
+      var savedSub = '';
+      for (var j0 = 0; j0 < _ENRICHMENT_SUBS.length; j0++) {
+        if (_ENRICHMENT_SUBS[j0] === 'zones-enrichment') continue;
+        var b0 = document.getElementById('main-btn-' + _ENRICHMENT_SUBS[j0]);
+        if (b0 && b0.dataset.locked !== 'true') { savedSub = _ENRICHMENT_SUBS[j0]; break; }
+      }
+      if (!savedSub) savedSub = 'zones-enrichment';
       var savedBtn = document.getElementById('main-btn-' + savedSub);
       if (!savedBtn) {
         for (var j = 0; j < _ENRICHMENT_SUBS.length; j++) {
@@ -5395,10 +5539,8 @@
     // Enforce tab locks
     var btn = document.getElementById('main-btn-' + name);
     if (btn && btn.dataset.locked === 'true') {
-      var msg = (name === 'routing')
-        ? 'Routing is Gaia-managed for Check Point, not pushed by Gateshift'
-        : (name === 'security')
-        ? 'No rule data yet: (re)import this device’s config (Ingest + Generate). A parent/container device-group may simply have no rules of its own.'
+      var msg = (name === 'security')
+        ? 'No rule data yet: re-import the source Device on the Dashboard. A parent device group may simply have no rules of its own.'
         : 'Complete Interfaces (IP + Zone) and Routing to unlock this tab';
       showToast(msg, 'info');
       return;
@@ -5476,23 +5618,30 @@
 
     // Enrichment sub-tabs auto-fetch their target catalogs on entry.
     // force=false means cache wins - no network call when already fetched.
+    // The loaders use base.html's helpers (fetchWithTimeout, the overlay, the toasts),
+    // which are defined after the content block: when the start-up restore enters
+    // such a pane the fetch waits for the document (D47, 2026-11-12). Before that a
+    // reload into Profiles & Settings threw here and the start-up script stopped.
+    var _onReady = function (fn) {
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn); else fn();
+    };
     if (name === 'security-profiles' && _targetPlatform === 'panw'
         && typeof loadPanwSecurityProfiles === 'function') {
-      loadPanwSecurityProfiles(false);
+      _onReady(function () { loadPanwSecurityProfiles(false); });
     }
-    // CP TP-Layers load on entering Rules > Threat Prevention: see the
+    // CP TP-Layers load on entering Policies > Threat Prevention: see the
     // name === 'tp' branch below.
     if (name === 'applications'
         && (_targetPlatform === 'panw' || (_targetPlatform === 'fortigate' && _targetNgfwMode === 'policy-based'))
         && typeof loadPanwApplications === 'function') {
-      loadPanwApplications(false);
+      _onReady(function () { loadPanwApplications(false); });
     } else if (name === 'logging' && _targetPlatform === 'panw'
                && typeof loadPanwLogForwarding === 'function') {
-      loadPanwLogForwarding(false);
+      _onReady(function () { loadPanwLogForwarding(false); });
     }
     if (name === 'utm-profiles' && _targetPlatform === 'fortigate'
         && typeof loadFortiUtmProfiles === 'function') {
-      loadFortiUtmProfiles(false);
+      _onReady(function () { loadFortiUtmProfiles(false); });
     }
     if (name === 'identity-enrichment'
         && typeof _identityOpHint === 'function') {
@@ -5501,14 +5650,14 @@
     // Decryption and Threat Prevention came from the enrichment rulebases
     // (CE backlog 6) and keep the catalog fetches they had on entry there.
     if (name === 'decryption' && typeof loadCpUrlCategoryMap === 'function') {
-      loadCpUrlCategoryMap();
+      _onReady(function () { loadCpUrlCategoryMap(); });
     }
     if (name === 'tp' && _targetPlatform === 'checkpoint'
         && typeof loadCheckpointThreatLayers === 'function') {
-      loadCheckpointThreatLayers();
-      if (typeof loadCheckpointThreatProfiles === 'function') {
-        loadCheckpointThreatProfiles();
-      }
+      _onReady(function () {
+        loadCheckpointThreatLayers();
+        if (typeof loadCheckpointThreatProfiles === 'function') loadCheckpointThreatProfiles();
+      });
     }
     // VPN under Network: both pipeline hooks follow the SUB, because the other
     // Network subs edit the network strand directly and deliberately leave the
@@ -5537,7 +5686,7 @@
     if (grp2) localStorage.setItem(_subStorageKey(grp2), name);
   }
 
-  // Sub-sub-tab handler for Rules > Security. Activates one of
+  // Sub-sub-tab handler for Policies > Security. Activates one of
   // {rule-accumulate, rule-grouping}, keeping the Security parent tab
   // highlighted. The rules table stays visible across both.
   function switchSecuritySub(name) {
@@ -5617,8 +5766,10 @@
     localStorage.setItem('zone-enr-sub', name);
     // Entering Rule Mapping shows pipeline-derived rows - auto-regen if the
     // pipeline is dirty, same as the main tab switcher (else the user has to
-    // click the "outdated - click to refresh" banner by hand).
-    if (name === 'rules') _maybeRunGenerate(true);
+    // click the "outdated - click to refresh" banner by hand). Dirty-gated like
+    // every switcher (D89): a forced run here met the reload after the run and
+    // looped, the one forced call is the never-generated fragment (D80).
+    if (name === 'rules') _maybeRunGenerate();
   }
 
   // ── Zone-Section (Enrichment > Zone Mapping > Interfaces): CRUD + Bulk ──
@@ -5681,6 +5832,7 @@
     if (!row) { console.warn('zoneShowAddRow: zone-add-row not in DOM'); return; }
     row.classList.remove('hidden');
     row.style.display = '';   // belt-and-suspenders: clear any inline display:none
+    if (row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });   // the button sits above the table (D42)
     var input = document.getElementById('zone-add-name');
     if (input) { input.value = ''; input.focus(); }
     var err = document.getElementById('zone-add-err'); if (err) err.textContent = '';
@@ -5717,7 +5869,7 @@
     var name = (input.value || '').trim();
     if (!name) return;
     var did = _zoneSourceDeviceId();
-    if (!did) { showToast('No source device', 'error'); return; }
+    if (!did) { showToast('No source Device', 'error'); return; }
     fetch('/zones/add', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device_id: parseInt(did, 10), name: name})
@@ -5844,8 +5996,9 @@
 
   // ── Delete ──────────────────────────────────────────────────────
   function zoneDelete(zoneId, name) {
-    if (!confirm('Delete zone "' + name + '"?')) return;
-    _zoneDeleteReq(zoneId, name, false);
+    confirmModal({title: 'Delete Zone', body: 'Delete zone "' + name + '"?', confirmLabel: 'Delete', danger: true}).then(function (ok) {
+      if (ok) _zoneDeleteReq(zoneId, name, false);
+    });
   }
   function _zoneDeleteReq(zoneId, name, cascade) {
     fetch('/zones/' + zoneId + '/delete?net_did=' + (window._netDid || '')
@@ -5857,10 +6010,9 @@
           // the zone's member interfaces, release the members, delete.
           if (res.status === 409 && !cascade && res.body && res.body.cascade_available) {
             var members = (res.body.member_interfaces || []).join(', ');
-            if (confirm((res.body.error || '') + '\n\nReplace the rule references with the '
-                        + 'member interface(s) [' + members + '] and delete the zone?')) {
-              _zoneDeleteReq(zoneId, name, true);
-            }
+            confirmModal({title: 'Delete Zone', body: [(res.body.error || ''), 'Replace the rule references with the member interface(s) [' + members + '] and delete the zone?'], confirmLabel: 'Delete', danger: true}).then(function (ok) {
+              if (ok) _zoneDeleteReq(zoneId, name, true);
+            });
             return;
           }
           showToast((res.body && res.body.error) || ('HTTP ' + res.status), 'error'); return;
@@ -6092,7 +6244,7 @@
     var name = (document.getElementById('tag-add-name').value || '').trim();
     if (!name) return;
     var did = _tagSourceDeviceId();
-    if (!did) { showToast('No source device', 'error'); return; }
+    if (!did) { showToast('No source Device', 'error'); return; }
     var props = {};
     document.querySelectorAll('[id^="tag-add-"]').forEach(function(el) {
       var k = el.id.substring(8); // strip 'tag-add-'
@@ -6125,7 +6277,11 @@
     });
   }
   function tagDelete(id, name) {
-    if (!confirm('Delete tag "' + name + '"?')) return;
+    confirmModal({title: 'Delete Tag', body: 'Delete tag "' + name + '"?', confirmLabel: 'Delete', danger: true}).then(function (ok) {
+      if (ok) _tagDeleteReq(id, name);
+    });
+  }
+  function _tagDeleteReq(id, name) {
     fetch('/tags/' + id + '/delete', { method: 'POST' })
       .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
       .then(function(res) {
@@ -6227,7 +6383,7 @@
     if (!name) { setStatus('Name required', true); return; }
     var section = document.getElementById('tags-section-fragment');
     var did = section ? section.dataset.sourceDeviceId : '';
-    if (!did) { setStatus('No source device', true); return; }
+    if (!did) { setStatus('No source Device', true); return; }
     var props = {};
     document.querySelectorAll('[id^="tag-new-"]').forEach(function(el) {
       var key = el.id.substring('tag-new-'.length);
@@ -6308,7 +6464,7 @@
     var desc = (document.getElementById('nat-add-desc').value || '').trim();
     if (!name) return;
     var did = _natSourceDeviceId();
-    if (!did) { showToast('No source device', 'error'); return; }
+    if (!did) { showToast('No source Device', 'error'); return; }
     fetch('/nat-rules/add', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -6419,7 +6575,11 @@
 
   // ── Delete ──────────────────────────────────────────────────────
   function natDelete(nid, name) {
-    if (!confirm('Delete NAT-rule "' + name + '"?')) return;
+    confirmModal({title: 'Delete NAT Rule', body: 'Delete NAT rule "' + name + '"?', confirmLabel: 'Delete', danger: true}).then(function (ok) {
+      if (ok) _natDeleteReq(nid, name);
+    });
+  }
+  function _natDeleteReq(nid, name) {
     fetch('/nat-rules/' + nid + '/delete', { method: 'POST' })
       .then(function(r) { return r.json().then(function(j){return {ok:r.ok, status:r.status, body:j};}); })
       .then(function(res) {
@@ -6521,7 +6681,11 @@
   }
   function natBulkDelete() {
     if (_natSel.size === 0) return;
-    if (!confirm('Delete ' + _natSel.size + ' NAT-rule(s)?')) return;
+    confirmModal({title: 'Delete NAT Rules', body: 'Delete ' + _natSel.size + ' NAT rule(s)?', confirmLabel: 'Delete', danger: true}).then(function (ok) {
+      if (ok) _natBulkDeleteReq();
+    });
+  }
+  function _natBulkDeleteReq() {
     var ids = Array.from(_natSel);
     var todo = ids.length;
     var done = 0; var failed = 0;
@@ -7142,7 +7306,7 @@
     var name  = row.querySelector('.obj-name').textContent.trim();
     confirmModal({
       title: 'Delete object?',
-      body: [name, 'Deleted in this project: hidden here and never pushed. The device keeps it and other projects still see it. Restore it under Overview > Deleted in This Project.'],
+      body: [name, 'Please confirm. Objects can be restored from the project Overview.'],
       confirmLabel: 'Delete',
       danger: true,
     }).then(function(ok) {
@@ -7306,7 +7470,7 @@
     var menu = document.querySelector('[data-obj-action-menu="' + kind + '"]');
     if (menu) menu.classList.add('hidden');
     var did = window._deviceId;
-    if (!did) { showToast('No device selected', 'error'); return; }
+    if (!did) { showToast('No Device selected', 'error'); return; }
     var sel = _collectSelection(kind);
     if (!sel.length) { showToast('Select at least 1 row first', 'warn'); return; }
     var items = sel.map(function(s) { return {kind: kind, id: s.id}; });
@@ -7331,7 +7495,7 @@
       var shown = rs.slice(0, 3).map(_esc).join('; ');
       var more = rs.length > 3 ? ' (+' + (rs.length - 3) + ' more)' : '';
       return '<li><span class="font-mono text-gray-200">' + _esc(b.name) + '</span>'
-           + ' <span class="text-gray-500">&mdash; ' + shown + more + '</span></li>';
+           + ': <span class="text-gray-500">' + shown + more + '</span></li>';
     }).join('');
     var overlay = document.createElement('div');
     overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60';
@@ -7344,11 +7508,11 @@
       +   (blocked.length ? ', <span class="text-amber-400">' + blocked.length + '</span> blocked' : '')
       +   '. References in rules / groups / NAT are removed too.</p>'
       + (blocked.length
-          ? '<div class="mb-3"><p class="text-amber-400 text-[11px] mb-1">Blocked (still required &mdash; deleting would empty a rule field or group):</p>'
+          ? '<div class="mb-3"><p class="text-amber-400 text-[11px] mb-1">Blocked (still required, deleting would empty a rule field or group):</p>'
             + '<ul class="text-[11px] space-y-0.5 list-disc list-inside text-gray-400 max-h-40 overflow-y-auto">' + blockedHtml + '</ul></div>'
           : '')
       + (deletable.length === 0
-          ? '<p class="text-amber-400 text-[11px] mb-3">Nothing to delete &mdash; every selected object is blocked.</p>'
+          ? '<p class="text-amber-400 text-[11px] mb-3">Nothing to delete: every selected object is blocked.</p>'
           : '')
       + '<div class="flex justify-end gap-2">'
       +   '<button type="button" data-del-cancel class="btn">Cancel</button>'
@@ -7470,7 +7634,7 @@
 
   function _renderMergeDialog(kind, variant, bz) {
     var did = window._deviceId;
-    if (!did) { showToast('No device selected', 'error'); return; }
+    if (!did) { showToast('No Device selected', 'error'); return; }
 
     // Build initial buckets payload for dry_run (server returns counters).
     var bucketsForPost = bz.buckets.map(function(b) {
@@ -7487,16 +7651,16 @@
     overlay.innerHTML =
       '<div class="bg-gray-900 border border-gray-700 rounded-lg p-5 max-w-2xl w-full mx-4 shadow-xl max-h-[80vh] overflow-y-auto">'
       + '<p class="text-gray-200 text-sm font-medium mb-2">' + title
-      +   ' &mdash; <span class="text-gray-500">' + (bz.buckets.length) + ' bucket'
+      +   ', <span class="text-gray-500">' + (bz.buckets.length) + ' bucket'
       +   (bz.buckets.length !== 1 ? 's' : '') + '</span></p>'
       + '<div id="merge-buckets" class="text-xs space-y-3 mb-3"></div>'
       + (bz.unmerged.length
           ? '<p class="text-gray-500 text-[11px] mb-2 italic">'
             + bz.unmerged.length + ' row' + (bz.unmerged.length !== 1 ? 's have' : ' has')
-            + ' no merge partner &mdash; will be left untouched.</p>'
+            + ' no merge partner, will be left untouched.</p>'
           : '')
       + (emptyAction
-          ? '<p class="text-amber-400 text-[11px] mb-3">Selection has no merge candidates for this option &mdash; try a different filter or merge variant.</p>'
+          ? '<p class="text-amber-400 text-[11px] mb-3">Selection has no merge candidates for this option: try a different filter or merge variant.</p>'
           : '')
       + '<p id="merge-counters" class="text-gray-500 text-[11px] mb-3">Computing &hellip;</p>'
       + '<div class="flex justify-end gap-2">'
@@ -7614,7 +7778,7 @@
           '<span class="text-gray-400">Refs to be rewritten:</span> '
           + '<span class="text-gray-200">' + d.refs_rewritten + ' reference'
           + (d.refs_rewritten !== 1 ? 's' : '') + '</span> '
-          + '<span class="text-gray-500">(rules / groups / NAT / PBF)</span>';
+          + '<span class="text-gray-500">(rules / groups / NAT / policy routing)</span>';
       })
       .catch(function(err) {
         if (counterEl) counterEl.innerHTML = '<span class="text-red-400">Preview failed: ' + err + '</span>';
@@ -7658,7 +7822,7 @@
 
   function _renderResolveDialog(kind, bz) {
     var did = window._deviceId;
-    if (!did) { showToast('No device selected', 'error'); return; }
+    if (!did) { showToast('No Device selected', 'error'); return; }
 
     var bucketsForPost = bz.buckets.map(function(b) {
       var losers = b.items.filter(function(it) { return it.id !== b.winner_id; })
@@ -7673,7 +7837,7 @@
     overlay.innerHTML =
       '<div class="bg-gray-900 border border-gray-700 rounded-lg p-5 max-w-2xl w-full mx-4 shadow-xl max-h-[80vh] overflow-y-auto">'
       + '<p class="text-gray-200 text-sm font-medium mb-2">Resolve Name Conflict'
-      +   ' &mdash; <span class="text-gray-500">' + (bz.buckets.length) + ' bucket'
+      +   ', <span class="text-gray-500">' + (bz.buckets.length) + ' bucket'
       +   (bz.buckets.length !== 1 ? 's' : '') + '</span></p>'
       + '<p class="text-gray-500 text-[11px] mb-3 italic">'
       +   'Pick one row per name. The others are deleted. Refs in rules/groups/NAT '
@@ -7682,10 +7846,10 @@
       + (bz.unmerged.length
           ? '<p class="text-gray-500 text-[11px] mb-2 italic">'
             + bz.unmerged.length + ' row' + (bz.unmerged.length !== 1 ? 's have' : ' has')
-            + ' no name-conflict partner &mdash; will be left untouched.</p>'
+            + ' no name-conflict partner, will be left untouched.</p>'
           : '')
       + (emptyAction
-          ? '<p class="text-amber-400 text-[11px] mb-3">Selection has no same-name conflicts &mdash; try a different filter.</p>'
+          ? '<p class="text-amber-400 text-[11px] mb-3">Selection has no same-name conflicts: try a different filter.</p>'
           : '')
       + '<p id="resolve-counters" class="text-gray-500 text-[11px] mb-3">Computing &hellip;</p>'
       + '<div class="flex justify-end gap-2">'
@@ -7783,7 +7947,7 @@
     b.items.forEach(function(it) { if (it.id === b.winner_id) winner = it; });
     var hasImport = b.items.some(function(it) { return it.source === 'import'; });
     if (winner && winner.source === 'auto' && hasImport) {
-      warn.textContent = 'Winner is an auto row \u2014 next auto-regenerate may rename it (value-derived). Prefer an imported row.';
+      warn.textContent = 'Winner is an auto row: the next auto-regenerate may rename it (value-derived). Prefer an imported row.';
       warn.classList.remove('hidden');
     } else {
       warn.textContent = '';
@@ -7857,7 +8021,7 @@
 
   function _renderSanitizeDialog(kind, selection) {
     var did = window._deviceId;
-    if (!did) { showToast('No device selected', 'error'); return; }
+    if (!did) { showToast('No Device selected', 'error'); return; }
     var groupIds = selection.map(function(s) { return s.id; });
 
     var overlay = document.createElement('div');
@@ -7868,12 +8032,12 @@
         + 'Imported object-rows are not touched (only the group&apos;s members list). '
         + 'Use Merge by Value for <em>different</em> member-names pointing to the same value.'
       : 'Removes literal-duplicate member-refs from each group&apos;s members array. '
-        + 'Pure dedup &mdash; no object-rows are touched. Use Merge by Value for '
+        + 'Pure dedup: no object rows are touched. Use Merge by Value for '
         + '<em>different</em> member-names that point to the same value.';
     overlay.innerHTML =
       '<div class="bg-gray-900 border border-gray-700 rounded-lg p-5 max-w-2xl w-full mx-4 shadow-xl max-h-[80vh] overflow-y-auto">'
       + '<p class="text-gray-200 text-sm font-medium mb-2">Sanitize Group Members'
-      +   ' &mdash; <span class="text-gray-500">' + selection.length + ' group'
+      +   ', <span class="text-gray-500">' + selection.length + ' group'
       +   (selection.length !== 1 ? 's' : '') + ' selected</span></p>'
       + '<p class="text-gray-500 text-[11px] mb-3 italic">' + introText + '</p>'
       + '<div id="sanitize-rows" class="text-xs space-y-2 mb-3"></div>'
@@ -7953,12 +8117,12 @@
           if (g.error) {
             return '<div class="border border-red-700/40 rounded p-2">'
               + '<p class="text-red-400">' + _esc(g.name || ('id ' + g.id))
-              + ' &mdash; error: ' + _esc(g.error) + '</p></div>';
+              + ', error: ' + _esc(g.error) + '</p></div>';
           }
           if (g.skipped) {
             var skipMsg = (kind === 'address_group')
-              ? g.before + ' members &mdash; nothing to rewrite or dedup, will be skipped'
-              : g.before + ' members &mdash; no duplicates, will be skipped';
+              ? g.before + ' members, nothing to rewrite or dedup, will be skipped'
+              : g.before + ' members, no duplicates, will be skipped';
             return '<div class="border border-gray-700/60 rounded p-2 opacity-60">'
               + '<p class="text-gray-400"><span class="font-mono text-gray-300">' + _esc(g.name)
               + '</span> <span class="text-gray-600">&middot;</span> '
@@ -8006,7 +8170,7 @@
         var removed = d.total_removed || 0;
         if (sumEl) {
           if (changed === 0) {
-            sumEl.innerHTML = '<span class="text-amber-400">No duplicate members in selection &mdash; nothing to do.</span>';
+            sumEl.innerHTML = '<span class="text-amber-400">No duplicate members in the selection, nothing to do.</span>';
           } else {
             sumEl.innerHTML =
               '<span class="text-gray-400">Total:</span> '
@@ -8165,18 +8329,24 @@
   }
 
   // Fresh-source entry: clicking a device on /devices (or switching the source
-  // in the header) appends ?from=devices. Treat that as a one-shot override:
+  // in the scope row) appends ?from=devices. Treat that as a one-shot override:
   // land on Network > Interfaces regardless of the user's saved tab. Strip the
   // param immediately so a manual reload doesn't keep resetting the tab.
   var _fromDevices = false;
   try {
     var _u0 = new URL(window.location.href);
+    var _u0dirty = false;
     if (_u0.searchParams.get('from') === 'devices') {
       _fromDevices = true;
       localStorage.setItem(_subStorageKey('network'), 'interfaces');
       _u0.searchParams.delete('from');
-      history.replaceState(null, '', _u0.pathname + _u0.search + _u0.hash);
+      _u0dirty = true;
     }
+    // the import flashes are shown once: a reload must not repeat them (D97, 2026-11-16)
+    ['form_error', 'import_error', 'import_warning'].forEach(function(f) {
+      if (_u0.searchParams.has(f)) { _u0.searchParams.delete(f); _u0dirty = true; }
+    });
+    if (_u0dirty) history.replaceState(null, '', _u0.pathname + _u0.search + _u0.hash);
   } catch (e) { /* non-fatal */ }
 
   // Restore last state - URL hash overrides localStorage
@@ -8241,7 +8411,7 @@
   }
   // Accumulate / Organisation were briefly Organisation-primary sub-tabs,
   // and before that Ruleset>Security sub-sub-tabs. Now they live as
-  // sub-sub-tabs under Rules > Security. Map any saved value to the new
+  // sub-sub-tabs under Policies > Security. Map any saved value to the new
   // _SECURITY_SUBSUB_KEY and redirect a saved 'organisation' primary to
   // 'ruleset'.
   function _mapLegacyOrgSub(v) {
@@ -8362,9 +8532,40 @@
   // Clear hash after consuming it
   if (_hashTab) history.replaceState(null, '', window.location.pathname + window.location.search);
 
-  // switchPrimary handles restoring the correct sub-tab from the saved
-  // per-primary key, or falling back to defaults when the saved value is
-  // invalid / locked.
+  // switchPrimary lands a primary on its first leaf (the rule for a manual open).
+  // A browser reload returns to the view the operator was in (D47, 2026-11-12):
+  // the stored rulebase and sub of that primary are applied on top when their
+  // entries are rendered and unlocked, else the first leaf stays. Without this a
+  // reload on Network > Zones landed on the first leaf of Profiles & Settings.
+  // Read before switchPrimary: landing on the first leaf writes the keys again.
+  function _storedViewOf(prim) {
+    var v = { rb: '', sub: '', zsub: '' };
+    try {
+      if (prim === 'enrichment') {
+        v.rb = localStorage.getItem('enrichment-rulebase') || 'access';
+        v.sub = localStorage.getItem(_subStorageKey('enrichment')) || '';
+        v.zsub = localStorage.getItem('zone-enr-sub') || '';
+      } else if (prim === 'network' || prim === 'ruleset') {
+        v.sub = localStorage.getItem(_subStorageKey(prim)) || '';
+      }
+    } catch (e) { /* non-fatal */ }
+    return v;
+  }
+  function _restoreStoredSub(prim, stored) {
+    try {
+      var sub = stored.sub, rb = stored.rb;
+      if (prim === 'enrichment') {
+        if (_ENRICHMENT_RULEBASES.indexOf(rb) < 0 || !document.getElementById('enr-rb-btn-' + rb)) rb = 'access';
+        if (rb !== 'access') { switchEnrichmentRulebase(rb); return; }
+      }
+      if (!sub || _subGroup(sub) !== prim) return;
+      var b = document.getElementById('main-btn-' + sub);
+      if (!b || b.dataset.locked === 'true' || b.style.display === 'none') return;
+      if (_currentMainSub !== sub) switchMain(sub);
+      // the Zones sub-sub (Rule Mapping) comes back as well
+      if (sub === 'zones-enrichment' && stored.zsub === 'rules' && typeof switchZoneEnrSub === 'function') switchZoneEnrSub('rules');
+    } catch (e) { /* non-fatal: the first leaf stays */ }
+  }
   if (window._gateLocked) {
     // All primary panes locked - hide every one plus both sub-tab bars so the
     // user sees only the gating banner above the tab bar. Devices link in the
@@ -8373,8 +8574,6 @@
       var pane = document.getElementById('primary-' + t);
       if (pane) pane.classList.add('hidden');
     });
-    var _gCfgBar = document.getElementById('configuration-subtab-bar');
-    if (_gCfgBar) _gCfgBar.classList.add('hidden');
     var _gNetBar = document.getElementById('network-subtab-bar');
     var _gEnBar  = document.getElementById('enrichment-subtab-bar');
     var _gRsBar  = document.getElementById('ruleset-subtab-bar');
@@ -8384,7 +8583,9 @@
     if (_gRsBar)  _gRsBar.classList.add('hidden');
     if (_gSubsub) _gSubsub.classList.add('hidden');
   } else {
+    var _storedView = _storedViewOf(_savedPrimary);
     switchPrimary(_savedPrimary);
+    _restoreStoredSub(_savedPrimary, _storedView);
   }
 
   // One-shot rulebase restore across TECHNICAL reloads (VPN edits/PSK/cert
@@ -8399,7 +8600,11 @@
     _tabOnce = sessionStorage.getItem('tab-once');
     if (_tabOnce) sessionStorage.removeItem('tab-once');
   } catch (e) { /* non-fatal */ }
-  if (_tabOnce) {
+  // the key 'path' (the project list's skipped count and info icon, D24): the workspace opens
+  // on its default view with the path dialog open, once the dialog's script has run
+  if (_tabOnce === 'path') {
+    document.addEventListener('DOMContentLoaded', function () { if (window.gsPathOpen) gsPathOpen(); });
+  } else if (_tabOnce) {
     var _toIdx = _tabOnce.indexOf(':');
     var _toP = _normTab(_toIdx > 0 ? _tabOnce.slice(0, _toIdx) : _tabOnce);
     var _toS = _toIdx > 0 ? _tabOnce.slice(_toIdx + 1) : '';
@@ -8420,7 +8625,7 @@
   // switchMain via _maybeRunGenerate). Landing on Network sub-tabs does not
   // burn cycles on a generate the user hasn't asked for.
 
-  // Auto-name toggle in Rules > Security > Grouping
+  // Auto-name toggle in Policies > Security > Grouping
   const _autoNameToggle = document.getElementById('toggle_auto_name');
   if (_autoNameToggle) {
     _autoNameToggle.addEventListener('change', function() {
@@ -8433,7 +8638,7 @@
     });
   }
 
-  // Grouping selector in Rules > Security > Grouping
+  // Grouping selector in Policies > Security > Grouping
   const _groupBySel = document.getElementById('select_group_by');
   if (_groupBySel) {
     _groupBySel.addEventListener('change', function() {
@@ -8511,7 +8716,7 @@
   // opts.hideKeys: list of catalog keys to keep in cache but skip in the
   // rendered view (e.g. predefined PA apps - needed for enrichment, useless
   // as a rendered list of 10k+ items).
-  // The destination device-group picked in the header (SW-3-4) - only present
+  // The destination device-group picked in the scope row of the page head (SW-3-4) - only present
   // when the target is a Panorama. Scopes the PA profile catalogs to that DG so
   // device-group-local profiles are visible (not just shared + predefined).
   function _panwDstDg() {
@@ -8519,6 +8724,8 @@
     return el ? (el.value || '') : '';
   }
 
+  // the catalogue's name in a toast, not its cache key (block E, 2026-11-16)
+  var _CATALOG_LABEL = {'security-profiles': 'the security profiles', 'applications': 'the applications', 'log-forwarding': 'the log-forwarding profiles'};
   function _loadPanwCatalog(opts) {
     if (!_targetId) return;
     var refresh = document.getElementById(opts.refreshId);
@@ -8551,7 +8758,7 @@
     if (box) box.innerHTML = '<p class="text-gray-600 col-span-full">Loading…</p>';
     if (hint) hint.textContent = 'Fetching from device…';
     if (refresh) refresh.disabled = true;
-    if (typeof _setOverlay === 'function') _setOverlay(true, opts.overlayLabel);
+    var _ovTok = (typeof _setOverlay === 'function') ? _setOverlay(true, opts.overlayLabel) : null;
     var _dg = opts.dgScoped ? _panwDstDg() : '';
     var _scopeQS = _dg ? ('?scope=' + encodeURIComponent(_dg)) : '';
     fetchWithTimeout(opts.url + tid + _scopeQS)
@@ -8561,7 +8768,7 @@
           var msg = (res.data && res.data.error) || 'Failed to load catalog';
           if (box) box.innerHTML = '<p class="text-red-500 col-span-full">' + msg + '</p>';
           if (hint) hint.textContent = _friendlyReachErr(msg);
-          showToast('Could not load ' + opts.cacheKey + ' - ' + _friendlyReachErr(msg), 'error', 6000);
+          showToast('Could not load ' + (_CATALOG_LABEL[opts.cacheKey] || opts.cacheKey) + ': ' + _friendlyReachErr(msg), 'error', 6000);
           return;
         }
         cache[tid] = res.data.catalog || {};
@@ -8572,11 +8779,11 @@
       .catch(function(e) {
         if (box) box.innerHTML = '<p class="text-red-500 col-span-full">Fetch failed: ' + e + '</p>';
         if (hint) hint.textContent = _friendlyReachErr(String(e));
-        showToast('Could not load ' + opts.cacheKey + ' - ' + _friendlyReachErr(String(e)), 'error', 6000);
+        showToast('Could not load ' + (_CATALOG_LABEL[opts.cacheKey] || opts.cacheKey) + ': ' + _friendlyReachErr(String(e)), 'error', 6000);
       })
       .finally(function() {
         if (refresh) refresh.disabled = false;
-        if (typeof _setOverlay === 'function') _setOverlay(false);
+        if (typeof _setOverlay === 'function') _setOverlay(false, _ovTok);
       });
   }
 
@@ -8608,7 +8815,6 @@
       cacheKey: 'applications',
       boxId: 'enrichment-panw-apps-catalog',
       hintId: 'enrichment-panw-apps-hint',
-      refreshId: 'enrichment-panw-apps-refresh',
       overlayLabel: 'Loading applications from target…',
       // Predefined apps stay cached for enrichment but aren't rendered
       // (10k+ items, vendor-shipped - noise in the curation view).
@@ -8908,7 +9114,7 @@
         var d = res.data || {};
         var msg = clear
           ? ((d.cleared || 0) + ' override(s) cleared')
-          : ((d.written || 0) + ' rule(s) → ' + (d.schedule || ''));
+          : ((d.written || 0) + ' rule(s) → ' + (d.schedule || 'none'));
         if (status) { status.textContent = msg; status.className = 'text-xs text-emerald-400 ml-2'; }
         if (typeof htmx !== 'undefined') htmx.trigger(document.body, 'configSaved');
       })
@@ -8935,9 +9141,9 @@
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({pbf_hash: hash, edits: edits}),
     }).then(function(r) {
-      if (!r.ok) { r.json().then(function(d) { showToast((d && d.error) || 'PBF edit failed', 'error'); }).catch(function(){ showToast('PBF edit failed', 'error'); }); return; }
+      if (!r.ok) { r.json().then(function(d) { showToast((d && d.error) || 'Policy routing edit failed', 'error'); }).catch(function(){ showToast('Policy routing edit failed', 'error'); }); return; }
       _pbfReload();
-    }).catch(function() { showToast('PBF edit failed', 'error'); });
+    }).catch(function() { showToast('Policy routing edit failed', 'error'); });
   }
   function pbfEdit(hash, field, value) {
     var edits = {}; edits[field] = value;
@@ -9023,7 +9229,11 @@
     }).catch(function() { showToast('PSK save failed', 'error'); });
   }
   function vpnClearPsk(hash) {
-    if (!window.confirm('Remove the stored PSK? A placeholder will be pushed instead.')) return;
+    confirmModal({title: 'Remove PSK', body: 'Remove the stored PSK? A placeholder will be pushed instead.', confirmLabel: 'Remove', danger: true}).then(function (ok) {
+      if (ok) _vpnClearPskReq(hash);
+    });
+  }
+  function _vpnClearPskReq(hash) {
     fetch('/enrichment/vpn/psk', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device_id: _vpnPskDeviceId, vpn_hash: hash, psk: ''}),
@@ -9031,6 +9241,23 @@
       if (r.ok) { showToast('PSK cleared', 'info'); _rbReload('vpn'); }
       else showToast('PSK clear failed', 'error');
     }).catch(function() { showToast('PSK clear failed', 'error'); });
+  }
+  // An orphan key (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2): stored under
+  // a name no tunnel carries any more, so it is addressed by that name, which
+  // the button carries. Discarded only, never set.
+  function vpnDiscardOrphanKey(btn) {
+    var name = btn.getAttribute('data-orphan-name');
+    var did = parseInt(btn.getAttribute('data-orphan-did'), 10);
+    confirmModal({title: 'Discard stored key', body: 'Discard the pre-shared key stored under this name? No tunnel carries it any more, so no push uses it.', confirmLabel: 'Discard', danger: true}).then(function (ok) {
+      if (!ok) return;
+      fetch('/enrichment/vpn/psk', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device_id: did, tunnel_name: name, psk: ''}),
+      }).then(function(r) {
+        if (r.ok) { showToast('Key discarded', 'info'); _rbReload('vpn'); }
+        else showToast('Discard failed', 'error');
+      }).catch(function() { showToast('Discard failed', 'error'); });
+    });
   }
   // ── Per-tunnel identity cert (encrypted key, imported at push) ──────
   function vpnUploadCert(hash, name) {
@@ -9060,7 +9287,11 @@
     }).catch(function() { showToast('Cert upload failed', 'error'); });
   }
   function vpnClearCert(hash) {
-    if (!window.confirm('Remove the uploaded certificate?')) return;
+    confirmModal({title: 'Remove Certificate', body: 'Remove the uploaded certificate?', confirmLabel: 'Remove', danger: true}).then(function (ok) {
+      if (ok) _vpnClearCertReq(hash);
+    });
+  }
+  function _vpnClearCertReq(hash) {
     fetch('/enrichment/vpn/cert', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device_id: _vpnPskDeviceId, vpn_hash: hash, cert_pem: '', key_pem: ''}),
@@ -9104,7 +9335,7 @@
   }
   // `sub` keeps the caller's pane across the reload (the Decryption and VPN
   // tables are the only users). Without it the reload lands on the primary's
-  // leftmost sub, which the move would make Rules > Firewall.
+  // leftmost sub, which the move would make Policies > Security.
   function _bulkSend(url, hashKey, hashes, edits, sub) {
     if (!hashes.length) { showToast('No rows selected', 'info'); return; }
     var body = {edits: edits}; body[hashKey] = hashes;
@@ -9440,21 +9671,23 @@
   function loadFortiUtmProfiles(force) {
     if (!_targetId) return;
     var status = document.getElementById('utm-apply-status');
-    var cache = window._FORTI_UTM_CATALOGS;
+    // the cache is created here as well: the start-up restore can enter this pane before the
+    // line below the loader has run, and a throw here aborted the whole start-up (D47)
+    var cache = window._FORTI_UTM_CATALOGS = window._FORTI_UTM_CATALOGS || {};
     if (!force && cache[_targetId]) {
       _populateFortiUtmDropdowns(cache[_targetId]);
       if (status) { status.textContent = ''; status.className = 'text-xs text-gray-500 ml-2'; }
       return;
     }
     if (status) { status.textContent = 'Fetching from device…'; status.className = 'text-xs text-gray-500 ml-2'; }
-    if (typeof _setOverlay === 'function') _setOverlay(true, 'Loading UTM profiles from target…');
+    var _ovTok = (typeof _setOverlay === 'function') ? _setOverlay(true, 'Loading UTM profiles from target…') : null;
     fetchWithTimeout('/enrichment/utm-profiles/' + _targetId)
       .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
       .then(function(res) {
         if (!res.ok) {
           var msg = (res.data && res.data.error) || 'Failed to load UTM catalog';
           if (status) { status.textContent = _friendlyReachErr(msg); status.className = 'text-xs text-red-400 ml-2'; }
-          showToast('Could not load UTM profiles - ' + _friendlyReachErr(msg), 'error', 6000);
+          showToast('Could not load the UTM profiles: ' + _friendlyReachErr(msg), 'error', 6000);
           return;
         }
         cache[_targetId] = res.data.catalog || {};
@@ -9463,10 +9696,10 @@
       })
       .catch(function(e) {
         if (status) { status.textContent = _friendlyReachErr(String(e)); status.className = 'text-xs text-red-400 ml-2'; }
-        showToast('Could not load UTM profiles - ' + _friendlyReachErr(String(e)), 'error', 6000);
+        showToast('Could not load the UTM profiles: ' + _friendlyReachErr(String(e)), 'error', 6000);
       })
       .finally(function() {
-        if (typeof _setOverlay === 'function') _setOverlay(false);
+        if (typeof _setOverlay === 'function') _setOverlay(false, _ovTok);
       });
   }
 
@@ -9729,7 +9962,11 @@
   }
 
   function cleanupOverrideDrift(table) {
-    if (!confirm('Delete all orphaned overrides?')) return;
+    confirmModal({title: 'Delete Orphaned Overrides', body: 'Delete all orphaned overrides?', confirmLabel: 'Delete', danger: true}).then(function (ok) {
+      if (ok) _cleanupOverrideDriftReq(table);
+    });
+  }
+  function _cleanupOverrideDriftReq(table) {
     fetch('/enrichment/drift/cleanup', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -9910,7 +10147,7 @@
       return;
     }
     if (app === 'auto' && !_targetId) {
-      if (status) { status.textContent = 'Auto-assign needs a target device.'; status.className = 'text-xs text-amber-400 ml-2'; }
+      if (status) { status.textContent = 'Auto-assign needs a target Device.'; status.className = 'text-xs text-amber-400 ml-2'; }
       return;
     }
     var hashes = Array.from(_getSelectedRhashes());
@@ -9940,6 +10177,10 @@
     }
     if (btn) btn.disabled = true;
     if (status) { status.textContent = 'Applying…'; status.className = 'text-xs text-gray-500 ml-2'; }
+    // the auto-assign matches every selected rule against the target's catalog, long enough
+    // for the busy dialog (D91): one static line like the build's, closed when the call ends
+    var busy = (app === 'auto') && typeof _setOverlay === 'function';
+    var busyTok = busy ? _setOverlay(true, 'Assigning applications\u2026') : null;
     Promise.all(calls)
       .then(function(results) {
         var bad = results.find(function(r) { return !r.ok; });
@@ -9961,6 +10202,7 @@
       })
       .finally(function() {
         if (btn) btn.disabled = false;
+        if (busy) _setOverlay(false, busyTok);
       });
   }
 
@@ -10021,13 +10263,15 @@
       return;
     }
     if (app === 'auto' && !_targetId) {
-      if (status) { status.textContent = 'Auto-assign needs a target device.'; status.className = 'text-xs text-amber-400 ml-2'; }
+      if (status) { status.textContent = 'Auto-assign needs a target Device.'; status.className = 'text-xs text-amber-400 ml-2'; }
       return;
     }
     var hashes = Array.from(_getSelectedRhashes());
     var nRules = hashes.length;
     if (btn) btn.disabled = true;
     if (status) { status.textContent = 'Applying…'; status.className = 'text-xs text-gray-500 ml-2'; }
+    var busy = (app === 'auto') && typeof _setOverlay === 'function';   // the busy dialog of the auto-assign (D91)
+    var busyTok = busy ? _setOverlay(true, 'Assigning applications\u2026') : null;
     fetch('/enrichment/map-ports/' + _targetId, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({rule_hashes: hashes, force: true}),
@@ -10062,6 +10306,7 @@
       })
       .finally(function() {
         if (btn) btn.disabled = false;
+        if (busy) _setOverlay(false, busyTok);
       });
   }
 
@@ -10200,7 +10445,7 @@
       .then(_jsonRes)
       .then(function(res) {
         if (!res.ok) {
-          showToast('Could not load TP layers - ' + _friendlyReachErr((res.data && res.data.error) || ''), 'error', 6000);
+          showToast('Could not load the Threat Prevention layers: ' + _friendlyReachErr((res.data && res.data.error) || ''), 'error', 6000);
           return;
         }
         var layers = (res.data && res.data.layers) || [];
@@ -10266,7 +10511,7 @@
       .then(_jsonRes)
       .then(function(res) {
         if (!res.ok) {
-          showToast('Could not load TP profiles - ' + _friendlyReachErr((res.data && res.data.error) || ''), 'error', 6000);
+          showToast('Could not load the Threat Prevention profiles: ' + _friendlyReachErr((res.data && res.data.error) || ''), 'error', 6000);
           return;
         }
         var profiles = (res.data && res.data.profiles) || [];
@@ -10342,7 +10587,7 @@
     var parts = [];
     if (drift.layer_missing) {
       parts.push('TP-Layer <code class="font-mono">' + _esc(layerName) +
-                 '</code> no longer exists on the target, Push will refuse.' +
+                 '</code> no longer exists on the target, the push skips this layer.' +
                  ' Re-Apply with one of: ' +
                  (drift.available_layers || []).map(_altLayer).join(', '));
     }
@@ -10695,7 +10940,7 @@
     var hint = document.getElementById('enrichment-panw-apps-hint');
     if (btn) btn.disabled = true;
     if (hint) hint.textContent = 'Matching rules against catalog…';
-    if (typeof _setOverlay === 'function') _setOverlay(true, 'Mapping ports to apps…');
+    var _ovTok = (typeof _setOverlay === 'function') ? _setOverlay(true, 'Mapping ports to apps…') : null;
     fetch('/enrichment/map-ports/' + _targetId, {method: 'POST'})
       .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
       .then(function(res) {
@@ -10731,7 +10976,7 @@
       })
       .finally(function() {
         if (btn) btn.disabled = false;
-        if (typeof _setOverlay === 'function') _setOverlay(false);
+        if (typeof _setOverlay === 'function') _setOverlay(false, _ovTok);
       });
   }
 
@@ -10811,7 +11056,10 @@
   var _reviewStale = {policy: false, network: false};
   var _blockingKinds = ['no_interfaces', 'bond_unsupported', 'vlan_no_parent', 'vlan_no_tag',
                         'vlan_orphan_parent', 'cp_multi_vr', 'vr_orphan', 'forti_loopback_in_zone',
-                        'reserved_target_iface', 'unresolved_reference', 'ipv6_deny_loss'];
+                        'reserved_target_iface', 'unresolved_reference', 'ipv6_deny_loss', 'appdef_widened'];
+  // which kinds hold back which push: the generate hands the split over, these are the seeds
+  var _blockingKindsPolicy = ['excluded_leak', 'unresolved_reference', 'ipv6_deny_loss', 'appdef_widened'];
+  var _blockingKindsNetwork = _blockingKinds.filter(function (k) { return _blockingKindsPolicy.indexOf(k) === -1 || k === 'excluded_leak'; });
 
   // Initialize deploy pane on first reveal. Target comes from the header
   // selection - no per-pane picker. Only renders select_remote settings
@@ -11007,12 +11255,18 @@
     if (withReport) {
       _reviewReport = rep || null;
       if (rep && rep.blocking_kinds && rep.blocking_kinds.length) _blockingKinds = rep.blocking_kinds;
+      if (rep && rep.blocking_kinds_policy && rep.blocking_kinds_policy.length) _blockingKindsPolicy = rep.blocking_kinds_policy;
+      if (rep && rep.blocking_kinds_network && rep.blocking_kinds_network.length) _blockingKindsNetwork = rep.blocking_kinds_network;
       _deployValidationIssues = (rep && rep.validation_issues) || [];
       _deployCompleteness = (rep && rep.completeness) || [];
       renderReview();
       renderPreviewTabs();
     }
     renderTcState(); renderPushButtons();
+    // the step model follows the artefact (docs/UI_USABILITY_PLAN.md, D1 step 6)
+    var _dep = document.getElementById('primary-btn-deploy');
+    if (d.state === 'current' && d.job_id && _reviewReport && _dep && _dep.classList.contains('active')) gsReviewed(d.job_id);
+    else if (typeof gsProgressRefresh === 'function') gsProgressRefresh();
     if (d.state === 'building' && d.building_job_id) { _watchBuild(d.building_job_id); return; }
     if (!_tcFailed && (d.state === 'missing' || d.state === 'outdated')) startBuild(false);
   }
@@ -11034,6 +11288,29 @@
       })
       .catch(function (e) { _tcFailed = 'the build did not start: ' + e; renderTcState(); });
   }
+  // The build shows itself in the busy dialog (D87): one static line, "Building configuration",
+  // no step messages (operator), and it closes by itself when the build ended, whatever the
+  // outcome, the state line then says Built or Build failed. The dialog is marked as the
+  // build's so the run poller neither hides it nor reloads the page behind it, every step
+  // event re-arms the watchdog without showing.
+  function _buildDialogOpen() {
+    if (typeof _setOverlay !== 'function') return null;
+    _setOverlay(true, 'Building configuration\u2026');
+    var ov = document.getElementById('zone-busy-overlay'); if (ov) ov.dataset.buildUi = '1';
+    var spin = document.querySelector('#zone-busy-overlay svg'); if (spin) spin.style.display = '';
+    return ov || null;
+  }
+  function _buildDialogStep(dlg, d) {
+    if (dlg && typeof _armOverlayWatchdog === 'function') _armOverlayWatchdog();
+  }
+  function _buildDialogClose() {
+    if (typeof _setOverlay !== 'function') return;
+    _setOverlay(false);
+    var spin = document.querySelector('#zone-busy-overlay svg'); if (spin) spin.style.display = '';
+  }
+  function _buildDialogDone(dlg, ok) {
+    if (dlg) _buildDialogClose();
+  }
   // Watch a build job's events (the same stream the pushes use); at the end the state and
   // the report are read anew. The job runs on the server whatever happens to this tab.
   function _watchBuild(jobId) {
@@ -11041,6 +11318,7 @@
     _tcBuildJob = jobId;
     if (_tc) _tc.state = 'building';
     renderTcState(); renderPushButtons();
+    var dlg = _buildDialogOpen();
     var es = new EventSource('/deploy/push/' + jobId + '/stream');
     var settled = false;
     es.onmessage = function (e) {
@@ -11052,16 +11330,18 @@
           _tcRanPipeline = false; _NEEDS_GEN = false;
           var _rd = document.getElementById('regen-pending-dot'); if (_rd) _rd.classList.add('hidden');
         }
+        _buildDialogDone(dlg, !!d.success);
         loadTargetConfig();
         return;
       }
       if (d.step === 'pipeline' && /running/.test(d.detail || '')) _tcRanPipeline = true;
       if (d.step === 'build' && /^failed/.test(d.detail || '')) _tcFailed = d.detail;
       _tcStep = d.detail || d.step || ''; renderTcState();
+      _buildDialogStep(dlg, d);
     };
     es.onerror = function () {
       if (!settled && es.readyState === EventSource.CLOSED && !_pageUnloading) {
-        es.close(); _tcBuildJob = null; refreshTargetConfig();   // the job runs on - ask the server where it stands
+        es.close(); _tcBuildJob = null; _buildDialogClose(); refreshTargetConfig();   // the job runs on - ask the server where it stands
       }
     };
   }
@@ -11094,6 +11374,13 @@
     } else {
       text = 'Built ' + (_tc.built_at || '');
     }
+    // a strand the target lacks (a virtual system's network): declared on the
+    // line, the driver's reason as its tooltip (docs/VSX_TARGET_PLAN.md, D2)
+    var decl = (_tc && _tc.built_at && _tc.summary && _tc.summary.declared_strands) || null;
+    if (decl && decl.network && !building) {
+      detail = (detail ? detail + ' - ' : '') + 'Network: provisioned on the VSX, not pushed';
+      if (dt) dt.title = decl.network;
+    } else if (dt) { dt.title = ''; }
     tx.className = cls; tx.textContent = text; if (dt) dt.textContent = detail;
     if (rb) rb.disabled = building;
   }
@@ -11102,18 +11389,24 @@
   function renderPushButtons() {
     var pb = document.getElementById('deploy-push-btn'), nb = document.getElementById('deploy-push-network-btn');
     if (!pb || !nb) return;
+    // a strand the target lacks is not offered at all: the state line says why
+    var declNet = !!(_tc && _tc.summary && _tc.summary.declared_strands && _tc.summary.declared_strands.network);
+    nb.style.display = declNet ? 'none' : '';
     var building = !!(_tcBuildJob || (_tc && _tc.state === 'building'));
     var reason = '';
     if (building) reason = 'The push waits for the build.';
     else if (_tcFailed) reason = 'The push waits for a successful build.';
     else if (!_tc || !_tc.built_at) reason = 'The push waits for the target configuration.';
     else if (_tc.state === 'outdated') reason = 'The target configuration is outdated: it is rebuilt first.';
-    var nBlock = (_deployValidationIssues || []).filter(function (i) { return _blockingKinds.indexOf(i.kind) !== -1; }).length;
-    pb.disabled = !!reason;
-    nb.disabled = !!reason || nBlock > 0;
+    // each push waits for the blockers of its own strand (docs/APPDEF_WIDENING_PLAN.md, D4):
+    // a rule-level finding holds the policy push, an interface-level one the network push
+    var nBlockP = (_deployValidationIssues || []).filter(function (i) { return _blockingKindsPolicy.indexOf(i.kind) !== -1; }).length;
+    var nBlockN = (_deployValidationIssues || []).filter(function (i) { return _blockingKindsNetwork.indexOf(i.kind) !== -1; }).length;
+    pb.disabled = !!reason || nBlockP > 0;
+    nb.disabled = !!reason || nBlockN > 0;
     // the reason is the tooltip (user request 2026-10-04: no text beside the buttons)
-    pb.title = reason;
-    nb.title = reason || (nBlock ? ('Push Network waits for ' + nBlock + ' blocker' + (nBlock === 1 ? '' : 's') + ' - see the findings.') : '');
+    pb.title = reason || (nBlockP ? ('Push Policy waits for ' + nBlockP + ' blocker' + (nBlockP === 1 ? '' : 's') + ' - see the findings.') : '');
+    nb.title = reason || (nBlockN ? ('Push Network waits for ' + nBlockN + ' blocker' + (nBlockN === 1 ? '' : 's') + ' - see the findings.') : '');
   }
   // Generated Sections: tabs from the build's summary, payloads fetched on demand.
   function renderPreviewTabs() {
@@ -11220,30 +11513,9 @@
   // The generate report rendered as findings (blocker / warning / note),
   // a kind table (source vs generated) and the generate line on both tabs.
   // title, go-to tab, go-to sub-tab, and the remedy in one sentence (R3)
-  var _RV_KIND_TITLES = {
-    excluded_leak: ['Deleted items still generated', 'deploy', null, 'A defect in Gateshift, not in your configuration: something deleted in this project came out of the build. The push stays refused. Please report it with the item names.'],
-    no_interfaces: ['No interfaces on the source', 'network', 'interfaces', 'Import the source again, or add the interfaces under Network > Interfaces.'],
-    no_ip: ['Interfaces without an IP address', 'network', 'interfaces', 'Give each interface an address under Network > Interfaces, or mark it skip.'],
-    no_zone: ['Interfaces without a zone', 'network', 'interfaces', 'Bind the interfaces to zones under Target Settings > Zone Mapping, or mark them skip.'],
-    bond_unsupported: ['Bonded interfaces the target cannot take', 'network', 'interfaces', 'Mark the bond skip and give its addresses to a plain interface the target has.'],
-    vlan_no_parent: ['VLAN interfaces without a parent', 'network', 'interfaces', 'Set the parent interface under Network > Interfaces, or mark the VLAN skip.'],
-    vlan_no_tag: ['VLAN interfaces without a tag', 'network', 'interfaces', 'Set the VLAN tag under Network > Interfaces, or mark the VLAN skip.'],
-    vlan_orphan_parent: ['VLAN interfaces whose parent is missing', 'network', 'interfaces', 'Add the parent under Network > Interfaces or point the VLAN at an existing one.'],
-    vr_orphan: ['Interfaces in a virtual router that does not exist', 'network', 'routing', 'Add the virtual router under Network > Routing, or move the interface to one that exists.'],
-    cp_multi_vr: ['Several virtual routers: Check Point takes one', 'network', 'routing', 'Push one virtual router at a time: mark the interfaces of the others skip, push, then swap.'],
-    forti_loopback_in_zone: ['A loopback interface in a zone, FortiOS refuses it', 'network', 'interfaces', 'Take the loopback out of the zone under Target Settings > Zone Mapping.'],
-    reserved_target_iface: ['Target interfaces the target reserves (HA, management)', 'network', 'interfaces', 'Rename the source interface under Network > Interfaces so it misses the reserved name, or mark it skip.'],
-    mgmt_target_iface: ["The target's management interface is deferred", 'network', 'interfaces', 'Nothing to do now: the push dialog asks before it touches the management interface, last.'],
-    cp_cluster_iface_unmatched: ['Cluster interfaces without a match on the target', 'network', 'interfaces', "Name the interfaces like the cluster's under Network > Interfaces (Fetch Target Interfaces lists them)."],
-    cp_iface_unmatched: ['Physical interfaces the gateway does not have', 'network', 'interfaces', "Gaia creates no physical interface. Rename each to one of the gateway's ports under Network > Interfaces (Fetch Target Interfaces lists them), make it a VLAN on a port, or mark it skip."],
-    tunnel_unsupported: ['Tunnel interfaces the target cannot take', 'network', 'interfaces', 'Mark the tunnel interfaces skip. The VPN section creates the ones the target needs.'],
-    iface_subnet_overlap: ['Ports outside this push still carry a subnet it assigns', 'network', 'interfaces', 'FortiOS refuses the overlap. Set "Reset the data ports this push does not address" in the push dialog, or map the source interface onto that port under Network > Interfaces.'],
-    iface_subnet_overlap_accepted: ['Ports outside this push will be reset (option set)', 'network', 'interfaces', 'Nothing to do: the push clears those ports before it applies the addresses.'],
-    pa_rescue_point_refused: ['The firewall refuses to save a rollback point', 'network', 'routing', 'The firewall demands a full commit, which a configuration load on it leaves behind. A push stops before writing until the firewall is committed, or "Continue without a rollback point" is set in the push dialog.'],
-    pa_rescue_point_refused_accepted: ['Push without a rollback point (option set)', 'network', 'routing', 'Nothing to do: the push goes ahead. A push that breaks off cannot be taken back and leaves a partly written candidate.'],
-    ipv6_deny_loss: ['Deny rules losing IPv6 members this target does not carry', 'objects', null, 'The rule denied IPv6 traffic the target cannot express in this version, so the migrated rule would let it through. Skip the rule for this push, or exclude the IPv6 member in the project and build again.'],
-    unresolved_reference: ['Rules referencing objects the build does not create', 'objects', null,'A value has no address or service object, or the object is empty or dropped for this target, and a side without it would match wider than the source. Create the object with exactly that value under Objects, give an empty group a member, or exclude the rule, then build again.'],
-  };
+  // the one table of finding kinds lives in progress.py (docs/UI_USABILITY_PLAN.md, D18):
+  // title, go-to tab, go-to sub-tab, the remedy in one sentence, the view inside a rulebase
+  var _RV_KIND_TITLES = {{ (rv_kinds or {}) | tojson }};
   // Readable names for the drivers' field keys, and what one item of the
   // field is (a rule, an interface, a route, a tunnel).
   var _RV_FIELD_WORDS = {
@@ -11272,6 +11544,8 @@
   };
   // whole items (objects, routes, interfaces, URL categories) read "N things not pushed";
   // fields of a rule read "N rules: field not pushed / replaced"
+  // kinds rendered as a note: nothing is skipped or refused, the operator reads it once
+  var _RV_NOTE_KINDS = {strand_declared: 1};
   var _RV_WHOLE_ITEM = {url_category: 1, value: 1, fqdn: 1, address: 1, address_group: 1, service_group: 1, interface: 1,
                         static_route: 1, connected_route: 1, pbf_rule: 1, policy_route: 1, 'site-category': 1, route_device: 1,
                         tp_rule: 1};
@@ -11298,11 +11572,11 @@
     });
     Object.keys(byKind).forEach(function (k) {
       var t = _RV_KIND_TITLES[k] || [k.replace(/_/g, ' '), 'network', 'interfaces'];
-      var blocking = _blockingKinds.indexOf(k) !== -1;
-      out.push({sev: blocking ? 'blocker' : 'warning',
+      var blocking = _blockingKinds.indexOf(k) !== -1, note = !!_RV_NOTE_KINDS[k];
+      out.push({sev: blocking ? 'blocker' : (note ? 'note' : 'warning'),
                 title: t[0], count: byKind[k].length,
-                detail: (blocking ? 'The push refuses until this is fixed. ' : 'The affected items are skipped at push time. ') + (t[3] || ''),
-                items: byKind[k], go: {tab: t[1], sub: t[2]}});
+                detail: (blocking ? 'The push refuses until this is fixed. ' : (note ? '' : 'The affected items are skipped at push time. ')) + (t[3] || ''),
+                items: byKind[k], go: {tab: t[1], sub: t[2], main: t[4] || null}});
     });
     // Dropped fields: one finding per field + reason; the fallback (what the
     // target gets instead) is shown per item, so 700 zone drops are one row.
@@ -11353,8 +11627,28 @@
                 count: rep.skipped_interfaces.length, detail: 'Marked "skip" on the Interfaces tab. Nothing of them reaches the target.',
                 items: rep.skipped_interfaces.map(String), go: {tab: 'network', sub: 'interfaces'}});
     }
+    // hit counts from the box (docs/HIT_COUNTS_PLAN.md, D7): the source's own counters as a decision
+    // aid, one note per source; a source whose counters were not read says why (D8)
+    var bu = rep.box_usage;
+    if (bu && bu.rules_total) {
+      if (bu.declared) {
+        out.push({sev: 'note', title: 'Box hit counts not read for ' + bu.rules_total + ' rule' + (bu.rules_total === 1 ? '' : 's'),
+                  count: bu.rules_total, detail: bu.declared + '. The Device hits column of this source stays empty, the log-derived Hits are unaffected.',
+                  items: [], go: (typeof _deviceId === 'number') ? {href: '/devices/' + _deviceId + '/import'} : null});
+      } else {
+        var zero = bu.rules_zero || 0, unread = bu.rules_total - bu.rules_read;
+        out.push({sev: 'note', title: zero + ' of ' + bu.rules_read + ' rule' + (bu.rules_read === 1 ? '' : 's') + ' without a hit on the Device' + (bu.since ? ' since ' + bu.since : ''),
+                  count: zero,
+                  detail: 'The Device\'s own counters, read ' + (bu.read_at || '?') + (bu.since ? '' : ' (since unknown)') + '. '
+                    + (bu.rules_stale_90d || 0) + ' rule' + (bu.rules_stale_90d === 1 ? '' : 's') + ' saw no hit for 90 days. '
+                    + 'A decision aid beside the log-derived Hits: the usage filter under Policies > Security narrows to these rules, disabling or excluding them stays your call.'
+                    + (unread ? ' ' + unread + ' rule' + (unread === 1 ? '' : 's') + ' the Device lists no counter for.' : ''),
+                  items: [], go: {tab: 'ruleset', sub: 'security', usage: 'zero'}});
+      }
+    }
     // what the IMPORT already dropped (fw_import_drops): the push never saw it (R3)
     (rep.import_drops || []).forEach(function (d) {
+      if (d.field === 'hit_counts') return;   // the box usage note above carries it with its reason
       out.push({sev: 'note', title: d.count + ' rule' + (d.count === 1 ? '' : 's') + ': ' + (d.label || d.field) + ' - not imported',
                 count: d.count, detail: 'Dropped when the source was read. The push cannot carry what the import left out. The import results page lists them.',
                 items: (d.samples || []).map(String),
@@ -11368,13 +11662,19 @@
                 count: shN,
                 detail: 'Judged with the target\'s match semantics. These rules never match there and are pushed as they are'
                   + (shDup ? ' - ' + shDup + ' of them duplicate the earlier rule outright' : '')
-                  + '. Disable what is dead under Rules > Firewall with the Shadowed filter.'
+                  + '. Disable what is dead under Policies > Security with the Shadowed filter.'
                   + (shLog.shadow_skipped ? ' ' + shLog.shadow_skipped + ' further rule' + (shLog.shadow_skipped === 1 ? '' : 's') + ' got no verdict (negation, or addresses or services that do not resolve), so they are neither cleared nor flagged.' : ''),
                 items: shLog.shadowed.map(function (r) { return r[1] + ' \u2192 ' + (r[2] === 'duplicate' ? 'duplicate of ' : 'shadowed by ') + r[3]; }),
                 go: {tab: 'ruleset', sub: 'security', shadowed: true}});
     } else if (shLog.shadow_error) {
       out.push({sev: 'warning', title: 'Shadowing scan failed', count: 1,
-                detail: 'The generate could not judge shadowing: ' + shLog.shadow_error + '. The rules are pushed as they are. The Shadowed filter under Rules > Firewall runs the scan on its own.',
+                detail: 'The generate could not judge shadowing: ' + shLog.shadow_error + '. The rules are pushed as they are. The Shadowed filter under Policies > Security runs the scan on its own.',
+                items: [], go: {tab: 'ruleset', sub: 'security'}});
+    } else if (shLog.shadow_no_cover) {
+      // 15b: nothing could have covered, so the empty result is no clean bill
+      out.push({sev: 'note', title: 'No unreachable rules found: no rule could act as a covering rule',
+                count: shLog.shadow_skipped || 0,
+                detail: shLog.shadow_no_cover + ' A rule with applications, or with application-default and no application the analysis knows, never covers what follows, so this scan cannot find dead rules here. The target may still report them at install time.',
                 items: [], go: {tab: 'ruleset', sub: 'security'}});
     } else if (shLog.shadow_skipped) {
       // Nothing dead found, but the scan had no opinion on some rules: say so
@@ -11390,6 +11690,15 @@
     (rep.mode_notes || []).forEach(function (note) {
       out.push({sev: 'warning', title: 'The target mode could not be read', count: 0, detail: note, items: [], go: null});
     });
+    var _tfe = (window._tc || {}).target_fetch_error;
+    if (_tfe && _tfe.text) {
+      // the target's newest read failed (product finding 9, 2026-11-16): nothing in this
+      // build was checked against the target, the Review says so above the kinds
+      out.push({sev: 'warning', title: 'The target could not be read', count: 0,
+                detail: 'The last fetch of the target failed' + (_tfe.at ? ' ' + _tfe.at : '') + ': ' + _tfe.text
+                  + '. Nothing in this build was checked against the target. Check its address and API key under Devices.',
+                items: [], go: null});
+    }
     if (_reviewStale.policy || _reviewStale.network) {
       // Nothing in the project changed when only the version differs (E4):
       // the finding says which version built it instead of claiming an edit.
@@ -11496,7 +11805,7 @@
     var key = det.dataset.grp, rows = _RV_LOG[key] || [], T = _RV_LOG.texts || [];
     var tx = function (i) { return (typeof i === 'number') ? (T[i] || '') : String(i || ''); };
     var cut = function (s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '\u2026' : s; };
-    var goBtn = function (name) { return '<button type="button" class="ttl rv-go" data-go="' + encodeURIComponent(JSON.stringify({tab: 'ruleset', sub: 'security', fname: name})) + '" onclick="gsGoFrom(this)" title="Open this rule in Rules > Firewall">' + _esc(name) + '</button>'; };
+    var goBtn = function (name) { return '<button type="button" class="ttl rv-go" data-go="' + encodeURIComponent(JSON.stringify({tab: 'ruleset', sub: 'security', fname: name})) + '" onclick="gsGoFrom(this)" title="Open this rule in Policies > Security">' + _esc(name) + '</button>'; };
     var head = {dropped: ['Rule', 'What', 'Why'], changed: ['Rule', 'What changes', 'Why'], split: ['Rule', 'Into', 'Why'], disabled: ['Rule', 'Disabled by', ''], shadowed: ['Rule', 'Shadowed by', 'Kind']}[key];
     var detailBtn = function (r) { return ' <button type="button" class="iconbtn" title="Before and after" onclick="_rvRuleDetail(\'' + _esc(r[0]) + '\', \'' + _esc(String(r[1])).replace(/'/g, '&#39;') + '\', \'' + key + '\')">\u21c4</button>'; };
     var out = '<div class="twrap" style="margin:0;"><table><thead><tr><th>' + head[0] + '</th><th>' + head[1] + '</th><th>' + head[2] + '</th></tr></thead><tbody>';
@@ -11638,9 +11947,14 @@
   // Deep link into the workspace: tab, sub-tab, optional rule-name filter;
   // the first matching rule row scrolls into view and flashes.
   function gsGoTo(tab, sub, opts) {
+    if (tab === 'projects' || tab === 'devices') { window.location.href = '/' + tab; return; }   // the pages outside the workspace
     opts = opts || {};
     switchPrimary(tab);
     if (sub) { if (tab === 'enrichment') switchEnrichmentRulebase(sub); else if (typeof switchMain === 'function') switchMain(sub); }
+    if (opts.main) {   // the view inside a Target Settings rulebase (Zone Mapping), or the object kind on Objects (D84)
+      if (tab === 'objects') { if (typeof switchObj === 'function') switchObj(opts.main); }
+      else if (typeof switchMain === 'function') switchMain(opts.main);
+    }
     if (opts.obj && typeof switchObj === 'function') switchObj(opts.obj);
     if (opts.shadowed) {   // the Shadowed filter, fed from the report the finding came from (same rows, no second scan)
       if (typeof filterState !== 'undefined' && filterState.fname) {
@@ -11653,6 +11967,11 @@
         _shadowApply(found, _RV_LOG.shadowed.length);
       } else if (typeof toggleShadowFilter === 'function') toggleShadowFilter();
     }
+    if (opts.usage && typeof filterState !== 'undefined') {   // the Review's usage note lands on the usage filter (docs/HIT_COUNTS_PLAN.md, D7)
+      filterState.fusage = opts.usage;
+      var us = document.querySelector('[data-fkey="fusage"]'); if (us) us.value = opts.usage;
+      if (typeof applyFilters === 'function') applyFilters();
+    }
     if (opts.fname !== undefined && opts.fname !== null && typeof filterState !== 'undefined') {
       filterState.fname = opts.fname;
       var inp = document.querySelector('[data-fkey="fname"]'); if (inp) inp.value = opts.fname;
@@ -11664,11 +11983,81 @@
     }
   }
   window.gsGoTo = gsGoTo;
+  // The step model (docs/UI_USABILITY_PLAN.md, D1): one fetch refreshes the
+  // header sentence, the navigation markers and the Overview's step strip
+  // without a reload. Called after a build, a push, a review and a
+  // verification.
+  function gsProgressRefresh() {
+    if (!window._projectId) return;
+    fetch('/projects/' + window._projectId + '/progress')
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || j.error) return;
+        var box = document.getElementById('ws-next');
+        if (box) {
+          box.textContent = '';
+          var h = j.hint;
+          // the info icon opens the path dialog (D22, an icon since D24), the sentence is the link (D19), the x skips (D20)
+          var bb = document.createElement('button'); bb.type = 'button'; bb.className = 'gs-info hdr-hint-btn';
+          bb.textContent = '\uD83D\uDCA1';   // the light bulb emoticon (U+1F4A1), the one exception to the no-emoji rule (D24)
+          bb.title = 'The path of this project: every step with its evidence, Skip, Resume and Mark Verified'; bb.setAttribute('aria-label', 'The path of this project');
+          bb.onclick = function () { gsPathOpen(); };
+          box.appendChild(bb);
+          if (h) {
+            box.title = h.text;
+            var pre = document.createElement('span'); pre.className = 'pre'; pre.textContent = 'Next:'; box.appendChild(pre);
+            var a = document.createElement('a'); a.href = '#'; a.className = 'hdr-next-go';
+            var txt = document.createElement('span'); txt.className = 'txt'; txt.textContent = h.text;
+            a.onclick = function () { if (h.tab === 'projects' || h.tab === 'devices') { window.location.href = '/' + h.tab; } else { gsGoTo(h.tab, h.sub || '', h.main ? {main: h.main} : {}); } return false; };
+            // hovering the sentence lights the navigation entry it points to (D14)
+            a.onmouseenter = function () { wsNavGlow(h.nav, true); };
+            a.onmouseleave = function () { wsNavGlow(h.nav, false); };
+            a.appendChild(txt); box.appendChild(a);
+            if (h.skippable) {   // the word Skip skips the step (D20, D79)
+              var sk = document.createElement('button'); sk.type = 'button'; sk.className = 'hdr-skip-x'; sk.textContent = 'Skip';
+              sk.title = 'Skip this step: the path moves on, resume it under the light bulb'; sk.setAttribute('aria-label', 'Skip this step');
+              sk.onclick = function () { gsSkip(h.step); };
+              box.appendChild(sk);
+            }
+          } else if (j.complete) {
+            box.title = '';
+            var dn = document.createElement('span'); dn.className = 'cap gs-nx done'; dn.textContent = 'Done'; box.appendChild(dn);
+            var t2 = document.createElement('span'); t2.className = 'txt'; t2.textContent = j.done_text || 'The project is verified.';
+            box.appendChild(t2);
+          }
+          if (j.skipped) {   // the skipped steps stay visible: a count that opens the path dialog (D20, D22)
+            var sc = document.createElement('a'); sc.href = '#'; sc.className = 'hdr-skipped'; sc.textContent = j.skipped + ' skipped';
+            sc.title = 'The skipped steps, each with Resume';
+            sc.onclick = function () { gsPathOpen(); return false; };
+            box.appendChild(sc);
+          }
+        }
+        if (window.wsNavMarks) wsNavMarks(j.marks || {});
+        // the next step moved after an action: the new entry pulses twice (D15),
+        // never on the first evaluation of a page (the rendered step is the baseline)
+        var nxt = j.next || null;
+        if (window._gsNextStep !== undefined && window._gsNextStep !== nxt && window.wsNavPulse) wsNavPulse();
+        window._gsNextStep = nxt;
+        if (typeof window.ovRenderSteps === 'function') window.ovRenderSteps(j);
+      })
+      .catch(function () { /* the next action tries again */ });
+  }
+  window.gsProgressRefresh = gsProgressRefresh;
+  // Step 6: a current build whose findings are on the Review & Deploy page
+  // counts as reviewed, once per build.
+  function gsReviewed(jobId) {
+    if (!window._projectId || !jobId || window._gsReviewedJob === jobId) { gsProgressRefresh(); return; }
+    window._gsReviewedJob = jobId;
+    fetch('/projects/' + window._projectId + '/reviewed', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({job_id: jobId})})
+      .then(function (r) { return r.json(); })
+      .then(function () { gsProgressRefresh(); })
+      .catch(function () { gsProgressRefresh(); });
+  }
   function gsGoFrom(btn) {
     var go = {};
     try { go = JSON.parse(decodeURIComponent(btn.getAttribute('data-go') || '%7B%7D')); } catch (e) { return; }
     if (go.href) { if (typeof showNavOverlay === 'function') showNavOverlay(); window.location.href = go.href; return; }
-    gsGoTo(go.tab, go.sub || '', {fname: go.fname, obj: go.obj, shadowed: !!go.shadowed});
+    gsGoTo(go.tab, go.sub || '', {fname: go.fname, obj: go.obj, shadowed: !!go.shadowed, usage: go.usage || '', main: go.main || ''});
   }
   window.gsGoFrom = gsGoFrom;
 
@@ -11677,9 +12066,15 @@
   // aggregated (report events).
 
   function addZone() {
-    if (!_deviceId) { showToast('Pick a source device first', 'warn'); return; }
-    var name = (window.prompt('Zone name:') || '').trim();
-    if (!name) return;
+    if (!_deviceId) { showToast('Open a project first', 'warn'); return; }
+    gsNameModal('Add Zone', 'Zone name', '', function (name) {
+      name = (name || '').trim();
+      if (!name) return false;
+      _addZoneReq(name);
+      return true;
+    });
+  }
+  function _addZoneReq(name) {
     fetch('/zones/add', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -11756,7 +12151,7 @@
         ['schedules',       'Schedules',       ['Schedules']],
         ['security_rules',  'Firewall rules',  ['Security Rules']],
         ['nat_rules',       'NAT Rules',       ['NAT Rules']],
-        ['pbf_rules',       'Policy Routing (PBF)', ['PBF Rules']],
+        ['pbf_rules',       'Policy Routing', ['PBF Rules']],
         ['ssl_rules',       'Decryption (SSL)', ['Decryption Rules']],
       ],
     },
@@ -11933,7 +12328,7 @@
                 + '<span class="flex-1">' + ui
                 + '<span class="block text-amber-400/90 text-[10.5px] mt-0.5">(!) '
                 + _cpUrlcatGate.unmapped + ' URL categor' + plural + ' unmapped ('
-                + preview + '): attach in Rules > Decryption to enable.</span>'
+                + preview + '): attach in Policies > Decryption to enable.</span>'
                 + '</span>'
                 + '<span class="text-gray-500">(' + count + ')</span>'
                 + '</label>';
@@ -12045,14 +12440,14 @@
     if (_isOpt) {
       var _age = window._sourceImportAge || '';
       optNoteHtml = '<div style="border:1px solid var(--line2);background:var(--bg2);padding:10px 12px;text-align:left;margin-bottom:12px;">'
-        + '<p style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin:0 0 4px;">Optimization: this push goes back to ' + (_targetHost || 'the device') + ' itself</p>'
-        + '<p style="color:var(--tx2);font-size:var(--fs-small);margin:0;">It replaces the device\'s own ' + label.toLowerCase() + ' configuration with the curated image of the import'
-        + (_age ? ' (imported ' + _age + ')' : '') + '. If the device changed since, re-import first.</p>'
+        + '<p style="color:var(--tx);font-size:var(--fs-body);font-weight:500;margin:0 0 4px;">Optimization: this push goes back to ' + (_targetHost || 'the Device') + ' itself</p>'
+        + '<p style="color:var(--tx2);font-size:var(--fs-small);margin:0;">It replaces the Device\'s own ' + label.toLowerCase() + ' configuration with the curated image of the import'
+        + (_age ? ' (imported ' + _age + ')' : '') + '. If the Device changed since, re-import first.</p>'
         + '</div>';
     }
     d1.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60';
     d1.innerHTML = '<div class="bg-gray-800 border border-gray-600 rounded-lg p-5 max-w-lg">'
-      + '<p class="text-gray-200 text-sm mb-1 text-center">' + (_isOpt ? 'Push ' + label + ' back to ' + (_targetHost || 'the device') + '?' : 'Push ' + label + ' config to device?') + '</p>'
+      + '<p class="text-gray-200 text-sm mb-1 text-center">' + (_isOpt ? 'Push ' + label + ' back to ' + (_targetHost || 'the Device') + '?' : 'Push ' + label + ' config to the target Device?') + '</p>'
       + '<p class="text-gray-500 text-xs mb-3 text-center">Continue to push and override the ' + label.toLowerCase() + ' settings on the ' + (_isOpt ? 'device' : 'target') + '.</p>'
       + optNoteHtml
       + backupNoteHtml
@@ -12094,7 +12489,8 @@
     var _applyNote = {
       panw: 'The push writes the firewall’s candidate configuration. Commit on the firewall to apply it.',
       fortigate: 'Every change is live the moment it is written. There is nothing to commit afterwards and nothing to take back.',
-      checkpoint: 'The push stages the changes in a management session. Publish them in SmartConsole, then install the policy.',
+      checkpoint: 'The push stages the changes in a management session. Publish them in SmartConsole, then install the policy'
+                  + (window._targetIsVs ? ' on the virtual system.' : '.'),
     }[window._targetPlatform] || 'Applying the push is the target’s own step.';
     d2.innerHTML = '<div class="bg-gray-800 border border-red-700/60 rounded-lg p-5 max-w-sm text-center">'
       + '<p class="text-red-400 text-sm font-medium mb-1">Are you sure?</p>'
@@ -12234,7 +12630,7 @@
       (kind === 'publish' ? 'Publishing\u2026' : 'Discarding\u2026');
     var sep = document.createElement('p');
     sep.className = 'text-gray-500 text-xs mt-2';
-    sep.textContent = '\u2014 ' + (kind === 'publish' ? 'publish' : 'discard') + ' \u2014';
+    sep.textContent = (kind === 'publish' ? 'publish' : 'discard') + ':';
     logEl.appendChild(sep);
     _streamSse(
       '/deploy/' + kind + '/' + pushId,
@@ -12250,7 +12646,7 @@
         msg.className = ok ? 'text-green-400' : 'text-red-400';
         if (ok) {
           msg.textContent = kind === 'publish'
-            ? '[OK] Changes published to management. Install policy on the firewall to activate.'
+            ? '[OK] Changes published to management. Install policy on the ' + (window._targetIsVs ? 'virtual system' : 'firewall') + ' to activate.'
             : '[OK] Staged changes discarded.';
           {# Auto-verify in the publish stream replaced the static hint:
              the 'install readiness' step now reports the actual result. #}
@@ -12259,6 +12655,8 @@
         }
         logEl.appendChild(msg);
         _pushAddClose(logEl);
+        // a staged push stamps its strand at Publish, so the path refreshes here as well (D86)
+        if (typeof gsProgressRefresh === 'function') gsProgressRefresh();
       },
       function(msg) { _logFatal(logEl, msg); }
     );
@@ -12346,7 +12744,7 @@
     document.querySelector('#zone-busy-overlay svg').style.display = 'none';
     if (ok && capt.pushId && finalEvt && finalEvt.needs_commit) {
       // Session-scoped staging (Check Point): show Publish/Discard.
-      document.getElementById('zone-busy-label').textContent = 'Push staged \u2014 awaiting commit';
+      document.getElementById('zone-busy-label').textContent = 'Push staged, awaiting commit';
       _renderCommitButtons(logEl, capt.pushId);
       renderPushButtons();
       return;
@@ -12356,8 +12754,8 @@
     var _isPa = (window._targetPlatform === 'panw');
     var _isCp = (window._targetPlatform === 'checkpoint');
     document.getElementById('zone-busy-label').textContent = ok
-      ? (_isPa ? 'Push complete \u2014 commit on device'
-               : (_isCp ? 'Push complete \u2014 publish in SmartConsole' : 'Push complete'))
+      ? (_isPa ? 'Push complete, commit on the firewall'
+               : (_isCp ? 'Push complete, publish in SmartConsole' : 'Push complete'))
       : (finalEvt && finalEvt.interrupted ? 'Push interrupted (server restart)' : 'Push finished with errors');
     if (ok) {
       var msg = document.createElement('p');
@@ -12365,12 +12763,13 @@
       msg.textContent = _isPa
         ? '[OK] Config pushed to the candidate. Commit on the device to apply.'
         : (_isCp
-            ? '[OK] Config pushed to a management session. Publish it in SmartConsole, then install the policy.'
+            ? '[OK] Config pushed to a management session. Publish it in SmartConsole, then install the policy' + (window._targetIsVs ? ' on the virtual system.' : '.')
             : '[OK] Config pushed. Changes are active on the target.');
       logEl.appendChild(msg);
     }
     _pushAddClose(logEl);
     logEl.scrollTop = logEl.scrollHeight;
+    if (typeof gsProgressRefresh === 'function') gsProgressRefresh();   // the push stamped its strand (D1 step 7)
   }
 
   function executePush() {
@@ -12601,59 +13000,6 @@
         tr2.setAttribute('data-target-name', it.name);
         tr2.className = _OVERLAY_ROW;
         tr2.innerHTML = nodes;
-        tbody.appendChild(tr2);
-      }
-    });
-  }
-
-  function _overlayZones(items) {
-    var tbody = document.getElementById('zones-tbody');
-    if (!tbody) return;
-    tbody.querySelectorAll('tr[data-from-target="1"]').forEach(function(tr) { tr.remove(); });
-    tbody.querySelectorAll('td').forEach(function(td) { td.classList.remove(_OVERLAY_CELL); });
-
-    // Slice 6: data-zone-name is the current (post-rename) name and that's
-    // what Discover reports - direct match.
-    var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr[data-zone-name]'));
-    var byCurrent = {};
-    rows.forEach(function(tr) {
-      var cur = tr.getAttribute('data-zone-name') || '';
-      if (cur) byCurrent[cur] = tr;
-    });
-
-    (items || []).forEach(function(z) {
-      var zProps = z.properties || {};
-      var zType  = zProps.pa_zone_type || '';
-      var tr = byCurrent[z.name];
-      if (tr) {
-        var typeTd = tr.querySelector('td[data-field="zone_type"]');
-        var memTd  = tr.querySelector('td[data-field="members"]');
-        if (typeTd) _setCellText(typeTd, zType);
-        if (memTd)  _setCellText(memTd, (z.interfaces || []).join(', '));
-      } else {
-        var thead = document.querySelector('#main-zones thead tr');
-        var totalCols = thead ? thead.children.length : 7;
-        var first =
-          '<td class="py-1.5 pr-4"><div class="flex items-center gap-1.5">' +
-            '<span class="w-3.5 h-3.5 rounded-full flex-shrink-0 border bg-blue-900/50 border-blue-700/60"></span>' +
-            '<span class="font-mono text-gray-200">' + _escapeHtml(z.name) + '</span>' +
-            '<span class="ml-1 px-1.5 py-0.5 text-[10px] tracking-wide bg-blue-900/40 text-blue-300 rounded">Target</span>' +
-          '</div></td>' +
-          '<td class="py-1.5 pr-4 text-gray-400 font-mono">' + _escapeHtml(zType || '-') + '</td>' +
-          '<td class="py-1.5 pr-4 text-gray-400 font-mono">' + _escapeHtml((z.interfaces || []).join(', ') || '-') + '</td>';
-        for (var i = 3; i < totalCols - 1; i++) first += '<td class="py-1.5 pr-4 text-gray-700">-</td>';
-        first +=
-          '<td class="py-1.5 text-center">' +
-            '<button type="button" onclick="saveDiscovered(\'zones\', ' +
-              JSON.stringify(z.name) + ')" ' +
-              'class="text-blue-400 hover:text-green-400 transition-colors" ' +
-              'title="Save this zone into the source-spec">[OK]</button>' +
-          '</td>';
-        var tr2 = document.createElement('tr');
-        tr2.setAttribute('data-from-target', '1');
-        tr2.setAttribute('data-target-name', z.name);
-        tr2.className = _OVERLAY_ROW;
-        tr2.innerHTML = first;
         tbody.appendChild(tr2);
       }
     });
@@ -12924,7 +13270,7 @@
     }
     if (!data || data.payload == null) return;
     if (kind === 'interfaces') _overlayInterfaces(data.payload);
-    else if (kind === 'zones') _overlayZones(data.payload);
+    // zones: no table to overlay, the zones view is the project's own (dead path removed 2026-11-10)
     else if (kind === 'vrfs') _overlayVrfs(data.payload);
     else if (kind === 'routes') _overlayRoutes(data.payload);
   }
@@ -12949,7 +13295,7 @@
   function runDiscover(kind) {
     var targetId = window._targetId;
     if (!targetId) {
-      showToast('No target device selected: pick one in the header first.', 'warn');
+      showToast('No target Device in this project.', 'warn');
       return;
     }
     var btn = document.querySelector('[data-discover-btn="' + kind + '"]');
@@ -12960,6 +13306,7 @@
         if (!res.ok && res.body && res.body.error) {
           _applyDiscoverData(kind, {error: res.body.error});
         } else {
+          ((res.body && res.body.warnings) || []).forEach(function(w) { showToast(w, 'warn', 12000); });
           _applyDiscoverData(kind, res.body);
         }
       })
@@ -12978,7 +13325,7 @@
     var sourceId = window._deviceId;
     var targetId = window._targetId;
     if (!sourceId) { showToast('No source device selected.', 'warn'); return; }
-    if (!targetId) { showToast('No target device selected.', 'warn'); return; }
+    if (!targetId) { showToast('No target Device in this project.', 'warn'); return; }
     var body = {target_device_id: targetId};
     if (names && names.length) body.names = names;
     fetch('/network/discover/' + sourceId + '/' + kind + '/save', {
@@ -13014,7 +13361,7 @@
   // was retired in Phase 2b.)
   async function refreshTargetSnapshot() {
     var targetId = window._targetId;
-    if (!targetId) { showToast('No target device selected.', 'warn'); return; }
+    if (!targetId) { showToast('No target Device in this project.', 'warn'); return; }
     var btn = document.getElementById('btn-refresh-target-snapshot');
     var prev = btn ? btn.innerHTML : '';
     if (btn) { btn.disabled = true; btn.innerHTML = 'Refreshing&hellip;'; }
@@ -13031,28 +13378,52 @@
       if (window._targetPlatform === 'panw' || window._targetPlatform === 'fortigate') {
         kinds.push('address_objects', 'service_objects');
       }
-      await Promise.all(kinds.map(function(k) {
-        return fetch('/network/discover/' + targetId + '/' + k + (window._panoScopeQS ? window._panoScopeQS() : ''), {method: 'POST'})
-          .then(function(r) {
-            if (r.ok) return r.json();
-            // surface the backend's error detail instead of a generic toast
-            return r.json().catch(function() { return {}; }).then(function(body) {
-              // A driver without a given catalog raises NotImplementedError and
-              // the route answers 400 with supported:false - project-wide that
-              // means "not applicable to this vendor", not a failure. Treating
-              // it as one made the whole refresh fail for Check Point targets
-              // (no target-zone concept), so the reload never ran and the
-              // rename-to-target dropdown kept a stale interface list.
-              if (body && body.supported === false) return null;
-              return Promise.reject(new Error(body.error || ('HTTP ' + r.status)));
-            });
-          });
-      }));
+      // One catalogue after the other, never a burst: a FortiGate drops an
+      // accepted connection now and then (FortiOS 7.6.7 and later
+      // rate-limit the admin HTTP interface per client IP, the admin daemon
+      // drops connections under rapid config changes; seen live 2026-11-12
+      // on a 7.6.8 box, one of six parallel discovers lost, no reload,
+      // stale interface list). Every kind runs even after an earlier one failed,
+      // so the snapshot is as fresh as the box allowed; the reload follows
+      // a complete refresh only.
+      var failed = [], warned = [];
+      for (var i = 0; i < kinds.length; i++) {
+        var k = kinds[i];
+        try {
+          var r = await fetch('/network/discover/' + targetId + '/' + k + (window._panoScopeQS ? window._panoScopeQS() : ''), {method: 'POST'});
+          if (r.ok) {
+            // a read that succeeded with a part missing (a Gaia login that failed) says so after the reload
+            var okBody = await r.json().catch(function() { return {}; });
+            ((okBody && okBody.warnings) || []).forEach(function(w) { if (warned.indexOf(w) < 0) warned.push(w); });
+            continue;
+          }
+          // surface the backend's error detail instead of a generic toast
+          var body = await r.json().catch(function() { return {}; });
+          // A driver without a given catalog raises NotImplementedError and
+          // the route answers 400 with supported:false - project-wide that
+          // means "not applicable to this vendor", not a failure. Treating
+          // it as one made the whole refresh fail for Check Point targets
+          // (no target-zone concept), so the reload never ran and the
+          // rename-to-target dropdown kept a stale interface list.
+          if (body && body.supported === false) continue;
+          failed.push({kind: k, msg: _friendlyReachErr(body.error || ('HTTP ' + r.status))});
+        } catch (e) {
+          failed.push({kind: k, msg: _friendlyReachErr(e && e.message ? e.message : e)});
+        }
+      }
+      if (failed.length) {
+        // one sentence per distinct reason, the kinds it hit in front of it: a refused key
+        // or a box that is down fails every catalogue the same way (D95, 2026-11-16)
+        var byMsg = {}, order = [];
+        failed.forEach(function(f) { if (!byMsg[f.msg]) { byMsg[f.msg] = []; order.push(f.msg); } byMsg[f.msg].push(f.kind); });
+        throw new Error(order.map(function(m) { return 'for ' + byMsg[m].join(', ') + ': ' + m; }).join('. '));
+      }
+      warned.forEach(function(w) { queueToast(w, 'warn', 12000); });
       showToast('Target snapshot refreshed.', 'info');
       window.location.reload();
     } catch (e) {
       if (btn) { btn.disabled = false; btn.innerHTML = prev; }
-      showToast('Snapshot refresh failed: ' + (e && e.message ? e.message : e), 'error');
+      showToast('Snapshot refresh failed ' + (e && e.message ? e.message : e), 'error');
     }
   }
   window.refreshTargetSnapshot = refreshTargetSnapshot;
@@ -13271,5 +13642,9 @@
     if(typeof showToast === 'function') showToast('Staged "' + name + '": created on the target when you deploy into it.', 'success');
   }
 </script>
+
+{# the path of the project in a dialog, opened from the header's Hint badge (D22): outside every
+   tab container, a fixed dialog inside a hidden panel never shows (finding 2026-11-10) #}
+{% include "_path_modal.html" %}
 
 {% endblock %}

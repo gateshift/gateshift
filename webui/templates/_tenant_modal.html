@@ -1,0 +1,60 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# The tenants dialog (D66, 2026-11-13): opened from Tenants under Manage in the
+   navigation. One row per tenant with what it holds, Switch, Rename, Delete when empty
+   (never the default), +Add Tenant below. The actions are the helpers of base.html
+   (gsTenantAdd, gsTenantRename, gsTenantDelete, gsSetTenant). Expects `tenants` (id,
+   name, devices, projects) and `tenant_id`; the landing includes it on both views. #}
+<style>
+  #tenant-modal { position:fixed; inset:0; z-index:60; display:flex; align-items:flex-start; justify-content:center; padding-top:12vh; background:rgba(4,7,11,0.6); }
+  #tenant-modal.hidden { display:none; }
+  #tenant-modal .pbx { background:var(--bg1); border:1px solid var(--line2); padding:18px 20px 20px; width:100%; max-width:640px; margin:0 16px; box-shadow:var(--shadow-pop); max-height:80vh; overflow:auto; }
+  #tenant-modal .ph { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 10px; }
+  #tenant-modal .ph h3 { margin:0; font-size:var(--fs-title); font-weight:600; color:var(--tx); }
+  #tenant-modal .ph .px { background:none; border:none; color:var(--tx3); font-size:18px; line-height:1; cursor:pointer; padding:0 4px; }
+  #tenant-modal .ph .px:hover { color:var(--tx); }
+  #tenant-modal p.what { margin:0 0 14px; color:var(--tx2); font-size:var(--fs-body); }
+  #tenant-modal table { width:100%; border-collapse:collapse; font-size:var(--fs-body); }
+  #tenant-modal th { text-align:left; color:var(--tx3); font-weight:400; padding:4px 8px 6px 0; border-bottom:1px solid var(--line); }
+  #tenant-modal td { padding:7px 8px 7px 0; border-bottom:1px solid var(--line); vertical-align:middle; }
+  #tenant-modal td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  #tenant-modal td.act { text-align:right; white-space:nowrap; }
+  #tenant-modal tr.cur td.name { color:var(--tx); font-weight:500; }
+  #tenant-modal .foot { margin-top:14px; display:flex; align-items:center; gap:8px; }
+</style>
+<div id="tenant-modal" class="hidden" onclick="if (event.target === this) gsTenantsClose()">
+  <div class="pbx" role="dialog" aria-modal="true" aria-labelledby="tenant-modal-title">
+    <div class="ph">
+      <h3 id="tenant-modal-title">Tenants</h3>
+      <button type="button" class="px" onclick="gsTenantsClose()" aria-label="Close" title="Close">&times;</button>
+    </div>
+    <p class="what">A tenant is one customer's estate: its Devices with their imported configurations and its projects. A Device is registered into the tenant shown, a project inherits the tenant of its Devices. Names are unique within a tenant.</p>
+    <table>
+      <thead><tr><th>Tenant</th><th style="text-align:right;">Devices</th><th style="text-align:right;">Projects</th><th></th></tr></thead>
+      <tbody>
+        {% for t in tenants %}
+        <tr{% if t.id == tenant_id %} class="cur"{% endif %}>
+          <td class="name">{{ t.name }}{% if t.id == tenant_id %} <span class="mut">&middot; shown</span>{% endif %}</td>
+          <td class="n">{{ t.devices }}</td>
+          <td class="n">{{ t.projects }}</td>
+          <td class="act">
+            {% if t.id != tenant_id %}<button type="button" class="btn" onclick="gsTenantSwitch({{ t.id }})" title="Show this tenant's Devices and projects">Switch</button>{% endif %}
+            <button type="button" class="btn" title="Rename this tenant" onclick='gsTenantRename({{ t.id }}, {{ t.name | tojson }})'>Rename</button>
+            {% if t.id != 1 and t.devices == 0 and t.projects == 0 %}<button type="button" class="btn danger" title="Delete this empty tenant" onclick='gsTenantDelete({{ t.id }}, {{ t.name | tojson }})'>Delete</button>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="foot">
+      <button type="button" class="btn" title="Create a new, empty tenant and show it" onclick="gsTenantAdd()">+Add Tenant</button>
+    </div>
+  </div>
+</div>
+<script>
+  window.gsTenantsOpen = function () { var m = document.getElementById('tenant-modal'); if (m) { m.classList.remove('hidden'); var x = m.querySelector('.px'); if (x) x.focus(); } };
+  window.gsTenantsClose = function () { var m = document.getElementById('tenant-modal'); if (m) m.classList.add('hidden'); };
+  window.gsTenantSwitch = function (id) { gsSetTenant(id); showNavOverlay(); window.location.href = window.location.pathname + '?tenant=' + encodeURIComponent(id); };
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') window.gsTenantsClose(); });
+  // the cookie follows the tenant shown, so the forms of this page and the next agree (gsSetTenant, base.html)
+  document.addEventListener('DOMContentLoaded', function () { gsSetTenant({{ tenant_id }}); });
+</script>

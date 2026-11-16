@@ -19,12 +19,13 @@
   <input type="hidden" name="mgmt_ip"   value="{{ form_mgmt_ip }}">
   <input type="hidden" name="mgmt_port" value="{{ form_mgmt_port or 443 }}">
   <input type="hidden" name="api_key"   value="{{ form_api_key }}">
+  <input type="hidden" name="domain"    value="{{ form_domain or '' }}">
 
   <div class="field">
     <label style="font-size:var(--fs-body);color:var(--tx);font-weight:500;">Pick a policy package</label>
     {% if not packages %}
       <div class="empty" style="padding:14px;background:var(--bg2);border:1px solid var(--line);border-radius:0;text-align:left;">
-        No policy packages found on this Mgmt-Server.
+        No policy packages on this management server.
       </div>
     {% else %}
       <div style="display:flex;flex-direction:column;gap:6px;max-width:560px;">

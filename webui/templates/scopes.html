@@ -1,0 +1,57 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+
+{% extends "base.html" %}
+{% block title %}{{ manager.display_name or manager.host_name }} - Gateshift{% endblock %}
+{% block content %}
+
+{# A manager's scopes, read-only (docs/FMC_SOURCE_PLAN.md, D17). The
+   Community Edition's page for a manager row: the tree the import wrote,
+   with counts and a link into each scope's ruleset. Every scope is a
+   Device of its own, so a project picks it as a source like any firewall.
+   The Enterprise workbench (/manager/{id}) replaces this page when loaded. #}
+<div style="max-width:980px;">
+  <h2 style="margin:0 0 4px;">{{ manager.display_name or manager.host_name }}</h2>
+  <div class="mut" style="margin-bottom:18px;line-height:1.5;">
+    {{ platform_labels.get(manager.platform, manager.platform) }} manager{% if manager.mgmt_ip %} &middot; {{ manager.mgmt_ip }}{% endif %}
+    &middot; {{ scopes|length }} scope{{ '' if scopes|length == 1 else 's' }}.
+    Each scope is a Device of its own: open its ruleset here, or pick it as a project's source on the Projects page.
+  </div>
+  {% if not scopes %}
+  <div class="tag" style="width:auto;padding:9px 12px;border-radius:0;color:var(--tx2);border-color:var(--line);background:var(--bg2);line-height:1.55;">
+    No scopes yet. Import the manager from the Projects page to read its structure.
+  </div>
+  {% else %}
+  <div style="overflow-x:auto;">
+  <table style="border-collapse:collapse;width:100%;font-size:var(--fs-body);">
+    <thead>
+      <tr style="color:var(--tx3);text-align:left;">
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;">Scope</th>
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;">Type</th>
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;text-align:right;">Rules</th>
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;text-align:right;">NAT</th>
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;text-align:right;">Objects</th>
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;text-align:right;">Interfaces</th>
+        <th style="padding:6px 8px;border-bottom:1px solid var(--line);font-weight:normal;">Members</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in scopes %}
+      <tr>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);padding-left:{{ 8 + s.depth * 18 }}px;">
+          {# the rules page shows a scope's rules within a project: the scope's newest one travels along #}
+          <a href="/rules?device={{ s.id }}{% if s.project_id %}&project={{ s.project_id }}{% endif %}" title="{{ 'Open this scope\'s ruleset in its newest project' if s.project_id else 'Open this scope: its rules show once it is a project\'s source' }}">{{ s.scope_name }}</a>
+        </td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);color:var(--tx2);">{{ s.scope_type | replace('-', ' ') }}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums;">{{ s.n_rules }}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums;">{{ s.n_nat }}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums;">{{ s.n_objects }}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums;">{{ s.n_ifaces }}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid var(--line);color:var(--tx2);">{{ s.members | join(', ') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

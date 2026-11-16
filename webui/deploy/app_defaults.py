@@ -17,6 +17,8 @@ Only tcp/udp resolve to synthetic service objects; icmp-only apps (ping) carry
 """
 from __future__ import annotations
 
+import json
+
 # app-id (lowercase) → list of (proto, port). Multi-entry apps list several.
 APP_DEFAULT_PORTS: dict[str, list[tuple[str, str | None]]] = {
     "web-browsing":  [("tcp", "80")],
@@ -70,3 +72,78 @@ def resolve_app_default(apps: list[str]) -> tuple[list[tuple[str, str]], list[st
             if spec not in specs:
                 specs.append(spec)
     return specs, unresolved
+
+
+def _as_list(value) -> list:
+    """A JSON-encoded list column as a list, anything else as what it is."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return []
+    return [x for x in (value or []) if x]
+
+
+def apply_app_default(rules: list[dict], platform: str, forti_ngfw_mode: str | None,
+                      service_objects: list[dict]) -> list[tuple[str, str]]:
+    """Resolve ``application-default`` to concrete service objects for a
+    target without App-ID (the deploy loader's "Schicht 2"), in place.
+
+    PA resolves the token natively and a FortiGate in policy-based NGFW mode
+    carries the applications on its security policy with
+    enforce-default-app-port (docs/FGT_POLICY_MODE_PLAN.md, D4), so both are
+    left alone. Everywhere else a rule whose service is application-default
+    gets ``services`` = the default ports of its App-IDs, synthesised as
+    ``app-<proto>-<port>`` objects appended to ``service_objects``; the
+    App-IDs the table does not know land in ``_appdef_unresolved`` for the
+    drivers to declare. Returns the synthesised (service, rule) pairs for the
+    Review's services row.
+
+    The per-rule service MODE (``service_override``, the PA switch) is honoured
+    for every target (docs/APPDEF_WIDENING_PLAN.md, D5): ``any`` means the
+    operator accepts every service, so the rule is left to the drivers' Any
+    path untouched and undeclared; ``application-default`` forces this
+    resolution even where the source named services.
+    """
+    synth: list[tuple[str, str]] = []
+    if platform == "panw" or (platform == "fortigate" and forti_ngfw_mode == "policy-based"):
+        return synth
+    seen = {o["name"] for o in service_objects}
+    for rule in rules:
+        mode = str(rule.get("service_override") or "").strip().lower()
+        if mode == "any":
+            continue
+        forced = mode == "application-default"
+        if rule.get("services") and not forced:
+            continue
+        if not forced and "application-default" not in _as_list(rule.get("import_services")):
+            continue
+        specs, unresolved = resolve_app_default(_as_list(rule.get("import_applications")))
+        names: list[str] = []
+        for proto, port in specs:
+            sname = f"app-{proto}-{port}"
+            if sname not in seen:
+                service_objects.append({"name": sname, "value": {"protocol": proto, "port": port}})
+                seen.add(sname)
+                synth.append((sname, str(rule.get("rule_name") or "")))
+            if sname not in names:
+                names.append(sname)
+        if names:
+            rule["services"] = names
+            if unresolved:
+                rule["_appdef_unresolved"] = unresolved   # narrower: these App-IDs are left out
+        else:
+            if forced:
+                rule.pop("services", None)   # the mode replaces the source's services
+            # wider: nothing resolved, the drivers' Any path runs and
+            # deploy.base.appdef_result declares it (blocks on an allow rule).
+            # The scalar (proto, port_from, port_to) is the pipeline's artifact
+            # of a consolidated flow, not the source's service: left in place it
+            # sends the Check Point renderer down its port lookup and the rule
+            # out as one port while the declaration says every service
+            # (measured 2026-11-03: s_8000-tcp for a rule declared as Any).
+            for scalar in ("proto", "protocol", "port_from", "port_to"):
+                rule.pop(scalar, None)
+            rule["_appdef_widened"] = unresolved
+    return synth
+

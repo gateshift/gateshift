@@ -1,8 +1,6 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
-USE gateshift;
-
 TRUNCATE TABLE fw_rules_consolidated_1;
 
 INSERT INTO fw_rules_consolidated_1 (

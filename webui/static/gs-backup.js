@@ -6,8 +6,7 @@
 // for a target without staging). Goes through fetch so an error lands as a
 // toast and the server's caveat (X-Gateshift-Warning, e.g. an uncommitted
 // PA candidate) can be shown; the bytes go straight into a download and
-// are kept nowhere. Needs base.html's _setOverlay / showToast and, where
-// present, gs-log.js's loadPushHistory.
+// are kept nowhere. Needs base.html's _setOverlay / showToast.
 function deviceBackup(id, host) {
   _setOverlay(true, 'Pulling the running configuration from ' + host + '…');
   return fetch('/devices/' + id + '/backup')
@@ -28,7 +27,6 @@ function deviceBackup(id, host) {
       setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
       showToast('Backup of ' + host + ' downloaded - ' + d.name, 'success');
       if (d.warn) showToast(d.warn, 'info', 10000);
-      if (window.loadPushHistory) loadPushHistory();
       return true;
     })
     .catch(function (e) { showToast('Backup failed: ' + e.message, 'error', 9000); return false; })

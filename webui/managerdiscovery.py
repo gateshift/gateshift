@@ -8,7 +8,9 @@ Panorama (device groups, templates, template stacks, managed firewalls),
 FortiManager and FortiManager Cloud (ADOMs, policy packages, devices), a
 Check Point management (a SmartCenter or Smart-1 Cloud as one context, an
 MDS per domain: packages, gateways) and Strata Cloud Manager (folders,
-snippets, devices). Nothing is stored: the credentials travel in the one
+snippets, devices) and a Cisco Secure Firewall Management Center,
+on-premises or cloud-delivered (domains, access and NAT policies, devices).
+Nothing is stored: the credentials travel in the one
 request, the readers log out where the API has a session, no row and no
 log line come out of a discovery. Importing, curating and pushing the
 scopes is the Enterprise Edition, which reads the same managers with its
@@ -41,6 +43,7 @@ import urllib3
 
 from deploy.base import management_host
 from deploy import _forti_common as _forti
+from deploy import _fmc_common as _fmc
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -54,6 +57,8 @@ MAX_PACKAGES = 100        # packages per context, policy packages per ADOM
 MAX_FOLDERS = 100         # Strata Cloud Manager folders counted
 MAX_SNIPPETS = 50         # Strata Cloud Manager snippets counted
 MAX_FIREWALLS = 500       # firewalls listed
+MAX_FMC_DOMAINS = 50      # Management Center domains read
+MAX_FMC_COUNTS = 100      # rule-count calls per Management Center discovery (its rate limit)
 
 KINDS = {
     "panorama":     "Panorama",
@@ -61,6 +66,8 @@ KINDS = {
     "fmgcloud":     "FortiManager Cloud",
     "checkpoint":   "Check Point management",
     "scm":          "Strata Cloud Manager",
+    "fmc":          "Secure Firewall Management Center",
+    "cdfmc":        "Cloud-delivered Firewall Management Center",
 }
 
 
@@ -740,6 +747,97 @@ def discover_scm(tsg_id: str, client_id: str, client_secret: str, *, client=None
     return _result(manager, nodes, firewalls, skipped=skipped, truncated=truncated)
 
 
+# ── Cisco Secure Firewall Management Center (on-premises, cloud-delivered) ─
+# (docs/FMC_SOURCE_PLAN.md, D12: the transport lives in deploy._fmc_common,
+# the Enterprise collector imports it from there)
+
+def discover_fmc(host_text: str, username: str, password: str, *, _client=None) -> dict:
+    """An on-premises Management Center through a user with REST API access."""
+    host, port = _host_port(host_text)
+    host = management_host(host, "Management Center")
+    if not (username and password):
+        raise DiscoveryError("the Management Center needs a user and a password")
+    client = _client or _fmc.FmcClient(_fmc.FmcAuth(host, username, password, port))
+    try:
+        return _discover_fmc("fmc", client, host)
+    except _fmc.FmcError as exc:
+        raise DiscoveryError(str(exc))
+
+
+def discover_cdfmc(region: str, token: str, *, _client=None) -> dict:
+    """The cloud-delivered Management Center of a Security Cloud Control
+    tenant through the tenant's API token on the regional gateway."""
+    if not token:
+        raise DiscoveryError("Security Cloud Control needs an API token")
+    try:
+        client = _client or _fmc.FmcClient(_fmc.CdfmcAuth(region, token))
+        return _discover_fmc("cdfmc", client, f"Security Cloud Control ({(region or '').strip().lower()})")
+    except _fmc.FmcError as exc:
+        raise DiscoveryError(str(exc))
+
+
+def _own(item: dict, domain_uuid: str) -> bool:
+    """A listed policy or device belongs to the domain it is read in: a
+    child domain lists its ancestors' policies too (metadata.domain says
+    whose), and the devices of a parent list may carry the children's."""
+    dom = ((item.get("metadata") or {}).get("domain") or {}).get("id")
+    return not dom or dom == domain_uuid
+
+
+def _discover_fmc(kind: str, client, label: str) -> dict:
+    domains = client.auth.domain_list()
+    version = client.server_version()
+    manager = _manager(kind, label, version, "Management Center" if kind == "fmc" else "cloud-delivered")
+    if kind == "cdfmc" and domains:
+        mgr = domains[0].get("manager") or {}
+        manager["name"] = str(mgr.get("name") or label)
+        manager["version"] = version or str(mgr.get("softwareVersion") or mgr.get("version") or "")
+    nodes: list = []
+    firewalls: list = []
+    truncated: list = []
+    skipped: list = []
+    budget = MAX_FMC_COUNTS
+    seen_devices: set = set()
+    if len(domains) > MAX_FMC_DOMAINS:
+        truncated.append(f"{len(domains) - MAX_FMC_DOMAINS} more domains")
+    cfg = client.cfg
+    for d in sorted(domains[:MAX_FMC_DOMAINS], key=lambda x: str(x.get("name") or "")):
+        name, uid = str(d.get("name") or "Global"), d["uuid"]
+        parent = name.rsplit("/", 1)[0] if "/" in name else None
+        objects = client.count(cfg(uid, "/object/networkaddresses")) + client.count(cfg(uid, "/object/ports"))
+        devices = [x for x in client.get_all(cfg(uid, "/devices/devicerecords"), tolerate=(404,))
+                   if _own(x, uid) and x.get("id") not in seen_devices]
+        seen_devices.update(x.get("id") for x in devices)
+        members_of: dict = {}
+        for a in client.get_all(cfg(uid, "/assignment/policyassignments"), tolerate=(404,)):
+            pol = a.get("policy") or {}
+            members_of[(pol.get("type"), pol.get("id"))] = [
+                t.get("name") for t in (a.get("targets") or []) if isinstance(t, dict) and t.get("name")]
+        nodes.append(_node("domain", name, parent, objects=objects, devices=len(devices)))
+        for kind_name, path, rules_path in (("access-policy", "/policy/accesspolicies", "/accessrules"),
+                                            ("nat-policy", "/policy/ftdnatpolicies", "/natrules")):
+            for p in client.get_all(cfg(uid, path), tolerate=(404,)):
+                if not _own(p, uid) or not p.get("name"):
+                    continue
+                rules = None
+                if budget > 0:
+                    rules = client.count(cfg(uid, f"{path}/{p['id']}{rules_path}"))
+                budget -= 1
+                nodes.append(_node(kind_name, f"{name}/{p['name']}", name,
+                                   members_of.get((p.get("type"), p.get("id"))), rules=rules))
+        for x in devices:
+            meta = x.get("metadata") or {}
+            cont = meta.get("containerDetails") or {}
+            state = ", ".join(str(v) for v in (x.get("healthStatus"), x.get("deploymentStatus")) if v)
+            if cont.get("name"):
+                state = (state + ", " if state else "") + f"{str(cont.get('role') or 'member').lower()} of {cont['name']}"
+            firewalls.append(_firewall(str(x.get("name") or ""), str(meta.get("deviceSerialNumber") or ""),
+                                       str(x.get("model") or ""), str(x.get("sw_version") or ""), state, name))
+    if budget < 0:
+        truncated.append(f"{-budget} policies not counted")
+    return _result(manager, nodes, firewalls, skipped, truncated)
+
+
 # ── the dispatch the route uses ───────────────────────────────────────────
 
 def discover(kind: str, form: dict) -> dict:
@@ -757,4 +855,8 @@ def discover(kind: str, form: dict) -> dict:
         return discover_checkpoint(g("host"), g("api_key"))
     if kind == "scm":
         return discover_scm(g("tsg_id"), g("client_id"), g("client_secret"))
+    if kind == "fmc":
+        return discover_fmc(g("host"), g("username"), g("password"))
+    if kind == "cdfmc":
+        return discover_cdfmc(g("region"), g("token"))
     raise DiscoveryError(f"no such manager kind: {kind}")

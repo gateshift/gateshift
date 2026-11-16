@@ -4,7 +4,7 @@
    .steps row: each .step contains its trailing .conn (so .step.done
    .conn picks up the green tint). #}
 <div class="steps" style="padding:0 0 16px;">
-  {% for i, label in [(1, 'Mgmt-Server'), (2, 'Policy'), (3, 'Gateway')] %}
+  {% for i, label in [(1, 'Management'), (2, 'Policy'), (3, 'Gateway')] %}
     {% set state = 'done' if step > i else ('active' if step == i else 'pending') %}
     <div class="step{% if state != 'pending' %} {{ state }}{% endif %}">
       <span class="b">{% if state == 'done' %}[OK]{% else %}{{ i }}{% endif %}</span>

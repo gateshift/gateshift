@@ -9,6 +9,10 @@ Kinds: interface, zone, vrf, object, service. A rule's zone slot may hold a
 zone OR an interface name (FortiGate interface mode, log-derived rules);
 such slots try the zone map first, then the interface map - the one rename
 that happened is the one that applies, which is what the old cascade did.
+A token that names a zone of the source (`_zones`, loaded with the map) is
+a zone and never takes the interface map: a cloud source names zone and
+interface after the subnet, and renaming the interface to the target's
+port must not rename the zone (2026-11-15).
 
 Overrides are stored in project space (what the operator picked, which may
 be a target-side literal) and are never mapped: the loaders map imported
@@ -18,13 +22,36 @@ identity, byte for byte."""
 import json
 import re
 
-KINDS = ("interface", "zone", "vrf", "object", "service")
+KINDS = ("interface", "zone", "vrf", "object", "service", "nat_rule")   # nat_rule since 2026-11-10
 
 
 # ── map object ───────────────────────────────────────────────────────────────
 
 def empty_map() -> dict:
-    return {k: {} for k in KINDS}
+    nm = {k: {} for k in KINDS}
+    nm["_zones"] = frozenset()      # the source's zone names, see map_zone_or_iface
+    return nm
+
+
+def source_zone_names(conn, project_id) -> frozenset:
+    """The zone names of the project's source Device (fw_zones, the device level):
+    a zone-slot token among them is a zone, whatever interface shares the name.
+    Empty for a project whose source is not a Device row (a scope) or without one."""
+    if not project_id:
+        return frozenset()
+    from sqlalchemy import text
+    try:
+        row = conn.execute(text(
+            "SELECT source_ref_kind, source_ref_id FROM fw_projects WHERE id = :p"),
+            {"p": int(project_id)}).fetchone()
+        if not row or str(row[0] or "device") != "device" or not row[1]:
+            return frozenset()
+        names = conn.execute(text(
+            "SELECT name FROM fw_zones WHERE device_id = :d AND project_id IS NULL"),
+            {"d": int(row[1])}).fetchall()
+        return frozenset(str(n[0]) for n in names if n[0])
+    except Exception:
+        return frozenset()
 
 
 def load_name_map(conn, project_id) -> dict:
@@ -38,6 +65,7 @@ def load_name_map(conn, project_id) -> dict:
             "WHERE project_id = :p"), {"p": int(project_id)}).fetchall():
         if kind in nm and src and tgt and src != tgt:
             nm[kind][src] = tgt
+    nm["_zones"] = source_zone_names(conn, project_id)
     return nm
 
 
@@ -116,6 +144,13 @@ def is_mapped_name(inv: dict, kind: str, token) -> bool:
     return bool(token) and isinstance(token, str) and token in (inv.get(kind) or {})
 
 
+_KIND_WORDS = {"nat_rule": "NAT rule"}   # the operator's word for a kind in a message (2026-11-10)
+
+
+def _kind_word(kind: str) -> str:
+    return _KIND_WORDS.get(kind, kind)
+
+
 def name_map_conflict(nm: dict, kind: str, source_name: str, target_name: str,
                       source_names=None):
     """Why source_name -> target_name must be refused, or None. A target may
@@ -130,7 +165,7 @@ def name_map_conflict(nm: dict, kind: str, source_name: str, target_name: str,
             return f"{target_name!r} is already the name {src!r} is mapped to"
     if source_names and target_name in source_names \
             and kind_map.get(target_name, target_name) == target_name:
-        return f"a {kind} named {target_name!r} already exists in the source"
+        return f"a {_kind_word(kind)} named {target_name!r} already exists in the source"
     return None
 
 
@@ -149,6 +184,8 @@ def map_zone_or_iface(nm: dict, token):
     z = (nm.get("zone") or {}).get(token)
     if z is not None:
         return z
+    if token in (nm.get("_zones") or ()):
+        return token        # a zone of the source keeps its name, whatever interface shares it
     return (nm.get("interface") or {}).get(token, token)
 
 
@@ -338,6 +375,8 @@ def map_nat_rules(nm: dict, rows: list) -> list:
     if is_empty(nm):
         return rows
     for n in rows:
+        if isinstance(n.get("name"), str):   # the rule's own rename (kind nat_rule, 2026-11-10)
+            n["name"] = map_name(nm, "nat_rule", n["name"])
         if not n.get("zone_override_source"):
             for f in ("src_zones", "dst_zones"):
                 if isinstance(n.get(f), list):

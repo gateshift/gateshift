@@ -1091,7 +1091,7 @@ class OPNsenseDriver(DeployDriver):
                                 f"({unreadable}). If Firewall > NAT > Outbound "
                                 "is set to automatic, OPNsense ignores the "
                                 "source NAT written below. Check that setting "
-                                "on the box"))
+                                "on the Device"))
                 elif mode == "automatic":
                     yield StepResult(
                         step="preflight", success=False,

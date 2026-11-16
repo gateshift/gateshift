@@ -906,6 +906,16 @@ def _parse_network(net: _Net) -> tuple[list[dict], list[dict], list[dict], list[
             vrfs.append({"name": vr, "interface_members": members,
                          "properties": {"interface_members": members}})
     routes: list[dict] = []
+    for s in net.subnets.values():
+        # the subnet itself as a route of its VR (2026-11-15): the network behind the
+        # interface, no next hop, what a firewall synthesises from its interface address.
+        # The zone derivation and the routing view take it like a connected route,
+        # the targets re-derive it from the interface address once that is set.
+        for c in s["cidrs"]:
+            n = _cidr(c)
+            if n is not None:
+                routes.append({"prefix": str(n.network_address), "plen": n.prefixlen,
+                               "iface": s["zone"], "next_hop": None, "vr": s["vr"]})
     for rt in net.route_tables:
         rtp = _props(rt)
         vr = rt_name.get(rt.get("id", "").lower(), "default")

@@ -3,7 +3,7 @@
 {% from "_macros.html" import zone_cls, action_badge, disable_toggle %}
 
 <div id="rules-container"
-     hx-get="/rules-fragment"
+     hx-get="/rules-fragment{% if box_sort %}?sort={{ box_sort }}{% endif %}"
      hx-trigger="configSaved from:body{% if has_device_data and (running or needs_generate) %}, every 2s{% endif %}"
      hx-swap="outerHTML"
      hx-include="#device-select, #target-device-select"
@@ -22,12 +22,17 @@
 
 {% elif not devices %}
   <div class="text-gray-500 text-sm mt-10 text-center">
-    No rules found: the pipeline has not run for this source yet.
+    No rules yet. Click 'Generate'.
     <div style="margin-top:10px;">
-      <button type="button" onclick="startRun('generate')" class="btn run-btn">
-        Run Pipeline (Generate)</button>
+      <button type="button" onclick="startRun('generate')" class="btn run-btn">Generate</button>
     </div>
   </div>
+  {% if never_generated %}
+  {# the first generate of a source runs by itself, once per page (D80): the dirty flag is one
+     per stack and another run may have cleared it while this source never ran #}
+  <script>(function(){ if (!window._autoGenOnce) { window._autoGenOnce = true;
+    if (window._maybeRunGenerate) window._maybeRunGenerate(true); } })();</script>
+  {% endif %}
 
 {% else %}
   <script>(function(){var d=document.getElementById('regen-pending-dot');
@@ -163,14 +168,14 @@
     {% if total_pages > 1 %}
     <div style="display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-body);color:var(--tx2);">
       {% if page > 1 %}
-        <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+        <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}{% if box_sort %}&sort={{ box_sort }}{% endif %}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
                 class="btn">&larr; Prev</button>
       {% else %}
         <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
       {% endif %}
       <span class="mut" style="padding:0 6px;">{{ page }} / {{ total_pages }}</span>
       {% if page < total_pages %}
-        <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+        <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}{% if box_sort %}&sort={{ box_sort }}{% endif %}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
                 class="btn">Next &rarr;</button>
       {% else %}
         <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>
@@ -186,7 +191,7 @@
     <b style="color:var(--tx);">Effective view</b> - inherited rules from
     <span style="color:var(--tx);">{{ effective_layers[:-1] | join(", ") }}</span>
     are read-only (origin = group header ↓). Order matches evaluation: inherited first, own rules below.
-    <span class="mut" style="display:block;margin-top:3px;">Note: Gateshift merges the pre-/post-rulebases &rarr; a shared <i>post</i> catch-all (e.g. &ldquo;deny all&rdquo;) appears <i>at the top</i> here instead of at the bottom.</span>
+    <span class="mut" style="display:block;margin-top:3px;">Note: Gateshift merges the pre- and post-rulesets, so a shared <i>post</i> catch-all (e.g. &ldquo;deny all&rdquo;) appears <i>at the top</i> here instead of at the bottom.</span>
   </div>
   <style>
     tr.group-row.inh-row > td { background: var(--bg2); }
@@ -196,6 +201,11 @@
     tr.group-row.inh-row [onclick] { pointer-events: none; opacity: .55; }
   </style>
   {% endif %}
+  <style>
+    /* the Box hits / Last hit sort links (docs/HIT_COUNTS_PLAN.md, D7) */
+    th a.box-sort { color: inherit; text-decoration: none; cursor: pointer; }
+    th a.box-sort:hover, th a.box-sort.on { color: var(--accent, var(--tx)); }
+  </style>
   {# Applications, Logging, Profile, and Zone columns are always rendered but
      CSS-hidden outside their owning Enrichment sub-tab - see body.show-*-col
      toggles in rules.html. Selection column (sel-col) is the leftmost -
@@ -208,7 +218,7 @@
      in the table). #}
   {% set _has_sched = target_platform in ('panw', 'checkpoint', 'fortigate') %}
   {% set _has_iden = target_platform in ('panw', 'checkpoint', 'fortigate') %}
-  {% set ncols = 15 + (1 if _has_sched else 0) + (1 if _has_iden else 0) + (2 if target_platform == 'panw' else 0) + (1 if nat_fold_ui else 0) %}
+  {% set ncols = 17 + (1 if _has_sched else 0) + (1 if _has_iden else 0) + (2 if target_platform == 'panw' else 0) + (1 if nat_fold_ui else 0) %}
 
   {# Token .twrap wraps the rules table; <thead>/<tbody> styling comes from
      tokens.css element selectors. Filter row carries .filt class which the
@@ -263,6 +273,14 @@
         {% endif %}
         <th class="num">Hits</th>
         <th>Last Seen</th>
+        {# Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D7): the box's own counter per rule,
+           read at import or by Read hit counts, beside the log-derived Hits. Both sort on click. #}
+        <th class="num box-col" title="The Device's own counter per rule, read at import or by Read hit counts. Click to sort.">
+          <a href="#" hx-get="/rules-fragment?page_size={{ page_size }}&sort={{ 'hits_asc' if box_sort == 'hits_desc' else 'hits_desc' }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select" class="box-sort{% if box_sort in ('hits_desc', 'hits_asc') %} on{% endif %}">Device hits{% if box_sort == 'hits_desc' %} &darr;{% elif box_sort == 'hits_asc' %} &uarr;{% endif %}</a>
+        </th>
+        <th class="box-col" title="The last hit the Device counted for the rule. Click to sort.">
+          <a href="#" hx-get="/rules-fragment?page_size={{ page_size }}&sort={{ 'last_asc' if box_sort == 'last_desc' else 'last_desc' }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select" class="box-sort{% if box_sort in ('last_desc', 'last_asc') %} on{% endif %}">Last hit{% if box_sort == 'last_desc' %} &darr;{% elif box_sort == 'last_asc' %} &uarr;{% endif %}</a>
+        </th>
       </tr>
       <tr class="filt">
         <th class="sel-col"></th>
@@ -299,6 +317,18 @@
         {% endif %}
         <th></th>
         <th></th>
+        {# the usage filter of the box counters (docs/HIT_COUNTS_PLAN.md, D7): a DOM pass like the other
+           column filters, over the row's data-fusage tokens; the bulk actions work on what it leaves #}
+        <th class="box-col" colspan="2">
+          <select data-fkey="fusage" title="Narrow to rules by the Device's own counters">
+            <option value="">all</option>
+            <option value="zero">no Device hits</option>
+            <option value="stale30">no hit for 30 days</option>
+            <option value="stale90">no hit for 90 days</option>
+            <option value="stale180">no hit for 180 days</option>
+            <option value="unread">not read</option>
+          </select>
+        </th>
       </tr>
     </thead>
     <tbody>
@@ -381,6 +411,7 @@
               data-rid="{{ rule.id }}"
               data-rhash="{{ rule.rhash or '' }}"
               data-fname="{{ (rule.rule_name or '') | lower }}"
+              data-fusage="{{ rule.box_usage_tokens or 'unread' }}"
               data-fsrc="{{ rule.sources | join(' ') | lower }}"
               data-fdst="{{ (rule.destinations + _nat_list) | join(' ') | lower }}"
               data-fsrcz="{{ (rule.src_zones or []) | join(' ') | lower }}"
@@ -813,6 +844,14 @@
               {{ rule.last_seen.strftime('%Y-%m-%d %H:%M') if rule.last_seen else '-' }}
             </td>
 
+            {# the box's own counter and its last hit (docs/HIT_COUNTS_PLAN.md, D7); a dash = not read #}
+            <td class="num box-col" style="white-space:nowrap;" title="{{ rule.box_title or 'Not read from the Device' }}">
+              {{ rule.box_hits_text or '-' }}
+            </td>
+            <td class="date box-col" style="white-space:nowrap;" title="{{ rule.box_title or 'Not read from the Device' }}">
+              {{ rule.box_last_text or '-' }}
+            </td>
+
           </tr>
           {% endfor %}{# rules #}
   {% endfor %}{# groups #}
@@ -831,14 +870,14 @@
   {% if total_pages > 1 %}
   <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px;font-size:var(--fs-body);color:var(--tx2);margin:6px 20px 22px;">
     {% if page > 1 %}
-      <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+      <button hx-get="/rules-fragment?page={{ page - 1 }}&page_size={{ page_size }}{% if box_sort %}&sort={{ box_sort }}{% endif %}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
               class="btn">&larr; Prev</button>
     {% else %}
       <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">&larr; Prev</span>
     {% endif %}
     <span class="mut" style="padding:0 6px;">{{ page }} / {{ total_pages }}</span>
     {% if page < total_pages %}
-      <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
+      <button hx-get="/rules-fragment?page={{ page + 1 }}&page_size={{ page_size }}{% if box_sort %}&sort={{ box_sort }}{% endif %}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select"
               class="btn">Next &rarr;</button>
     {% else %}
       <span class="btn" style="height:28px;padding:0 10px;opacity:0.4;cursor:default;">Next &rarr;</span>

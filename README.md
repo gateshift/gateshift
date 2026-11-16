@@ -4,54 +4,17 @@
 
 Built to make firewall migration and cleanup projects easier, faster and safer.
 
-Gateshift reads a firewall configuration, enriches it with what the target platform can do, and pushes it through the target's API.
-
 Runs on your own host, air-gapped after install, no activation, no account, no call-home, no AI, no LLM calls. Nothing leaves the host: configurations and credentials stay where they are, credentials encrypted at rest.
 
 Website: [gateshift.org](https://gateshift.org)
 
 ## Supported vendors
 
-| Platform | Form | Read | Push | Edition |
-|---|---|---|---|---|
-| **Firewalls and Clusters** | | | | |
-| Palo Alto Networks (PAN-OS) | standalone, HA pair | yes | yes | CE |
-| FortiGate (FortiOS) | standalone, FGCP cluster, direct or through FortiGate Cloud | yes | yes | CE |
-| Check Point | one gateway or ClusterXL cluster at a time, through SmartCenter or Smart-1 Cloud | yes | yes | CE |
-| Cisco Firepower (FTD, FDM-managed) | standalone | yes | - | CE |
-| Cisco ASA | configuration file | yes | - | CE |
-| OPNsense | configuration file | yes | - | CE |
-| **Cloud Platforms** | | | | |
-| Amazon Web Services | account, over the provider's API or from an exported bundle | yes | - | CE |
-| Microsoft Azure | account, over the provider's API or from an exported bundle | yes | - | CE |
-| Google Cloud | account, over the provider's API or from an exported bundle | yes | - | CE |
-| **Manager** | | | | |
-| Panorama | manager, its device groups and template stacks as scopes | yes | yes | EE, discovery in CE |
-| FortiManager, FortiManager Cloud | manager, its ADOMs and policy packages as scopes, the cloud one through a FortiCloud IAM API user | yes | yes | EE, discovery in CE |
-| Check Point management | SmartCenter, Smart-1 Cloud or Multi-Domain, every domain and gateway as scopes | yes | yes | EE, discovery in CE |
-| Strata Cloud Manager | cloud manager, its folders and snippets as scopes | yes | yes | EE, discovery in CE |
-| **Log Sources** | | | | |
-| OPNsense | traffic logs over syslog, a ruleset generated from what they show | yes | - | CE |
-
-CE is this repository, the Community Edition. EE is the Enterprise Edition, commercial. "Discovery in CE" means the Community Edition connects the manager and shows its scopes with their counts, while importing, curating and pushing them is the Enterprise Edition.
-
-## See it in action
-
-Complete migrations, start to finish, on YouTube:
-
-- [Check Point to Palo Alto Networks (Panorama): Part 1: Import and enrichment](https://youtu.be/LYKX6bk2_as), [Part 2: Push and verification](https://youtu.be/M-ZO3mGTqKQ)
-- [Palo Alto Networks to FortiGate, single firewalls](https://youtu.be/vA38rwWIaUA)
-- [FortiGate to Check Point, single firewalls](https://youtu.be/1o4KdD5kzVI)
-- [Cisco ASA to FortiGate, single firewalls](https://youtu.be/B6m6rpfW9ns)
-
-More on the [Gateshift channel](https://www.youtube.com/@Gateshifter).
+Palo Alto Networks, FortiGate and Check Point as sources and targets. Cisco Secure Firewall, Cisco ASA, OPNsense, AWS, Azure and Google Cloud as sources. Panorama, FortiManager, Check Point management and Strata Cloud Manager in the Enterprise Edition. Forms, directions and editions in full: [docs/support-matrix.md](docs/support-matrix.md). What each platform needs on its side: [docs/vendor-prerequisites.md](docs/vendor-prerequisites.md).
 
 ## Install
 
-Prerequisites on the host: Docker Engine with the Compose plugin (`docker
-compose`, v2) from Docker's own repository, `git` and `openssl`. TCP 443 and
-80 and UDP 514 must be free. The first start builds the images and needs
-internet access for that.
+Docker Engine with the Compose plugin, `git` and `openssl` on the host, TCP 443 and 80 and UDP 514 free:
 
 ```
 git clone https://github.com/gateshift/gateshift.git
@@ -59,70 +22,16 @@ cd gateshift
 ./install.sh
 ```
 
-UI on `https://<server-address>/`. The first visit asks you to set the
-password of the one account, `admin`. Every later visit asks for a login.
-
-The installer checks the prerequisites, generates strong random credentials
-into `.env` (never overwriting an existing one), writes the TLS certificate
-and starts the stack. `.env.example` documents every setting if you prefer to
-set up `.env` yourself.
-
-**TLS.** The web container serves HTTPS on 443 itself, with no proxy in front
-of it, from `certs/gateshift.crt` and `certs/gateshift.key`. `make-cert.sh`,
-which the installer runs, writes a self-signed certificate carrying this
-host's names and addresses. `./install.sh --renew-cert` replaces it when the
-names change or it runs out. To use your own CA instead, put its certificate
-and key into those two files at any time and restart the stack. Nothing else
-changes.
-
-The UI listens on every address of the host. Reach it over a management network you trust, or restrict it with `WEBUI_BIND=<address>` in `.env`.
-
-Air-gapped installs: the image build downloads the Tailwind CLI from GitHub. Install with internet access first. The connection can be cut afterwards.
-
-## Updating
-
-```
-git pull
-docker compose up -d --build
-```
-
-`--build` is not optional: the Python code lives in the images, the SQL jobs
-are read from the checkout, so `docker compose up -d` alone starts the old
-images against the new jobs.
-
-Before 1.0 there is no guaranteed database migration path between releases.
-Dump your database before every update. Each release in CHANGELOG.md lists
-what its first start migrates.
-
-**A fresh install is the shorter path while nothing in the installation is
-yours.** Everything Gateshift read from a device it can read again, so as long
-as you hold no projects, renames, per-rule edits, snapshots or traffic
-evidence you want to keep:
-
-```
-docker compose down -v
-./install.sh
-```
-
-That drops the database and starts empty, keeping your `.env` and your
-certificate. Received syslog files stay in `syslog-ng/logs` and are read again
-when you ingest them. Once the installation carries work you want to keep,
-dump the database and update in place instead.
+UI on `https://<server-address>/`. The first visit sets the password of the one account, `admin`. TLS, the bind address, air-gapped hosts, updating and the first project: [docs/install.md](docs/install.md).
 
 ## What it can do
 
-- Migrate firewall configurations between different vendors and deployment models: standalones, clusters, unmanaged and managed devices, on hardware, virtual and cloud alike.
-- Carry firewall rules, NAT, address and service objects, interfaces, zones, virtual routers, static routes, policy routing, IPsec VPN, decryption rules, Check Point threat prevention, schedules, URL categories and tags across to the target.
-- Carry IPv6 alongside IPv4: dual-stack address objects, IPv6 rule sides, static routes and tunnel peers. What a target cannot express in IPv6 is declared per rule instead of going out silently.
+- Migrate firewall configurations between vendors and deployment models: standalones, clusters, unmanaged and managed devices, on hardware, virtual and cloud alike.
+- Carry rules, NAT, address and service objects, interfaces, zones, virtual routers, static routes, policy routing, IPsec VPN, decryption rules, Check Point threat prevention, schedules, URL categories and tags, IPv4 and IPv6 alike. What a target cannot express is declared per rule instead of going out silently.
 - Attach what the target itself offers instead of copying the source: security profiles, applications, user identity and log settings.
-- Find rules an earlier, broader rule already covers completely, and disable them in bulk.
-- Generate new rulesets from traffic logs.
-- Optimize and clean up firewall configurations, directly on a firewall or during migrations.
-- Keep every migration as a project with snapshots to save working states.
-- Hold several tenants in one installation, so projects and devices stay sorted by tenant.
-- Operate fully offline: no telemetry, no phone-home, no licence callbacks, no cloud uploads, no LLM calls. Reading a cloud account over its provider's API needs outbound HTTPS to that provider, the bundle upload needs none.
-
-Cloud accounts (Microsoft Azure, AWS, Google Cloud) are read as migration sources, over the provider's API or from an exported bundle. Central managers (Panorama, FortiManager and FortiManager Cloud, Check Point management, Strata Cloud Manager) are discovered here and migrated in the Enterprise Edition. The table under Supported vendors marks the edition of every entry.
+- Find rules an earlier, broader rule already covers, read the firewalls' own hit counters beside the usage derived from logs, and disable in bulk what a migration need not carry.
+- Generate new rulesets from traffic logs, optimize and clean up configurations in place.
+- Keep every migration as a project with snapshots, several tenants in one installation.
 
 ## What it can't do
 
@@ -131,28 +40,11 @@ Cloud accounts (Microsoft Azure, AWS, Google Cloud) are read as migration source
 - Guarantee flawless output.
 - Make manual review obsolete.
 
-## Workflow
-
-Every step is explicit and under the operator's control:
-
-- Add devices via API, configuration file, cloud account, or traffic logs.
-- Create a project: a source and a target for a migration, or the same device as both for an in-place optimization.
-- Re-map and rename interfaces, physical to virtual and vice versa.
-- Filter and consolidate the rules.
-- Drop unused and duplicate objects.
-- Auto-derive zones and interfaces, auto-assign applications.
-- Attach security profiles, log settings and schedules to the rules.
-- Review the target configuration before anything is pushed: what the target will receive, what the generate dropped and why, and the rule-by-rule change log against the source.
-- Push the whole configuration or just selected scopes.
-- Save a snapshot of the project's edits at any point, restore it later, or branch a second project from it.
-
-Sources come from an API connection, a configuration-file upload, or traffic logs. Migrations run intra-vendor and cross-vendor, appliance to manager and manager to appliance (the manager tier is the Enterprise Edition). With the same device as source and target, the identical pipeline performs in-place optimization and cleanup. Traffic logs can be turned into rule candidates instead of importing a policy.
-
 ## Editions
 
-This repository is the **Community Edition**, and it is complete for what it covers: single firewalls and HA clusters, no rule-count caps, no time limit, no feature nagging. Service providers may use it in client projects free of charge.
+This repository is the **Community Edition**, complete for what it covers: single firewalls and HA clusters, no rule-count caps, no time limit, no feature nagging. Service providers may use it in client projects free of charge.
 
-The **Enterprise Edition** adds the manager tier: Panorama, FortiManager and FortiManager Cloud, Check Point management (SmartCenter, Smart-1 Cloud or Multi-Domain) and Strata Cloud Manager. The Community Edition discovers every one of them (the add dialog's "Manager (Discovery)" entries show the scopes with their counts and store nothing), importing and pushing them needs the Enterprise Edition. It is commercial and not part of this repository. It is named here because a paid edition appearing later without warning would be a bait-and-switch.
+The **Enterprise Edition** adds the manager tier: Panorama, FortiManager and FortiManager Cloud, Check Point management (SmartCenter, Smart-1 Cloud or Multi-Domain) and Strata Cloud Manager. The Community Edition discovers every one of them and stores nothing, importing and pushing them needs the Enterprise Edition. It is commercial and not part of this repository. It is named here because a paid edition appearing later without warning would be a bait-and-switch.
 
 ## Verification, liability and intended use
 
@@ -167,47 +59,21 @@ Configuration backups and verification are the operator's responsibility and a m
 - Review the pushed configuration on the target.
 - Test the result for correctness and function before cutover.
 
-To the extent permitted by applicable law, Gateshift and everything it produces are provided "as is", without warranty of any kind and without any acceptance of liability. In particular, no liability is accepted for:
-
-- generated or pushed configurations and their behavior on any device
-- migration outcomes, including incomplete, incorrect or lossy migrations
-- malfunctions or defects of the software itself
-- damage to or outages of connected systems, production or otherwise
-- data loss on any system Gateshift reads from or writes to
-- any consequences for support agreements or warranties covering the connected devices
+To the extent permitted by applicable law, Gateshift and everything it produces are provided "as is", without warranty of any kind and without any acceptance of liability. `LICENSE` is authoritative. It carries the complete warranty disclaimer and the limitation of liability, including what it covers in detail.
 
 Gateshift is an independent project. It is not affiliated with, endorsed by, or supported by any vendor named in this repository. Vendor names are used solely to describe compatibility.
 
-`LICENSE` is authoritative. It carries the complete warranty disclaimer and limitation of liability.
+## Transparency and license
 
-## Transparency
-
-Gateshift started as a hand-written project. Its development is now AI-assisted. The product itself contains no AI. The source can be read, and every release is guaranteed to become genuine open source (MPL 2.0) four years after it ships (see License). `SBOM.json` (CycloneDX) lists every dependency and its licence.
-
-## License
+Gateshift started as a hand-written project. Its development is now AI-assisted. The product itself contains no AI. `SBOM.json` (CycloneDX) lists every dependency and its licence.
 
 | Part | License |
 |---|---|
 | Community Edition (this repository) | Business Source License 1.1 |
 | Enterprise Edition | commercial, separate agreement |
 
-BSL 1.1 is source-available. It is not OSI open source at first. You may read, modify and run it, including commercially and including migration work you perform for clients. What the license excludes is offering a competing product.
-
-Every release becomes genuine open source four years after it ships. The conversion to the Mozilla Public License 2.0, an OSI-approved license, is written into the license text itself and happens automatically. It does not depend on anyone's goodwill, including ours. The change date is stamped per release.
-
-`LICENSE` is authoritative. This table is a summary, not a grant. The name and logo are trademarks and are not licensed with the code.
+BSL 1.1 is source-available, not OSI open source at first. You may read, modify and run it, including commercially and including migration work you perform for clients. What the license excludes is offering a competing product. Every release becomes genuine open source four years after it ships: the conversion to the Mozilla Public License 2.0 is written into the license text itself and happens automatically, the change date is stamped per release. `LICENSE` is authoritative. This table is a summary, not a grant. The name and logo are trademarks and are not licensed with the code.
 
 ## Bugs, requests and support
 
-A bug is when Gateshift does not do what the documentation says. What it does not do lives in `KNOWN_LIMITATIONS.md`. Anything beyond that is a feature request, not a defect.
-
-- **Bug reports** are welcome and genuinely useful. Vendors rename fields and change response schemas between releases, and we cannot test every version of every supported vendor. Include the vendor, the exact firmware version, and the verbatim error or drop-report text.
-- **Feature requests** are welcome from anyone. They are read and labeled, but carry no commitment or date. Enterprise subscribers get a say in release prioritization.
-- **No support entitlement** for the Community Edition.
-- **Pull requests** are not accepted as a rule. Single-copyright ownership is what makes the license model and the Enterprise Edition possible. Substantial contributions are possible case by case, under a contributor agreement.
-
-Security: report vulnerabilities privately, not in a public issue. Only the latest release is supported. Security fixes ship in the next release.
-
-## Status
-
-The current release is feature-complete. Gateshift remains an independent project in active development.
+A bug is when Gateshift does not do what the documentation says. What it does not do lives in `KNOWN_LIMITATIONS.md`, anything beyond that is a feature request. Bug reports with the vendor, the exact firmware version and the verbatim error text are the most useful thing you can send. There is no support entitlement for the Community Edition, and pull requests are not accepted as a rule, see [CONTRIBUTING.md](CONTRIBUTING.md). Vulnerabilities go to [SECURITY.md](SECURITY.md), never into a public issue.

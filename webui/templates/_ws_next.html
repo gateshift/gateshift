@@ -1,0 +1,39 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# ── The next step in a box of its own in the page head (D6, D33, 2026-11-10).
+     In the workspace (rules.html) the first open step of the project's step
+     model with its sentence, linked to the place that completes it, refreshed
+     by gsProgressRefresh(). On the landing (projects.html, the views projects
+     and devices) the box speaks for the TENANT, never for a project (D35,
+     operator, 2026-11-12): register a Device, import one, create the first
+     project, and nothing once projects exist. The last opened project's own
+     next step stays in the tree under Active Project. Until D35 the landing
+     showed that project's step beside the page title, which read as an order
+     for the list ("Generate the configuration" on Projects). ── #}
+      {% set _hint = (ov_progress.hint if ov_progress else none) %}
+      {% set _landing = page_view is defined %}
+      {% if _landing %}
+      {# the chain is the server's (_landing_next in main.py, D67): the same answer sends login and
+         setup to the page of the step and marks that page's Manage entry in the navigation #}
+      {% set _tn = (landing_next.text, landing_next.href) if landing_next else none %}
+      {% if _tn %}
+      <div class="ws-next-box"><div id="ws-next" class="hdr-next"><span class="gs-info" title="Hint">&#128161;</span><span class="pre">Next:</span>{% if _tn[1] == '/' ~ page_view %}<span class="txt">{{ _tn[0] }}</span>{% else %}<a class="hdr-next-go" href="{{ _tn[1] }}" onclick="showNavOverlay()"><span class="txt">{{ _tn[0] }}</span></a>{% endif %}</div></div>
+      {% endif %}
+      {% elif ov_progress %}
+      <div class="ws-next-box">
+      <div id="ws-next" class="hdr-next"{% if _hint %} title="{{ _hint.text }}"{% endif %}>
+        {# the light bulb opens the path dialog (D22, D24), the sentence is the link to the next
+           step (D19), hovering it lights the navigation entry (D14), the word Skip skips (D20, D79),
+           the skipped count opens the dialog as well #}
+        {% set _glow = ' data-nav="' ~ (_hint.nav or '') ~ '" onmouseenter="wsNavGlow(this.dataset.nav, true)" onmouseleave="wsNavGlow(this.dataset.nav, false)"' if _hint else '' %}
+        {% set _badge_title = 'The path of this project: every step with its evidence, Skip, Resume and Mark Verified' %}
+        <button type="button" class="gs-info hdr-hint-btn" onclick="gsPathOpen()" title="{{ _badge_title }}" aria-label="The path of this project">&#128161;</button>
+        {% if _hint %}
+          {# the word before the sentence (operator, 2026-11-10) #}
+          <span class="pre">Next:</span>
+          <a class="hdr-next-go" href="#" data-tab="{{ _hint.tab }}" data-sub="{{ _hint.sub or '' }}" data-main="{{ _hint.main or '' }}" onclick="gsGoTo(this.dataset.tab, this.dataset.sub, this.dataset.main ? {main: this.dataset.main} : {}); return false;"{{ _glow | safe }}><span class="txt">{{ _hint.text }}</span></a>{% if _hint.skippable %}<button type="button" class="hdr-skip-x" data-step="{{ _hint.step }}" onclick="gsSkip(this.dataset.step)" title="Skip this step: the path moves on, resume it under the light bulb" aria-label="Skip this step">Skip</button>{% endif %}
+        {% elif ov_progress.complete %}<span class="cap gs-nx done">Done</span><span class="txt">{{ ov_progress.done_text or 'The project is verified.' }}</span>
+        {% endif %}
+        {% if ov_progress.skipped %}<a class="hdr-skipped" href="#" onclick="gsPathOpen(); return false;" title="The skipped steps, each with Resume">{{ ov_progress.skipped }} skipped</a>{% endif %}
+      </div>
+      </div>
+      {% endif %}

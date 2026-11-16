@@ -2,8 +2,12 @@
 
 /* gateshift - self-hosted webfonts.
    Reddit Mono is the product typeface (design handoff 2026-08-09): one
-   family for brand, navigation, UI and data alike, weights 400/500 via
-   the variable wght axis, one WOFF2 per subset. The unicode-range hints
+   family for brand, navigation, UI and data alike, one WOFF2 per subset
+   with the whole variable wght axis (200 to 900). The declaration said
+   400 500 until 2026-11-10, so every 600 and 700 in the app rendered as
+   the browser's synthetic bold (docs/UI_USABILITY_PLAN.md, D32 and D34);
+   the files were the same all along, byte-identical with what Google
+   serves for 400..700. The product uses 400 to 700. The unicode-range hints
    let the browser download only the subset(s) a page actually needs.
    Source: Google Fonts v5 (2026-08-09, mirrored locally for privacy +
    offline-lab support).
@@ -19,7 +23,7 @@
 /* ── Reddit Mono (brand + UI + data) ── */
 @font-face {
   font-family: 'Reddit Mono';
-  font-weight: 400 500;
+  font-weight: 200 900;
   font-style: normal;
   font-display: swap;
   src: url('/static/fonts/redditmono-latin.woff2') format('woff2');
@@ -27,7 +31,7 @@
 }
 @font-face {
   font-family: 'Reddit Mono';
-  font-weight: 400 500;
+  font-weight: 200 900;
   font-style: normal;
   font-display: swap;
   src: url('/static/fonts/redditmono-latin-ext.woff2') format('woff2');
@@ -35,7 +39,7 @@
 }
 @font-face {
   font-family: 'Reddit Mono';
-  font-weight: 400 500;
+  font-weight: 200 900;
   font-style: normal;
   font-display: swap;
   src: url('/static/fonts/redditmono-vietnamese.woff2') format('woff2');

@@ -30,10 +30,11 @@ release rather than as backports.
 
 These properties matter more than any single patch:
 
-- The web UI binds to loopback by default and has **no authentication of its
-  own**. Exposing it beyond a trusted management network without a
-  reverse proxy in front is a deployment vulnerability, not a product one.
-  (README)
+- The web UI serves HTTPS itself and asks for the login of its one account,
+  `admin`, on every visit. It listens on every address of the host: reach it
+  over a management network you trust, or restrict it with `WEBUI_BIND` in
+  `.env`. Exposing it to untrusted networks is a deployment decision, not a
+  product property (docs/install.md, Network exposure).
 - Set `GATESHIFT_SECRET_KEY`. It encrypts stored device credentials
   (API keys, Gaia passwords, VPN pre-shared keys) at rest. Without it, those
   sit in the database unencrypted. The key itself lives in the environment,
@@ -50,7 +51,9 @@ These properties matter more than any single patch:
   holds the same sensitive material as the firewalls it talks to: run and
   protect it accordingly, and where you do not need the live source, connect
   to a restored backup instead. Secrets embedded in a source config (VPN
-  pre-shared keys) are never read. Gateshift pushes a placeholder.
+  pre-shared keys) are never read. A tunnel's pre-shared key is entered under
+  Network > VPN, stored encrypted and never shown again, and without one
+  Gateshift pushes a placeholder.
 
 ## No bounty
 

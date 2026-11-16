@@ -4,6 +4,284 @@ All notable changes to Gateshift, newest first. This file covers the current
 major version. It ships with every release and is the source of the release
 notes.
 
+## 0.9.5 (2026-11-16)
+
+**Added**
+
+- **The operator's path through a project**: the path judges every step from what
+  Gateshift holds (Devices and project, source imported, target inventory fetched,
+  zones and interfaces mapped, every section the project carries, the blocking
+  findings of the current build with the place that fixes each, then reviewed,
+  pushed, verified).
+- A section counts as gone through once it was opened after the import.
+- A step you do not want to take can be skipped with the x beside the next-step
+  sentence or in the path dialog, and resumed there.
+- The next-step box counts the skipped steps as long as there are any.
+- The page head names the first open step in a box of its own with a link to the
+  place that completes it, and the light bulb in that box opens the path dialog.
+- The navigation marks done entries with a check and the next one with an arrow
+  and the light bulb, its branch stays open and the entry pulses when the next
+  step moves.
+- The path dialog lists the steps with their evidence and offers Mark Verified
+  after the push.
+- The project list shows status, last activity and snapshots.
+- A build after a push no longer steps the status back, a rebuild reopens review,
+  push and verification.
+- The add dialog links the platform's prerequisites.
+- **Hit counts from the Device**: the import reads the firewall's own rule
+  counters where the vendor offers them (PAN-OS security and NAT rules, FortiOS
+  policies, Check Point access rules for the pinned gateway, cluster or virtual
+  system, Management Center and Device Manager access rules, OPNsense pf
+  counters) and keeps them beside the usage derived from logs, never mixed.
+- Policies > Security shows them as Box hits and Last hit with a usage filter the
+  bulk actions work on.
+- "Read hit counts" on the Dashboard reads them again without a re-import.
+- The Review names the rules without a hit on the Device, and a source whose
+  counters are not read says why.
+- The push never sees the counters and nothing is ever reset on the Device.
+- On FortiOS the implicit deny carries the Device's counter too, and the
+  since-date is the policy's creation time.
+- On OPNsense an uploaded configuration that is not the Device's current one gets
+  no counters, and the import says so.
+- **Cisco Secure Firewall Management Center as a source** (on-premises FMC and
+  the cloud-delivered one in Security Cloud Control): the Management Center
+  registers through the add dialog's Manager group and is imported as a whole,
+  its domains, access policies and devices (standalone or HA pair) as scopes a
+  project picks as its source.
+- Each access policy is read as the FTD evaluates it (prefilter, base policies,
+  own rules, default action), NAT follows the device, literals become objects,
+  what is left out is declared.
+- The two discovery entries read a Management Center without storing anything.
+- **A manager's scopes as project sources** in the project wizard, and a
+  read-only scope page for a manager row.
+- **Virtual instances as scopes**: a FortiGate in multi-VDOM mode, a PAN-OS
+  firewall with several vsys and a Check Point VSX gateway are imported as one
+  scope per instance under the Device, each a source and a target of its own.
+- A Check Point virtual system takes the policy strand into its package, its
+  network is provisioned on the VSX and declared on the deploy page.
+- The Device row becomes the container, a single-instance Device is unchanged.
+- The Check Point wizard accepts a VSX gateway or cluster, and the domain of a
+  Multi-Domain management.
+
+**Changed**
+
+- **Navigation and texts**: the tree reads by the operator's questions in the
+  words of firewall menus.
+- Projects and Devices are the global entries (the Devices page is the tenant's
+  inventory, the project picker sits under them).
+- A project's tree is Dashboard, Network (Interfaces, Routing, Zones, Policy
+  Routing, VPN), Policies (Security, NAT, Decryption, Threat Prevention),
+  Objects, Profiles & Settings, Review & Deploy and Logs, without a Configure
+  group.
+- Profiles & Settings and Review & Deploy stay visible when locked and say why,
+  groups are folded unless the view is inside them, and the active path reads in
+  brighter bold type.
+- The panel's type is one grid: one size, the two weights the typeface carries,
+  the picker, Collapse, version and Logout on the text column.
+- The navigation runs the full height of the window with the brand at its top,
+  and the pages with the tree have no header bar (the next step sits in a box of
+  its own beside the page title, a manager's scope pickers on the row below).
+- The navigation is three menus with quiet headings in their lines (Manage:
+  Projects and Devices, Active Project: the picker, Migrate & Optimize: the
+  project's tree), stacked in the middle of the column.
+- The branch that was Target Settings reads Profiles & Settings.
+- Every view opens with a light bulb that says what you can do there, and the
+  browser tab names the view and the project.
+- The empty states and the remedies name the places that exist today, browser
+  prompts gave way to the product's dialogs, and the terminology follows the
+  standard (ruleset, Policy Routing, Profiles & Settings, Device).
+- **Shorter view hints, Device throughout**: every hint of the workspace reads in
+  one pattern with button names in quotes, and the registered row is the Device
+  in every text, the rules table (Device hits), the review notes and the push
+  messages included.
+- **The first page is the page of the next step**: after the setup and after a
+  login without a destination the operator lands on Devices until a source and
+  a target Device are registered, then on Projects.
+- The next-step chain counts Devices: register the source, register the target
+  (or create an optimization project on the one), create the first project.
+- The Manage entry of that page carries the arrow and the light bulb of the next
+  step, like a step of the tree.
+- **The path recommends every target feature**: Profiles & Settings is no longer
+  one step, each of its views (security or UTM profiles, applications, logging,
+  schedules, source users, tags) and the Target Settings of NAT and Policy
+  Routing is a recommended step of its own where the target has the view and
+  the project carries something for it, with its marker in the tree.
+- The path dialog labels the recommended steps, the three the path needs stand
+  out.
+- **The zone bindings want one look**: when the target uses zones, the path
+  carries a step of its own after Routing until Network > Zones was looked
+  at, and the Network menu lists Routing before Zones: the derived zones and
+  the rule mapping follow the routes.
+- **NAT and Policy Routing settings sit with their rulesets**: Policies > NAT and
+  Network > Policy Routing switch between Rules and Target Settings, Profiles &
+  Settings holds what gets attached to firewall rules.
+- **Toasts are opaque with a signal bar at the left**, a failure stays until it
+  is closed and a warning holds eight seconds, the messages were transparent,
+  grey and gone after three and a half seconds.
+- **Project names read as a sentence**: the wizard suggests "<source> to <target>
+  migration" and "<Device> optimization".
+- **Tenants step back until there is a second one**: the landing shows no
+  tenant row while only the default tenant exists.
+- With a second tenant a picker sits in the navigation, the tenants are managed
+  in one dialog behind the Tenants button of the Devices page (add, rename,
+  delete when empty, switch), and a Device no project binds may move to another
+  tenant from its edit dialog.
+- **The Devices page shows Devices**: the Log Senders button and the count of
+  unattributed senders left it.
+- What the syslog receiver heard is listed at /devices/senders, the add dialog's
+  "from the log stream" entry and the capture upload stay as they were.
+- **Every manager has its entry in Add Device**: the Manager group lists Panorama,
+  FortiManager, FortiManager Cloud, Check Point, Strata Cloud Manager and the
+  Cisco Management Center, the firewall entries keep only the toggles that say
+  how the firewall is reached or pushed.
+- **Add Device asks for the API key**: the key (or the platform's password) is
+  required for every platform that is read through its API, the add refuses an
+  empty one, and the dialog keeps only its labels, the Prerequisites link carries
+  the explanations.
+- **Check Point Security Gateway**: the gateway entry carries Check Point's name
+  and its wizard keeps only its labels.
+- **The add dialog names the Check Point entries by what manages the Device**: the
+  gateway entry reads SmartCenter or Smart-1 Cloud managed, and the management
+  entries read SmartCenter, Smart-1 Cloud or MDS, the registering one in its own
+  Manager group in the Enterprise Edition and the discovery one as before.
+- The README is a landing page again: the vendor matrix moved to
+  docs/support-matrix.md, the installation, TLS, update and first-project
+  details to docs/install.md, and both files ship with the release.
+
+**Fixed**
+
+- **A catalogue read no longer holds the whole app**: reading a target's
+  profiles, applications or logging profiles, the Check Point layers and
+  categories, a target fetch, a hit-count read, a build, an import, the add and
+  edit of a Device and the Check Point wizard made every other request of every
+  browser wait, up to a minute for a PAN-OS App-ID catalogue.
+- **A browser reload returns to the view it was made in**, a reload on
+  Network > Zones or any other sub view landed on the first leaf of its branch.
+- With a FortiGate target the Profiles & Settings branch opened without a hint
+  and without the marked path after a reload.
+- **A FortiGate dropping one read no longer fails the snapshot refresh**:
+  FortiOS 7.6.7 and later rate-limit the admin HTTP interface per client and
+  reset a connection over the limit, so the refresh reads one catalogue after
+  the other and retries a connection the Device dropped.
+- A FortiGate that is not reachable still fails the refresh at once.
+- **A FortiOS push to a box that does not answer fails at once and says so**, it
+  retried every call for up to four minutes, silently, step after step.
+- The retry stays for a FortiGate that answers and drops the connection.
+- **FortiOS push keeps the management route ahead**: a default route from a
+  source whose metric is an administrative distance (a Management Center
+  route carries 1) outranked the DHCP default route of the FortiGate's
+  management port and took the replies with it.
+- The network push reads the Device's active routing table and raises such a
+  default route to the management route's distance plus one, with a step that
+  says so.
+- **FortiOS policy-NAT fold resolves address groups**: a source-NAT intent on a
+  group member (a Management Center auto-NAT per network object) folds onto the
+  outbound policy that names the group, instead of staying declared as "no
+  matching outbound policy".
+- **A Check Point policy push wipes the NAT rulebase also when the source
+  carries no NAT**, so the NAT rules of an earlier push no longer survive such
+  a project.
+- **Check Point identities survive an unreadable role list**: when the target's
+  access roles cannot be read, the push keeps the rules' identities and says so,
+  instead of dropping every one of them.
+- **A missing threat prevention layer is a warning, not a refusal**: the banner
+  says the push skips the layer, and the push step says so with what to do.
+- A Check Point fetch whose Gaia login fails says so with a warning, the
+  interface list came back short without a word.
+- A Device edit that the Gaia login probe refuses returns to the Devices page
+  with one sentence, it landed on the project list.
+- **A route PAN-OS cannot bind counts as a route in the Review**: a static route
+  that names an interface of another virtual router and whose next hop is not
+  on-link there is left out, declared and filed under routes, it counted against
+  interfaces and left the routes row one short.
+- A PAN-OS build declares a route without a next hop whose interface is not
+  bound in the virtual router, it was left out of the configuration without a
+  word.
+- The PAN-OS address, service and zone-protection catalogues report a refused
+  key or a box that does not answer as the failure it is, they answered
+  "0 entries fetched".
+- **A rule with application-default and no application the target can resolve**
+  went out matching every service with nothing said, it is declared now and
+  blocks the push of an allow rule until its service mode is set to any or the
+  rule is excluded.
+- **A rule whose applications resolved only in part** was declared as replaced
+  by Any while it went out narrower than the source.
+- **The target configuration lists its objects in name order**, so two builds of
+  the same project read the same (a re-import or the objects made from literals
+  could shuffle them).
+- **NAT edits are the project's**: the rename, the description, the enable state
+  and the target fields of an imported NAT rule live in the project like every
+  other edit, survive a re-import and stay invisible to the Device's other
+  projects.
+- **Schedule Clear goes back to the import**: Clear gives the rule its imported
+  schedule again, and the picker offers "none" for a rule that should run
+  always.
+- **The decryption rule's certificate field is gone**, no push read it, the
+  forward-trust certificate is a setting of the firewall.
+- Setting an interface address in a project no longer adds the imported
+  connected networks a second time as the project's own routes.
+- A route to a network the interface carries counts as connected whatever form
+  its prefix is stored in, so the build no longer pushes it as a static route.
+- A project whose target could not be read says so: the "Target inventory
+  fetched" step reopens with the reason and the Review carries it as a warning.
+- A refused API key or a box that does not answer reads as one sentence on the
+  import, the network fetch and the target snapshot, instead of the raw HTTP
+  error once per catalogue.
+- A push step that fails on the connection or on a refused key says so in one
+  sentence, and the Logs show that sentence as the job's summary.
+- A catalogue read of a box that does not answer says "device unreachable"
+  instead of the raw connection error, and the message names the catalogue.
+- The Review's note on a FortiGate whose NAT mode could not be read is a
+  sentence, it was a log line.
+- The busy dialog closes when the last call holding it is done, a catalogue read
+  that finished behind the applications auto-assign closed that dialog after
+  three seconds while the match still ran.
+- Opening the rules of a source that was never generated starts the generate
+  run, and another source's run no longer masks it.
+- The button of that run says Generate.
+- The rule generation runs in the configured database, it used the default one
+  and ignored DB_NAME.
+- The rules page lists the instances of a Device (a VDOM, a vsys, a virtual
+  system) as targets, a project whose target is an instance opened with the
+  first plain target of the tenant instead.
+- Adding or importing a Device from the Devices page returns to the Devices page,
+  not to the project list.
+- An import started on the project's Dashboard that fails shows its error on the
+  project page, the page showed only "Nothing read from this Device yet".
+- Deleting a Device that projects use returns to the Devices page with the
+  refusal.
+- A configuration file that is no ASA configuration returns to the page the
+  wizard was opened from with one sentence.
+- Rename, Add and Delete Tenant show their dialog above the Tenants dialog, not
+  behind it.
+- A FortiGate is reached one way: FortiGate Cloud and FortiManager exclude each
+  other in Add Device, a form carrying both is refused instead of keeping only
+  the cloud part.
+- **Log senders: the Detach button did nothing** when the sender's name carried
+  a double quote, it asks for confirmation again.
+- **Updating from 0.9.2 or 0.9.3 in one step starts**, the first start on a
+  database that had skipped 0.9.4 refused and kept the application from
+  starting.
+- The two tables of the step model were silently missing on such a database,
+  they are created in the right order now.
+- The release check boots the current version on an old database before every
+  release candidate.
+- The Check Point push log names the objects it created under a new name
+  because the management already holds the name for another object type, with
+  the names the rules of that push reference.
+
+**Updating from 0.9.4**
+
+- Dump your database before updating, and see the Updating section of
+  docs/install.md for the standing guidance and the dump command.
+- The first start after the update adds the tables and columns of the step
+  model, the review, push and verification stamps and the hit counts, which
+  takes a moment.
+- Projects pushed before this version carry no push stamp and show that step
+  open until their next push.
+- A target configuration built by 0.9.4 stays as it is, the Review says which
+  version built it, and the next build replaces it.
+
 ## 0.9.4 (2026-10-20)
 
 **New**
@@ -124,9 +402,11 @@ notes.
   the traffic evidence.
 - **Devices**: a reset wiped every Device of the same vendor when the Device
   was named after its platform, and left imported objects behind.
-- **VPN**: a push whose tunnels reference a pre-shared key the device holds
-  under another tunnel went out with a placeholder and a tunnel that never
-  came up.
+- **VPN**: a push whose tunnels reference a pre-shared key the Device holds
+  under a tunnel name a rename or re-import left behind went out with a
+  placeholder and a tunnel that never came up. The push is refused and the
+  VPN view lists those keys for discarding, and a tunnel whose key was never
+  entered goes out with the placeholder as before, named in the push record.
 - **Enterprise Edition**: re-importing a manager replaced every scope with a new
   Device, orphaning the per-rule edits, tags, settings and keys of each scope.
 

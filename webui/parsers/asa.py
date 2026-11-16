@@ -78,8 +78,8 @@ def pre_parse(text: str) -> dict:
             break
 
     if hostname is None:
-        errors.append("ASA config must contain a `hostname` line. "
-                      "Add `hostname <name>` at column 0 and re-upload.")
+        errors.append("The file carries no hostname line, so it is not an ASA configuration: "
+                      "upload the output of show running-config.")
 
     if not header_ok:
         warnings.append("No ASA header marker found "

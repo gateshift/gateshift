@@ -44,8 +44,8 @@
     {
       "type": "library",
       "name": "anyio",
-      "version": "4.14.2",
-      "purl": "pkg:pypi/anyio@4.14.2",
+      "version": "4.15.1",
+      "purl": "pkg:pypi/anyio@4.15.1",
       "licenses": [
         {
           "license": {
@@ -57,8 +57,8 @@
     {
       "type": "library",
       "name": "certifi",
-      "version": "2026.7.22",
-      "purl": "pkg:pypi/certifi@2026.7.22",
+      "version": "2026.10.19",
+      "purl": "pkg:pypi/certifi@2026.10.19",
       "licenses": [
         {
           "license": {
@@ -70,8 +70,8 @@
     {
       "type": "library",
       "name": "cffi",
-      "version": "2.1.0",
-      "purl": "pkg:pypi/cffi@2.1.0",
+      "version": "2.1.1",
+      "purl": "pkg:pypi/cffi@2.1.1",
       "licenses": [
         {
           "license": {
@@ -83,8 +83,8 @@
     {
       "type": "library",
       "name": "charset-normalizer",
-      "version": "3.4.9",
-      "purl": "pkg:pypi/charset-normalizer@3.4.9",
+      "version": "3.5.2",
+      "purl": "pkg:pypi/charset-normalizer@3.5.2",
       "licenses": [
         {
           "license": {
@@ -96,8 +96,8 @@
     {
       "type": "library",
       "name": "click",
-      "version": "8.4.2",
-      "purl": "pkg:pypi/click@8.4.2",
+      "version": "8.5.0",
+      "purl": "pkg:pypi/click@8.5.0",
       "licenses": [
         {
           "license": {
@@ -109,8 +109,8 @@
     {
       "type": "library",
       "name": "cryptography",
-      "version": "50.0.0",
-      "purl": "pkg:pypi/cryptography@50.0.0",
+      "version": "50.0.2",
+      "purl": "pkg:pypi/cryptography@50.0.2",
       "licenses": [
         {
           "license": {
@@ -135,25 +135,12 @@
     {
       "type": "library",
       "name": "fastapi",
-      "version": "0.141.1",
-      "purl": "pkg:pypi/fastapi@0.141.1",
+      "version": "0.161.0",
+      "purl": "pkg:pypi/fastapi@0.161.0",
       "licenses": [
         {
           "license": {
             "name": "MIT"
-          }
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "greenlet",
-      "version": "3.5.4",
-      "purl": "pkg:pypi/greenlet@3.5.4",
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT AND PSF-2.0"
           }
         }
       ]
@@ -174,8 +161,8 @@
     {
       "type": "library",
       "name": "httptools",
-      "version": "0.8.0",
-      "purl": "pkg:pypi/httptools@0.8.0",
+      "version": "0.9.0",
+      "purl": "pkg:pypi/httptools@0.9.0",
       "licenses": [
         {
           "license": {
@@ -187,8 +174,8 @@
     {
       "type": "library",
       "name": "idna",
-      "version": "3.18",
-      "purl": "pkg:pypi/idna@3.18",
+      "version": "3.20",
+      "purl": "pkg:pypi/idna@3.20",
       "licenses": [
         {
           "license": {
@@ -213,8 +200,8 @@
     {
       "type": "library",
       "name": "MarkupSafe",
-      "version": "3.0.3",
-      "purl": "pkg:pypi/markupsafe@3.0.3",
+      "version": "3.0.4",
+      "purl": "pkg:pypi/markupsafe@3.0.4",
       "licenses": [
         {
           "license": {
@@ -225,9 +212,22 @@
     },
     {
       "type": "library",
+      "name": "opentelemetry-api",
+      "version": "1.45.1",
+      "purl": "pkg:pypi/opentelemetry-api@1.45.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "pycparser",
-      "version": "3.0",
-      "purl": "pkg:pypi/pycparser@3.0",
+      "version": "3.12",
+      "purl": "pkg:pypi/pycparser@3.12",
       "licenses": [
         {
           "license": {
@@ -239,8 +239,8 @@
     {
       "type": "library",
       "name": "pydantic",
-      "version": "2.13.4",
-      "purl": "pkg:pypi/pydantic@2.13.4",
+      "version": "2.14.1",
+      "purl": "pkg:pypi/pydantic@2.14.1",
       "licenses": [
         {
           "license": {
@@ -252,8 +252,8 @@
     {
       "type": "library",
       "name": "pydantic_core",
-      "version": "2.46.4",
-      "purl": "pkg:pypi/pydantic_core@2.46.4",
+      "version": "2.50.1",
+      "purl": "pkg:pypi/pydantic_core@2.50.1",
       "licenses": [
         {
           "license": {
@@ -265,8 +265,8 @@
     {
       "type": "library",
       "name": "PyMySQL",
-      "version": "1.2.0",
-      "purl": "pkg:pypi/pymysql@1.2.0",
+      "version": "1.2.3",
+      "purl": "pkg:pypi/pymysql@1.2.3",
       "licenses": [
         {
           "license": {
@@ -278,8 +278,8 @@
     {
       "type": "library",
       "name": "python-dotenv",
-      "version": "1.2.2",
-      "purl": "pkg:pypi/python-dotenv@1.2.2",
+      "version": "1.2.4",
+      "purl": "pkg:pypi/python-dotenv@1.2.4",
       "licenses": [
         {
           "license": {
@@ -330,8 +330,8 @@
     {
       "type": "library",
       "name": "SQLAlchemy",
-      "version": "2.0.51",
-      "purl": "pkg:pypi/sqlalchemy@2.0.51",
+      "version": "2.1.6",
+      "purl": "pkg:pypi/sqlalchemy@2.1.6",
       "licenses": [
         {
           "license": {
@@ -343,8 +343,8 @@
     {
       "type": "library",
       "name": "starlette",
-      "version": "1.3.1",
-      "purl": "pkg:pypi/starlette@1.3.1",
+      "version": "1.9.0",
+      "purl": "pkg:pypi/starlette@1.9.0",
       "licenses": [
         {
           "license": {
@@ -356,8 +356,8 @@
     {
       "type": "library",
       "name": "typing-inspection",
-      "version": "0.4.2",
-      "purl": "pkg:pypi/typing-inspection@0.4.2",
+      "version": "0.4.4",
+      "purl": "pkg:pypi/typing-inspection@0.4.4",
       "licenses": [
         {
           "license": {
@@ -382,8 +382,8 @@
     {
       "type": "library",
       "name": "urllib3",
-      "version": "2.7.0",
-      "purl": "pkg:pypi/urllib3@2.7.0",
+      "version": "2.8.0",
+      "purl": "pkg:pypi/urllib3@2.8.0",
       "licenses": [
         {
           "license": {
@@ -395,8 +395,8 @@
     {
       "type": "library",
       "name": "uvicorn",
-      "version": "0.52.0",
-      "purl": "pkg:pypi/uvicorn@0.52.0",
+      "version": "0.54.0",
+      "purl": "pkg:pypi/uvicorn@0.54.0",
       "licenses": [
         {
           "license": {
@@ -408,8 +408,8 @@
     {
       "type": "library",
       "name": "uvloop",
-      "version": "0.22.1",
-      "purl": "pkg:pypi/uvloop@0.22.1",
+      "version": "0.23.0",
+      "purl": "pkg:pypi/uvloop@0.23.0",
       "licenses": [
         {
           "license": {
@@ -421,8 +421,8 @@
     {
       "type": "library",
       "name": "watchfiles",
-      "version": "1.2.0",
-      "purl": "pkg:pypi/watchfiles@1.2.0",
+      "version": "1.3.0",
+      "purl": "pkg:pypi/watchfiles@1.3.0",
       "licenses": [
         {
           "license": {
@@ -434,8 +434,8 @@
     {
       "type": "library",
       "name": "websockets",
-      "version": "17.0.1",
-      "purl": "pkg:pypi/websockets@17.0.1",
+      "version": "17.3",
+      "purl": "pkg:pypi/websockets@17.3",
       "licenses": [
         {
           "license": {
@@ -456,7 +456,7 @@
           }
         }
       ],
-      "description": "webui/static/htmx.min.js \u2014 license text in htmx.LICENSE.txt"
+      "description": "webui/static/htmx.min.js - license text in htmx.LICENSE.txt"
     },
     {
       "type": "library",
@@ -470,7 +470,7 @@
           }
         }
       ],
-      "description": "webui/static/fonts/archivo-*.woff2 \u2014 license in fonts/Archivo-OFL.txt"
+      "description": "webui/static/fonts/archivo-*.woff2 - license in fonts/Archivo-OFL.txt"
     },
     {
       "type": "library",
@@ -484,7 +484,7 @@
           }
         }
       ],
-      "description": "webui/static/fonts/spacegrotesk-*.woff2 \u2014 license in fonts/SpaceGrotesk-OFL.txt"
+      "description": "webui/static/fonts/spacegrotesk-*.woff2 - license in fonts/SpaceGrotesk-OFL.txt"
     },
     {
       "type": "library",
@@ -498,7 +498,7 @@
           }
         }
       ],
-      "description": "standalone CLI, fetched at image build, build-time only \u2014 not shipped in the runtime image"
+      "description": "standalone CLI, fetched at image build, build-time only - not shipped in the runtime image"
     },
     {
       "type": "container",

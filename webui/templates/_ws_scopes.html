@@ -1,0 +1,216 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# ── The manager scope pickers of the workspace (D33, 2026-11-10): the row under
+     the page head, included by rules.html. Until D33 this was the header bar's
+     crumb. An EE manager or scope source shows its network and policy scope, an
+     EE manager target its egress scope, a plain device pair shows nothing and the
+     row stays hidden. The hidden inputs keep their ids: HTMX hx-include="#device-select"
+     (rules_fragment pagination) and #target-device-select read them. ── #}
+    {% if request.url.path.startswith('/rules') and device %}
+    <input type="hidden" id="device-select" name="device" value="{{ device_id }}">
+    {% set _ws_scopes = (pano_dgs is defined and pano_dgs) or (target_devices is defined and target_devices and selected_device and ((target_pano_dgs is defined and target_pano_dgs) or (target_cp_packages is defined and target_cp_packages))) %}
+    <div class="crumb ws-scopes"{% if not _ws_scopes %} style="display:none"{% endif %}>
+      {# The project is named on the Dashboard (U8); this row carries only
+         the EE scope pickers (user decision 2026-10-03). The snapshot
+         button sits in the workspace's top row, beside the view hint. #}
+      {# ── SOURCE group: only for an EE manager/scope source - its network/policy
+           scope pickers. A plain device is named on the Overview tab; the header
+           stays with the project (user decision 2026-10-03). ── #}
+      {% if pano_dgs is defined and pano_dgs %}
+      <span class="hdr-grp" title="Source scope">
+        <span class="hdr-grp-lbl">Source</span>
+        {% if pano_manager_id %}
+      <a href="{{ pano_manager_href or ('/manager/' ~ pano_manager_id) }}" class="btn" title="Open the manager: its scopes{% if pano_manager_href and pano_manager_href.startswith('/manager/') %} and the cross-scope workbench{% endif %}">{{ pano_manager_label or device }}<span style="color:var(--tx3);font-size:var(--fs-caption);margin-left:5px;">&#9656;&nbsp;Manager</span></a>
+      {% endif %}
+        {% set _mgr_is_pano = (pano_manager_platform is not defined) or (pano_manager_platform == 'panw') %}
+        {% set _mgr_is_fmc = (pano_manager_platform is defined) and (pano_manager_platform == 'firepower') %}
+        {% set _si = (pano_dgs|selectattr('type','in',('vdom','vsys','vs'))|list) if (pano_dgs is defined and pano_dgs) else [] %}
+        {% set _mgr_is_box = _si|length > 0 %}
+        {% if _mgr_is_box %}{% set _mgr_is_pano = false %}{% endif %}
+        {# link toggle + network dropdown render only when the manager HAS network scopes
+           (templates / device-db / gateways) - an empty dropdown + a link with nothing to
+           follow is noise. #}
+        {% if pano_templates %}
+        {# link toggle - LEFTMOST scope control; on = network scope follows the policy scope's
+           BOUND network layer (Panorama: the DG's template-stack; FMG: the package's
+           install-target device). #}
+        <label class="picker" title="{% if _mgr_is_pano %}Link: network scope follows the device-group's bound template-stack{% elif pano_manager_platform == 'checkpoint' %}Link: network follows the package's installation-target gateway{% elif _mgr_is_fmc %}Link: network follows the device the access policy is assigned to{% else %}Link: network follows the package's install-target device{% endif %}"
+               style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;user-select:none;">
+          <span style="display:inline-flex;align-items:center;color:var(--tx2);" aria-label="link: network follows the policy scope's bound network layer">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </span>
+          <span style="position:relative;display:inline-flex;align-items:center;">
+            <input type="checkbox" id="pano-net-link" class="sr-only peer" onchange="_panoSetLink(this.checked)">
+            <div class="ptoggle-track"></div>
+            <div class="ptoggle-thumb"></div>
+          </span>
+        </label>
+        {# network scope: Panorama = template / template-STACK (stacks first, * = the DG's bound
+           stack); FMG = the managed devices (* = the package's install-target).
+           data-net-relevant=1 = the policy scope's own composition (grayed when "link" is on) #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">{{ 'Template' if _mgr_is_pano else ('Gateway' if pano_manager_platform == 'checkpoint' else 'Device') }}</span>
+          <select id="pano-net-select" class="picker" title="{% if _mgr_is_pano %}Network scope - template or template-stack (interfaces/routes/zones){% elif pano_manager_platform == 'checkpoint' %}Network layer - a gateway/cluster's interfaces/routes (topology + Gaia){% elif _mgr_is_fmc %}Network layer - a managed FTD's interfaces, zones, routers and routes, with its NAT policy{% else %}Network layer - a managed device's interfaces/routes/zones (device-db){% endif %}"
+                  style="appearance:none;-webkit-appearance:none;padding-right:22px;"
+                  onchange="if(this.value)location.href='/rules?device={{ device_id }}&template='+encodeURIComponent(this.value)">
+            {% set _stacks = pano_templates|selectattr('type','equalto','template-stack')|list %}
+            {% set _plain  = pano_templates|rejectattr('type','equalto','template-stack')|list %}
+            {% if _stacks %}<optgroup label="Template-Stacks">
+              {% for t in _stacks %}<option value="{{ t.name }}" data-net-relevant="{% if t.name == pano_bound_stack %}1{% else %}0{% endif %}" {% if t.name == pano_current_template %}selected{% endif %}>{{ t.name }}{% if t.name == pano_bound_stack %} *{% endif %}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% if _plain %}<optgroup label="{{ 'Templates' if _mgr_is_pano else ('Gateways' if pano_manager_platform == 'checkpoint' else 'Devices') }}">
+              {% for t in _plain %}{% set _mem = (pano_bound_members is defined and t.name in pano_bound_members) or t.name == pano_bound_stack %}<option value="{{ t.name }}" data-net-relevant="{% if _mem %}1{% else %}0{% endif %}" {% if t.name == pano_current_template %}selected{% endif %}>{% if _mem and _mgr_is_pano %}↳ {% endif %}{{ t.name }}{% if t.name == pano_bound_stack %} *{% endif %}</option>{% endfor %}
+            </optgroup>{% endif %}
+          </select>
+        </span>
+        {% endif %}{# /pano_templates #}
+        {# policy scope switcher - drives the rule/NAT/PBF/SSL tabs; no empty option #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">{{ 'Device Group' if _mgr_is_pano else ('Instance' if _mgr_is_box else 'Scope') }}</span>
+          <select class="picker" title="{{ 'Device-group (policy scope)' if _mgr_is_pano else ('The Device\'s instances, each with its own ruleset and network' if _mgr_is_box else ('Scope (domain / access policy)' if _mgr_is_fmc else 'Scope (global / ADOM / policy package)')) }}"
+                  style="appearance:none;-webkit-appearance:none;padding-right:22px;"
+                  onchange="_panoGoDG(this.value)">
+            {% if _mgr_is_pano %}
+            {% for dg in pano_dgs %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            {% else %}
+            {# FMG mixes three scope kinds - group them so ADOM vs package is scannable #}
+            {% set _sg = pano_dgs|selectattr('type','equalto','global')|list %}
+            {% set _sa = pano_dgs|selectattr('type','in',('adom','domain'))|list %}
+            {% set _sp = pano_dgs|selectattr('type','in',('package','access-policy'))|list %}
+            {% if _sg %}<optgroup label="Global">
+              {% for dg in _sg %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {# CP: a Global scope ⇒ MDS (label "Domains"); no Global ⇒ SmartCenter (one mgmt
+               context, label "Management"). FMG ⇒ "ADOMs". #}
+            {% if _sa %}<optgroup label="{{ ('Domains' if _sg else 'Management') if pano_manager_platform == 'checkpoint' else ('Domains' if _mgr_is_fmc else 'ADOMs') }}">
+              {% for dg in _sa %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% if _sp %}<optgroup label="{{ 'Access Policies' if _mgr_is_fmc else 'Policy Packages' }}">
+              {% for dg in _sp %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {# the instances of a firewall: VDOMs, vsys or virtual systems (docs/VIRTUAL_INSTANCES_PLAN.md) #}
+            {% if _si %}<optgroup label="{{ {'vdom': 'VDOMs', 'vsys': 'Virtual systems (vsys)', 'vs': 'Virtual Systems'}.get(_si[0].type, 'Instances') }}">
+              {% for dg in _si %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% endif %}
+          </select>
+        </span>
+      </span>
+      {% endif %}
+      {% if pano_dgs is defined and pano_dgs %}
+      <script>
+        function _panoLinked(){ return localStorage.getItem('pano_net_linked') !== '0'; }  /* default LINKED */
+        /* When linked, only the DG's own network composition (bound stack * + its member templates ↳,
+           data-net-relevant="1") stays selectable; everything else is grayed. Unlinked → all selectable.
+           No-op when the DG has no bound stack (no relevant option) so nothing gets locked out. */
+        function _panoApplyLinkFilter(){
+          var sel = document.getElementById('pano-net-select'); if(!sel) return;
+          var linked = _panoLinked();
+          var hasBound = !!sel.querySelector('option[data-net-relevant="1"]');
+          var opts = sel.querySelectorAll('option[data-net-relevant]');
+          for(var i=0;i<opts.length;i++){
+            opts[i].disabled = (linked && hasBound && opts[i].getAttribute('data-net-relevant') !== '1');
+          }
+        }
+        function _panoSetLink(on){
+          localStorage.setItem('pano_net_linked', on ? '1' : '0');
+          if(on){ location.href = '/rules?device={{ device_id }}'; return; }  /* snap network → bound stack */
+          _panoApplyLinkFilter();                              /* unlinked → re-enable all options in place */
+        }
+        function _panoGoDG(v){
+          if(!v) return;
+          var u = '/rules?device=' + encodeURIComponent(v);
+          if(!_panoLinked()){                                   /* unlinked → keep the current network scope */
+            var cur = {{ pano_current_template|tojson|safe }};
+            if(cur) u += '&template=' + encodeURIComponent(cur);
+          }
+          location.href = u;
+        }
+        (function(){ var c = document.getElementById('pano-net-link'); if(c) c.checked = _panoLinked();
+                     _panoApplyLinkFilter(); })();
+      </script>
+      {% endif %}
+      {% if target_devices is defined and target_devices and selected_device %}
+      {# The project defines the target (D3): the hidden input the HTMX includes
+         (#target-device-select) read. The device itself is named on the Overview
+         tab; this row shows only an EE manager target's egress scope. #}
+      <input type="hidden" id="target-device-select" name="target" value="{{ selected_target.id if selected_target else '' }}">
+      {% if (target_pano_dgs is defined and target_pano_dgs) or (target_cp_packages is defined and target_cp_packages) %}
+      <span class="arr flow" aria-hidden="true"><span class="a1">&gt;</span><span class="a2">&gt;</span></span>
+      {# ── TARGET group: an EE manager target's egress scope ── #}
+      <span class="hdr-grp" title="Target egress scope (migration destination)">
+        <span class="hdr-grp-lbl">Target</span>
+        {% if target_pano_dgs is defined and target_pano_dgs %}
+        {# Panorama TARGET (dst) - the scope to EGRESS into: template (network) + device-group (policy).
+           startPush sends these; deploy_push builds config.panorama from them. #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">Template</span>
+          <select id="target-template-select" class="picker" title="Egress into network scope: template OR template-stack (a stack writes into its own-config layer)"
+                  onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% if target_pano_stacks %}<optgroup label="Template-Stacks">
+              {% for t in target_pano_stacks %}<option value="{{ t }}" data-kind="template-stack">{{ t }}</option>{% endfor %}
+            </optgroup>{% endif %}
+            {% if target_pano_templates %}<optgroup label="Templates">
+              {% for t in target_pano_templates %}<option value="{{ t }}" data-kind="template">{{ t }}</option>{% endfor %}
+            </optgroup>{% endif %}
+          </select>
+          <button type="button" class="scope-add" title="New template / template-stack on the target candidate" onclick="scopeCreateOpen('network')">+</button>
+          <button type="button" id="scope-del-net" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('network')">×</button>
+        </span>
+        <span class="hdr-pair">
+          <span class="hdr-cap">Device Group</span>
+          <select id="target-dg-select" class="picker" title="Egress into device-group"
+                  onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% for dg in target_pano_dgs %}<option value="{{ dg }}">{{ dg }}</option>{% endfor %}
+          </select>
+          <button type="button" class="scope-add" title="New device-group on the target candidate" onclick="scopeCreateOpen('dg')">+</button>
+          <button type="button" id="scope-del-dg" class="scope-add scope-del" style="display:none;" title="Discard this staged (new) scope" onclick="scopeDiscardSelected('dg')">×</button>
+        </span>
+        {% endif %}
+        {% if target_cp_packages is defined and target_cp_packages %}
+        {# Check Point manager TARGET (dst) - the domain/package to EGRESS into. startPush sends the
+           selected package label; deploy_push resolves it to config.cp.domain + policy_package.
+           Packages are created via Manager-View pkg-CRUD, not here (no + in V1). #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">Package</span>
+          <select id="target-cp-pkg-select" class="picker" title="Egress into Check Point domain / policy-package"
+                  onchange="if(typeof _cpSyncGw==='function')_cpSyncGw(); if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% for p in target_cp_packages %}<option value="{{ p.label }}" data-gw="{{ p.gateway }}">{{ p.label }}</option>{% endfor %}
+          </select>
+        </span>
+        {% if target_cp_gateways is defined and target_cp_gateways %}
+        {# Network-layer picker (CN-2): the gateway/cluster the NETWORK strand pushes to (routes
+           per member Gaia, VIPs/zones via the domain Mgmt session). *-defaults to the selected
+           package's install-target (data-gw, synced on pkg change) - overridable. #}
+        <span class="hdr-pair">
+          <span class="hdr-cap">Gateway</span>
+          <select id="target-cp-gw-select" class="picker" title="Network egress gateway/cluster: defaults to the package's install target"
+                  onchange="if(typeof _saveDstScope==='function')_saveDstScope();"
+                  style="appearance:none;-webkit-appearance:none;padding-right:20px;">
+            {% for g in target_cp_gateways %}<option value="{{ g }}">{{ g }}</option>{% endfor %}
+          </select>
+        </span>
+        <script>
+          // *-binding: a pkg pick re-defaults the gw picker to that package's install-target
+          // (same coupling as the source-side composite). Manual gw changes stick until the
+          // next pkg change (deliberate - the pkg's * is the canonical default).
+          function _cpSyncGw() {
+            var p = document.getElementById('target-cp-pkg-select');
+            var g = document.getElementById('target-cp-gw-select');
+            if (!p || !g) return;
+            var o = p.selectedOptions && p.selectedOptions[0];
+            var want = o ? (o.getAttribute('data-gw') || '') : '';
+            if (want && Array.prototype.some.call(g.options, function (x) { return x.value === want; }))
+              g.value = want;
+          }
+        </script>
+        {% endif %}
+        {% endif %}
+      </span>
+      {% endif %}
+      {% endif %}
+    </div>
+    {# The project's device cards live on the Dashboard (U8). #}
+    {% endif %}

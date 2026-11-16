@@ -1,8 +1,6 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
-USE gateshift;
-
 -- Module: Accumulate (destination-centric)
 -- Groups consolidated_1 by (vendor, device_id, action, direction, proto, dst_port, effective_dst_ip);
 -- the rows match by the Device's id (docs/DEVICE_IDENTITY_PLAN.md, phases 5 and 7).

@@ -1,8 +1,6 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
-USE gateshift;
-
 -- Module: Subnet aggregation
 -- Reads from fw_rules_accumulated if available (dst-centric), else fw_rules_consolidated_1
 -- Aggregates private IPs into subnets based on global density thresholds

@@ -337,6 +337,7 @@ def parse_access_rules(items: list[dict]) -> tuple[list[dict], dict[str, list[st
 
         rules.append({
             "rule_name":      name,
+            "source_vendor_id": e.get("id") or name,
             "seq_num":        i,
             "action":         act,
             "src_zones":      ref_names(e.get("sourceZones")) or ["any"],
@@ -371,7 +372,21 @@ def _nat_type_for(e: dict) -> str:
     return "static"
 
 
-def parse_manual_nat_rules(items: list[dict], position_base: int = 0) -> list[dict]:
+def _port_number(name, port_of):
+    """The translated port as the number the renderers write (the PAN-OS
+    and FortiOS imports carry '8443', not an object name): a port object
+    that names one tcp/udp port resolves through port_of, anything else
+    stays as it is (lab 2026-11-04, fmc2fgt VIP)."""
+    if not name or not port_of:
+        return name
+    try:
+        v = port_of(name)
+    except Exception:
+        v = None
+    return str(v) if v is not None and str(v).isdigit() else name
+
+
+def parse_manual_nat_rules(items: list[dict], position_base: int = 0, port_of=None) -> list[dict]:
     """FDM manual NAT rules (one Before/After container's rules) →
     fw_nat_rules dicts. sourceInterface/destinationInterface are
     INTERFACE refs on FDM (NAT scopes by interface, not by zone - live
@@ -407,7 +422,7 @@ def parse_manual_nat_rules(items: list[dict], position_base: int = 0) -> list[di
             "trans_src":       trans_src,
             "trans_src_type":  trans_type,
             "trans_dst":       _ref_name(e.get("translatedDestination")),
-            "trans_dst_port":  _ref_name(e.get("translatedDestinationPort")),
+            "trans_dst_port":  _port_number(_ref_name(e.get("translatedDestinationPort")), port_of),
             "description":     e.get("description") or "",
             "negate_source":      0,
             "negate_destination": 0,

@@ -1,8 +1,6 @@
 -- Copyright (c) 2026 Timo Duttine
 -- SPDX-License-Identifier: BUSL-1.1
 
-USE gateshift;
-
 -- Build a lookup table: which proto+port+dst_ip combinations have another
 -- candidate with dst_nat pointing to that internal IP?
 DROP TEMPORARY TABLE IF EXISTS tmp_nat_covered;

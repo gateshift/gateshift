@@ -10,11 +10,11 @@
       <span style="">{{ device_name }}</span></h1>
     <span class="dash" style="font-size:var(--fs-body);">in-place config hygiene, same-vendor, reversible</span>
     <span style="flex:1;"></span>
-    <a href="/devices" class="btn">&larr; Devices</a>
+    <a href="/projects" class="btn">&larr; Projects</a>
   </div>
   <p class="dash" style="margin:0 0 18px;font-size:var(--fs-body);line-height:1.5;">
     Gateshift finds objects <b>nothing references</b> (safe to delete), you curate, and it deletes the
-    selected ones: on PAN-OS in the <b>candidate</b> config (commit/revert on the box), on Check Point
+    selected ones: on PAN-OS in the <b>candidate</b> config (commit/revert on the Device), on Check Point
     staged in a Mgmt session you <b>Publish or Discard</b> here, on FortiGate deleted <b>LIVE</b> (a
     full-config backup is taken first, FortiOS has no candidate/undo). Each apply re-validates so a
     still-referenced object can never be deleted.
@@ -96,8 +96,8 @@ async function optApply(){
     ? `Stage delete of ${sel.length} object(s) on a Check Point session?\nNothing goes live until you Publish.`
     : isFG
     ? `Delete ${sel.length} object(s) LIVE on the FortiGate?\nFortiOS has no candidate/undo: a full-config backup is taken first (downloadable). Proceed?`
-    : `Delete ${sel.length} object(s) on the CANDIDATE config?\n(reversible, commit or revert on the box)`;
-  if(!confirm(q)) return;
+    : `Delete ${sel.length} object(s) on the CANDIDATE config?\n(reversible, commit or revert on the Device)`;
+  if(!(await confirmModal({title: 'Apply Deletions', body: q.split('\n'), confirmLabel: 'Delete', danger: true}))) return;
   const st=document.getElementById('apply-status'); st.textContent = isCP?'Staging…':isFG?'Backing up + deleting…':'Applying…';
   let d;
   try { d = await (await fetch(`/optimize/${OPT_DEV}/apply`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({deletions:sel})})).json(); }
@@ -124,7 +124,7 @@ async function optApply(){
     setTimeout(optAnalyze, 1200);
   } else {
     const applied=(d.applied||[]).length;
-    const msg=`Deleted ${applied} on candidate${refused?`, ${refused} refused (still referenced)`:''}. Review + commit/revert on the box.`;
+    const msg=`Deleted ${applied} on candidate${refused?`, ${refused} refused (still referenced)`:''}. Review + commit/revert on the Device.`;
     if(window.showToast) showToast(msg,'success',8000);
     st.textContent = '[OK] '+msg;
     setTimeout(optAnalyze, 600);
@@ -136,10 +136,10 @@ async function optResolve(action){   // 'publish' | 'discard' (Check Point)
   try { d = await (await fetch(`/optimize/${OPT_DEV}/${action}`,{method:'POST'})).json(); }
   catch(e){ ps.textContent=action+' failed: '+e; return; }
   if(d.error){ ps.textContent=action+' failed: '+d.error; return; }
-  if(action==='publish' && d.ok===false){ ps.textContent='Publish failed, see the box. Session left staged.'; return; }
+  if(action==='publish' && d.ok===false){ ps.textContent='Publish failed, see the Device. Session left staged.'; return; }
   const names=(d.published||d.discarded||[]);
   const msg = action==='publish'
-    ? `Published: ${names.length} object(s) deleted on the box.`
+    ? `Published: ${names.length} object(s) deleted on the Device.`
     : `Discarded, nothing changed.`;
   if(window.showToast) showToast(msg, action==='publish'?'success':'info', 7000);
   document.getElementById('pending-wrap').style.display='none';
