@@ -8,6 +8,8 @@ Runs on your own host, air-gapped after install, no activation, no account, no c
 
 Website: [gateshift.org](https://gateshift.org)
 
+**LIVE DEMO:** [demo.gateshift.org](https://demo.gateshift.org)
+
 ## Supported vendors
 
 Palo Alto Networks, FortiGate and Check Point as sources and targets. Cisco Secure Firewall, Cisco ASA, OPNsense, AWS, Azure and Google Cloud as sources. Panorama, FortiManager, Check Point management and Strata Cloud Manager in the Enterprise Edition. Forms, directions and editions in full: [docs/support-matrix.md](docs/support-matrix.md). What each platform needs on its side: [docs/vendor-prerequisites.md](docs/vendor-prerequisites.md).
