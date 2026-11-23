@@ -4,6 +4,16 @@ All notable changes to Gateshift, newest first. This file covers the current
 major version. It ships with every release and is the source of the release
 notes.
 
+## 0.9.6.1 (2026-11-23)
+
+**Fixed**
+
+- The MCP server reports the installation's own version, so an AI client's first answer no longer carries a false notice that the server and the installation differ.
+
+**Updating from 0.9.6**
+
+- Pull and rebuild as in the Updating section of docs/install.md. The database stays as it is.
+
 ## 0.9.6 (2026-11-23)
 
 **Added**

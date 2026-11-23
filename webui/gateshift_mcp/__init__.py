@@ -10,7 +10,22 @@ API, and what the API refuses the tool refuses with the same sentence.
 The package splits into `api` (the client of /api/v1), `tools` (the tools as
 plain functions, testable without the SDK) and `server` (the SDK wiring)."""
 
-# The product version this server was shipped with (webui/VERSION at the
-# release). The server compares it with the installation's API version on
-# its first call and says so when they differ.
-SERVER_VERSION = "0.9.6-dev"
+import os
+
+
+def _shipped_version() -> str:
+    """Line 1 of webui/VERSION, the file the web application reads its own
+    version from. The release export stamps it, so a server shipped with an
+    installation reports the installation's version."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.readline().strip() or "dev"
+    except OSError:
+        return "dev"
+
+
+# The product version this server was shipped with. The server compares it
+# with the installation's API version on its first call and says so when
+# they differ.
+SERVER_VERSION = _shipped_version()
