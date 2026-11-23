@@ -7,7 +7,7 @@ Engine REST with a service-account token, no SDK) or from an uploaded
 bundle of the same JSON, parsed into the shapes the Gateshift import and
 collect handlers store.
 
-Model (docs/CLOUD_SOURCES_PLAN.md, D2/D3): one device row = one project
+Model: one device row = one project
 (optionally filtered to networks). Zones are topological: every
 subnetwork is a zone and a pseudo-interface without an address; every
 VPC network is a virtual router. Network tags, service accounts, secure
@@ -312,7 +312,7 @@ def bundle_for_device(device: dict) -> dict:
 # ── Parse helpers ──────────────────────────────────────────────────────
 
 def _cidr(value):
-    """A prefix of either family (docs/IPV6_PLAN.md, phase 4), or None."""
+    """A prefix of either family, or None."""
     try:
         return ipaddress.ip_network(str(value).strip(), strict=False)
     except Exception:
@@ -442,7 +442,7 @@ class _Net:
             if not cidrs:
                 self.drop("subnet_no_ipv4", s.get("name") or link)
                 continue
-            # a dual-stack subnet (docs/IPV6_PLAN.md, phase 6) carries a ULA or
+            # a dual-stack subnet carries a ULA or
             # an external IPv6 prefix: it joins the zone's ranges, in the
             # canonical spelling (the API prints the ULA uncompressed)
             cidrs += [str(_cidr(c)) for c in (s.get("internalIpv6Prefix"), s.get("externalIpv6Prefix"))
@@ -479,12 +479,11 @@ class _Net:
         # An auto-mode network carries one subnet in every region whether
         # anything lives there or not (a project's `default` network: 40+
         # regional subnets). The empty ones hold nothing to migrate and would
-        # bury the estate under zones named default-<region> (0.9.4 matrix,
-        # 2026-10-18), so a regional subnet of an auto-mode network stays only
-        # when an instance sits in it. The rest are left out and counted. A
-        # custom-mode subnet is always kept, someone created it on purpose. An
-        # auto-mode network left without subnets goes with them, its rules
-        # guard nothing.
+        # bury the estate under zones named default-<region>, so a regional
+        # subnet of an auto-mode network stays only when an instance sits in
+        # it. The rest are left out and counted. A custom-mode subnet is
+        # always kept, someone created it on purpose. An auto-mode network
+        # left without subnets goes with them, its rules guard nothing.
         used = {str(ni.get("subnetwork") or "") for inst in (b.get("instances") or [])
                 for ni in inst.get("networkInterfaces") or []}
         for key, s in list(self.subnets.items()):

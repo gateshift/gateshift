@@ -6,7 +6,7 @@ the VPC network they attach to, read from an account (EC2 Query API with
 SigV4 signing, no SDK) or from an uploaded bundle of the same JSON,
 parsed into the shapes the Gateshift import and collect handlers store.
 
-Model (docs/CLOUD_SOURCES_PLAN.md, D2/D3): one device row = one account
+Model: one device row = one account
 with a region list (optionally filtered to VPC ids). Zones are
 topological: every subnet is a zone and a pseudo-interface without an
 address. Security groups and managed prefix lists are address groups
@@ -507,7 +507,7 @@ def _tag(item: dict, key: str = "Name") -> str:
 
 
 def _cidr(value):
-    """A prefix of either family (docs/IPV6_PLAN.md, phase 4), or None."""
+    """A prefix of either family, or None."""
     try:
         return ipaddress.ip_network(str(value).strip(), strict=False)
     except Exception:
@@ -634,7 +634,7 @@ class _Net:
             if net is None:
                 self.drop("subnet_no_ipv4", sid)
                 continue
-            # a dual-stack subnet (docs/IPV6_PLAN.md, phase 6) carries its IPv6
+            # a dual-stack subnet carries its IPv6
             # block in the association set: it joins the zone's ranges
             nets6 = [_cidr(a.get("Ipv6CidrBlock") or "") for a in s.get("Ipv6CidrBlockAssociationSet") or []
                      if ((a.get("Ipv6CidrBlockState") or {}).get("State") or "associated") == "associated"]

@@ -208,7 +208,7 @@
           {# Zone columns are target-dependent: PA NAT needs from/to zones,
              Forti feeds srcintf/dstintf - Check Point NAT has no zone
              columns at all (original/translated + position only), so the
-             dropdowns would be dead UI there (asa2cp review 2026-09-01). #}
+             dropdowns would be dead UI there. #}
           {% set _nat_zones_relevant = target_platform in ('panw', 'fortigate') %}
           {% if _nat_zones_relevant %}<th style="border-left:1px solid var(--line);">Source Zone</th>{% endif %}
           <th {% if not _nat_zones_relevant %}style="border-left:1px solid var(--line);"{% endif %}>Source IP</th>

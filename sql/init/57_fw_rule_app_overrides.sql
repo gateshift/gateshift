@@ -11,8 +11,8 @@ USE gateshift;
 -- so overrides survive across runs by joining on r.content_hash.
 --
 -- Replaced the legacy (device_host, action, proto, dst_port) "natkey" PK
--- (Slice C, see feedback_rule_identity_hash memory) - that key conflated
--- distinct rules and made one user edit silently apply to N rules.
+-- (Slice C): that key conflated distinct rules and made one user edit
+-- silently apply to N rules.
 --
 -- Existing deployments are migrated cartesian-explode style by
 -- webui/main.py::_migrate_overrides_to_rule_hash on first start.

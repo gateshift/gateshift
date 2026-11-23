@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1
-"""Login for the UI (docs/ACCESS_DESIGN.md): one local account, a signed
+"""Login for the UI: one local account, a signed
 session cookie, a growing delay after failed attempts.
 
 Standard library only: scrypt for the password hash, HMAC-SHA256 over the

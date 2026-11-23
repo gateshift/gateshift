@@ -73,5 +73,5 @@ GROUP BY
   vendor, device_id, action, direction,
   src_ip, dst_ip, dst_nat, proto, dst_port,
   rule_name,
-  -- Negate-split per project_rule_negation_plan conflict-policy
+  -- Negate-split: rules with disagreeing negate flags stay separate
   negate_source, negate_destination, negate_service;

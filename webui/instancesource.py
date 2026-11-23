@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
-"""Virtual instances of a firewall as scopes under its Device row
-(docs/VIRTUAL_INSTANCES_PLAN.md): FortiGate VDOMs, PAN-OS vsys, Check Point
+"""Virtual instances of a firewall as scopes under its Device row: FortiGate VDOMs, PAN-OS vsys, Check Point
 virtual systems. A box that runs several instances is the container, each
 instance a scope with a Device row of its own that carries the box's
 address and credentials as a derived copy with one writer (D3), so every
@@ -39,9 +38,8 @@ def has_instances(config) -> bool:
 def _fortigate_instances(device: dict, *, _get=None) -> dict | None:
     """The VDOMs of a FortiGate: None in no-vdom mode. In multi-VDOM mode
     every CMDB call carries the VDOM, `system global` names the management
-    VDOM, `system settings` of a VDOM names its operation mode (lab 2026-11-04,
-    section 3 of the plan). A VDOM the API user is not assigned to is listed
-    as skipped: the prerequisites ask for the user's VDOM list."""
+    VDOM, `system settings` of a VDOM names its operation mode. A VDOM the API user is not assigned to is listed as skipped:
+    the prerequisites ask for the user's VDOM list."""
     base = _forti.base_url_for(device)
     token = _forti.token_for(device)
 
@@ -75,8 +73,8 @@ def _fortigate_instances(device: dict, *, _get=None) -> dict | None:
 
 def _panw_instances(device: dict, *, _get=None) -> dict | None:
     """The vsys of a PAN-OS firewall: None with one vsys. Several vsys sit under
-    `/config/devices/entry/vsys` (F-3 of the plan, built from the XML API
-    reference: a VM-Series or a larger appliance, the lab PA-440 runs one).
+    `/config/devices/entry/vsys` (built from the XML API
+    reference: a VM-Series or a larger appliance, a PA-440 runs one).
     The shared objects of `/config/shared` become the root scope every vsys
     scope draws on (D4), vsys1 is marked as the default instance."""
     if _get is None:
@@ -101,8 +99,8 @@ def _panw_instances(device: dict, *, _get=None) -> dict | None:
 
 
 def _checkpoint_instances(device: dict, *, _call=None, _call_top=None, _call_in=None) -> dict | None:
-    """The virtual systems of a Check Point VSX gateway or cluster (F-4 of the
-    plan, measured on the R81.20 MDS lab 2026-11-05): the registered gateway
+    """The virtual systems of a Check Point VSX gateway or cluster (measured on
+    an R81.20 MDS): the registered gateway
     object must be a VSX class, found by uid in the box's own context. The
     candidates come from the listing at the management's top level, where an
     MDS answers the objects of every domain with their domain (under other

@@ -136,7 +136,7 @@ def ref_names(items) -> list[str]:
 def any_net_names(items) -> list[str]:
     """ref_names + any-normalization for network refs: an empty list is
     ['any'], any-ipv4 and any-ipv6 together are ['any'], one of them alone
-    is that family's token (D5 of docs/IPV6_PLAN.md, phase 4) beside the
+    is that family's token beside the
     other names."""
     names = ref_names(items)
     if not names:
@@ -155,13 +155,23 @@ def _ref_name(item) -> str | None:
     return None
 
 
+def _any_net_name(item) -> str:
+    """One network ref of a NAT rule as the agnostic token: FDM's built-in
+    any-ipv4 and any-ipv6 are the family tokens any4 and any6, an absent ref is any. The default
+    InsideOutsideNatRule names any-ipv4, and PAN-OS refused the literal."""
+    name = _ref_name(item)
+    if not name:
+        return "any"
+    return {"any-ipv4": "any4", "any-ipv6": "any6"}.get(name, name)
+
+
 # ── Object parsers ───────────────────────────────────────────────
 
 def parse_networks(items: list[dict]) -> tuple[list[dict], dict[str, list[str]]]:
     """FDM /object/networks → address objects.
 
     subType HOST/NETWORK → ip-netmask, RANGE → ip-range, FQDN → fqdn.
-    Both families import as written (docs/IPV6_PLAN.md, phase 4); the
+    Both families import as written; the
     any-objects are skipped (mapped to the D5 tokens at the rule refs).
     """
     objects: list[dict] = []
@@ -376,7 +386,7 @@ def _port_number(name, port_of):
     """The translated port as the number the renderers write (the PAN-OS
     and FortiOS imports carry '8443', not an object name): a port object
     that names one tcp/udp port resolves through port_of, anything else
-    stays as it is (lab 2026-11-04, fmc2fgt VIP)."""
+    stays as it is."""
     if not name or not port_of:
         return name
     try:
@@ -416,8 +426,8 @@ def parse_manual_nat_rules(items: list[dict], position_base: int = 0, port_of=No
             "src_zones":       [src_zone] if src_zone else ["any"],
             "dst_zones":       [dst_zone] if dst_zone else ["any"],
             "interface_name":  None,
-            "orig_src":        [_ref_name(e.get("originalSource")) or "any"],
-            "orig_dst":        [_ref_name(e.get("originalDestination")) or "any"],
+            "orig_src":        [_any_net_name(e.get("originalSource"))],
+            "orig_dst":        [_any_net_name(e.get("originalDestination"))],
             "orig_service":    [orig_svc or "any"],
             "trans_src":       trans_src,
             "trans_src_type":  trans_type,
@@ -460,7 +470,7 @@ def parse_object_nat_rules(items: list[dict], position_base: int = 0) -> list[di
             "src_zones":       [src_zone] if src_zone else ["any"],
             "dst_zones":       [dst_zone] if dst_zone else ["any"],
             "interface_name":  None,
-            "orig_src":        [orig or "any"],
+            "orig_src":        [{"any-ipv4": "any4", "any-ipv6": "any6"}.get(orig or "", orig) or "any"],
             "orig_dst":        ["any"],
             "orig_service":    ["any"],
             "trans_src":       trans_src,
@@ -503,8 +513,7 @@ def _iface_ipv4_cidr(e: dict) -> tuple[str | None, bool]:
 
 
 def _iface_ipv6_cidrs(e: dict) -> list[str]:
-    """The static IPv6 addresses of an FDM interface entry's ipv6 block
-    (docs/IPV6_PLAN.md, phase 4): `ipv6Addresses` entries with an address
+    """The static IPv6 addresses of an FDM interface entry's ipv6 block: `ipv6Addresses` entries with an address
     and a prefix length (either as `prefix` beside the address or in the
     address itself); autoconfig and DHCPv6 carry no fact to migrate."""
     v6 = e.get("ipv6") or {}
@@ -576,8 +585,26 @@ def parse_interfaces(items: list[dict],
     for e in items or []:
         _one(e, None)
         parent = (e.get("name") or "").strip()
-        for sub in subs_by_parent.get(e.get("id") or "", []):
-            _one(sub, parent or (e.get("hardwareName") or "").strip() or None)
+        subs = subs_by_parent.get(e.get("id") or "", [])
+        hw = (e.get("hardwareName") or "").strip()
+        if subs and not parent and hw and not e.get("managementOnly"):
+            # a port FDM leaves unnamed carries sub-interfaces: it enters as a
+            # physical interface under its hardware name, so the operator can
+            # map it to a port of the target.
+            # Without it the VLANs' parent was a name the project did not hold.
+            if hw in drops.get("interface_unnamed", []):
+                drops["interface_unnamed"].remove(hw)
+                if not drops["interface_unnamed"]:
+                    drops.pop("interface_unnamed")
+            interfaces.append({
+                "name": hw, "zone": None,
+                "description": "unnamed port in FDM, the parent of " + ", ".join(
+                    (x.get("name") or "").strip() for x in subs if (x.get("name") or "").strip()),
+                "ips": [], "type": "physical", "vr_name": "default", "role": None,
+                "dhcp_enabled": False, "enabled": bool(e.get("enabled", True)),
+            })
+        for sub in subs:
+            _one(sub, parent or hw or None)
     return interfaces, drops
 
 

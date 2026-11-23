@@ -5,8 +5,7 @@ USE gateshift;
 
 -- User-editable overlays on top of fw_nat_rules, keyed by nat_hash.
 --
--- nat_hash IS the rule identity (SHA1 over traffic-defining fields -
--- see project_nat_phase_a_audit + feedback_rule_identity_hash). Override
+-- nat_hash IS the rule identity (SHA1 over traffic-defining fields). Override
 -- bindings survive re-imports, position re-orderings and user-renames of
 -- the source NAT-rule, as long as the traffic-defining fields stay the
 -- same.
@@ -15,7 +14,7 @@ USE gateshift;
 -- disabled (toggle), and vendor-prefixed properties (pa_* / forti_* / cp_*).
 -- Editing one of the hash-input fields (orig_*/trans_*) does not flow through
 -- an override row - the user does that directly on fw_nat_rules at the
--- source side. See [[project_nat_full_scope_plan]] Decisions table.
+-- source side.
 --
 -- source enum:
 --   auto    - promoted from raw_extras by Phase-B-Roundtrip promoters

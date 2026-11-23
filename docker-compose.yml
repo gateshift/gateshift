@@ -54,8 +54,7 @@ services:
       # The repository root, so the image bakes the SQL jobs and the VERSION
       # file beside the collector's code. Everything the collector runs is
       # then in the image: a git pull alone changes nothing at runtime, and
-      # only a rebuild brings new code, in both halves at once
-      # (docs/DEVICE_IDENTITY_PLAN.md, D7).
+      # only a rebuild brings new code, in both halves at once.
       context: .
       dockerfile: pyapp/gateshift/Dockerfile
     restart: unless-stopped
@@ -95,6 +94,8 @@ services:
       # the git-ignored .env file - never hard-coded here. Unset → PSK storage
       # is disabled and the push falls back to the placeholder.
       GATESHIFT_SECRET_KEY: ${GATESHIFT_SECRET_KEY:-}
+      # 1 in .env offers an AI client the reads of the MCP endpoint only.
+      GATESHIFT_MCP_READ_ONLY: ${GATESHIFT_MCP_READ_ONLY:-}
     ports:
       # HTTPS on 443 from the certificate under ./certs (make-cert.sh writes a
       # self-signed one; replace the two files with your CA's), plain HTTP on
@@ -105,6 +106,9 @@ services:
     volumes:
       # The TLS certificate and key (docs/OPERATING.md, Access).
       - ./certs:/certs:ro
+      # The shipped documents the automation API serves (docs/API.md, GET /api/v1/documents/{name}).
+      - ./docs:/docs:ro
+      - ./KNOWN_LIMITATIONS.md:/docs-root/KNOWN_LIMITATIONS.md:ro
       # Required: the application execs into the python sidecar through the
       # Docker API. This grants the container root-equivalent control of the
       # host's Docker daemon.

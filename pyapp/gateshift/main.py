@@ -84,15 +84,14 @@ def main():
 
     if mode == "discover":
         # The senders the receiver has heard, written to fw_log_senders for
-        # the webapp's candidate list. No Device is created here, ever
-        # (docs/DEVICE_IDENTITY_PLAN.md, phase 4): a sender string may point
+        # the webapp's candidate list. No Device is created here, ever: a sender string may point
         # at a Device, the operator makes that mapping.
         files = sorted(glob.glob(log_pattern))
         senders = scan_senders(engine, files)
         print(json.dumps({"senders": senders}, default=str))
         return
 
-    # The run page's filter: the Device's row id (docs/DEVICE_IDENTITY_PLAN.md, D5)
+    # The run page's filter: the Device's row id
     _df = os.getenv("DEVICE_ID", "").strip()
     device_filter = int(_df) if _df.isdigit() else None
 

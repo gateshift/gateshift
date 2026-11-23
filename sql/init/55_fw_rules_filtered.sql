@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS fw_rules_filtered (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor       VARCHAR(64) NULL,
-  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  -- the Device, the key once phase 7 drops the name
   device_id  INT NULL,
   action       ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction    ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS fw_rules_filtered (
   -- direction + proto + dst_port + the sorted src/dst signatures. Filled in a
   -- post-pipeline UPDATE (see gateshift/modules/db_jobs.py::_run_quality_filter).
   -- Replaces the legacy (device_host, action, proto, dst_port) "natkey",
-  -- which conflated distinct rules - see feedback_rule_identity_hash memory.
+  -- which conflated distinct rules.
   content_hash BINARY(20) NULL,
   KEY idx_device_id (device_id),
   PRIMARY KEY (id),

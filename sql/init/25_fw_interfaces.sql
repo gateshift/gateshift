@@ -3,7 +3,7 @@
 
 USE gateshift;
 
--- Network-Strang interface table - supersedes fw_interface_zones (Slice 2).
+-- Network strand interface table, supersedes fw_interface_zones (Slice 2).
 -- Per-interface attributes including the inline zone-binding column. Cardinality
 -- is 1:1 (each interface binds to one zone in PA / Forti / CP / OPNsense), so a
 -- separate binding-only table buys nothing today. Future M&A (per-(source,target)

@@ -120,13 +120,11 @@ MODULES = [
 # so an override applied on one stage's view binds equally on the next stage
 # whenever the underlying rule signature is unchanged. Override tables
 # (apps, zones, logging, track, security_profile, service) all key on this.
-# See feedback_rule_identity_hash + project_enrichment_hash_drift memos.
 #
 # The hash itself is ONE function in the database, gs_rule_hash
 # (sql/init/48_fn_rule_hash.sql), created by the first install, this
 # collector's bootstrap and the webapp's lifespan: both halves of the product
-# stamp and recompute the same definition (docs/DEVICE_IDENTITY_PLAN.md,
-# phase 6). Term 1 is the Device's row id. What this module still composes
+# stamp and recompute the same definition. Term 1 is the Device's row id. What this module still composes
 # is the per-stage SOURCE and DESTINATION signature the function takes as
 # parameters; the webapp carries the same four fragments for its migration,
 # and a host test keeps them equal.
@@ -161,8 +159,7 @@ def _hash_sha1_expr(src_sig_sql: str, dst_sig_sql: str) -> str:
     stage's src/dst signature fragments as its two signature parameters.
     The name of this helper predates the function. No formula lives here: config
     (api_import) rules add their stable rule_name inside the function, the
-    route-derived zone is excluded there, and the Device's row id is term 1
-    (docs/DEVICE_IDENTITY_PLAN.md, phase 6)."""
+    route-derived zone is excluded there, and the Device's row id is term 1."""
     return (f"gs_rule_hash(r.device_id, r.action, r.direction, r.proto, r.dst_port, "
             f"{src_sig_sql}, {dst_sig_sql}, r.source_type, r.rule_name)")
 
@@ -362,7 +359,7 @@ def _run_endpoint_pairs(conn, src_table: str):
     """))
 
     # Sources: join back to pick up all src_ips for each merged rule, matched
-    # by the Device's id (docs/DEVICE_IDENTITY_PLAN.md, phase 5)
+    # by the Device's id
     if inline_dst:
         ep_match = f"""
             JOIN {src_table} r
@@ -413,7 +410,7 @@ def _run_endpoint_pairs(conn, src_table: str):
 # (_auto_register_devices). That made the registry derive from the
 # pipeline, and two boxes sending one hostname became one Device. A sender
 # is a row in fw_log_senders now and points at a Device only when the
-# operator maps it (docs/DEVICE_IDENTITY_PLAN.md, phase 4, D1).
+# operator maps it.
 
 
 def run_sql_jobs(engine0, db_name: str, jobs_dir: str, since_dt=None, until_dt=None, days_back: int = 7) -> int:
@@ -590,6 +587,6 @@ def run_sql_jobs(engine0, db_name: str, jobs_dir: str, since_dt=None, until_dt=N
         # wrongly orphaned valid app/zone/log/security_profile/service
         # overrides on every generate. Removed rather than duplicated; orphans
         # are harmless (they simply don't bind) and the webui cleans them after
-        # the pipeline returns. See project_enrichment_hash_drift memo.
+        # the pipeline returns.
 
     return executed

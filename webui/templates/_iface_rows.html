@@ -1,0 +1,304 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# ── The rows of Network > Interfaces. Rendered by the page and, after an
+     edit, by GET /network/interfaces/rows-fragment, so a rename, a type
+     change, an add, a toggle or a bond edit swaps the table body instead
+     of reloading the page (CE backlog 27).
+     Needs: iface_zones, zones_list, zone_name_color, zone_color_map,
+     vrfs_list, free_phys_ifaces, target_ifaces, bond_member_to_parent,
+     selected_device, selected_target (cloud_platforms is a global). ── #}
+{% set _show_role = true %}
+{% set _src_platform = (selected_device.platform if selected_device else '') %}
+{% set _src_is_zone_native = _src_platform in ('panw', 'asa', 'opnsense', 'firepower') or _src_platform in cloud_platforms %}
+            {% for iz in iface_zones %}
+            {% set zcls = zone_color_map.get(iz.zone_name, 'bg-blue-900/50 border-blue-700/60 text-blue-300') if iz.zone_name else '' %}
+            {% set needs_ip = not iz.ip_addresses %}
+            {% set needs_zone = _src_is_zone_native and not iz.zone_name %}
+            {% set iface_renamed = iz.import_interface_name and iz.import_interface_name != iz.interface_name %}
+            {% set _is_vlan_sub = (iz.iface_type or '') == 'vlan' and iz.parent_iface_name %}
+            {% set _bond_owner = bond_member_to_parent.get(iz.interface_name) if bond_member_to_parent else None %}
+            {% set _is_ae_member = _bond_owner is not none %}
+            {% set _inherited = iz.editable is defined and not iz.editable %}
+            <tr class="hover:bg-gray-800/30 {% if _is_vlan_sub %}bg-gray-900/20{% endif %} {% if _is_ae_member %}iface-ae-member bg-gray-900/20{% endif %} {% if iz.deploy_skip %}opacity-60{% elif _inherited %}opacity-70{% endif %}" id="iface-row-{{ iz.id }}"
+                data-iface-name="{{ iz.interface_name }}"
+                data-import-iface-name="{{ iz.import_interface_name or '' }}"
+                data-deploy-skip="{{ '1' if iz.deploy_skip else '0' }}"
+                data-inherited="{{ '1' if _inherited else '0' }}"
+                {% if iz.src_scope %}data-src-scope="{{ iz.src_scope }}"{% endif %}
+                {% if _is_ae_member %}data-bond-parent="{{ _bond_owner }}"{% endif %}>
+              <td class="py-1.5 pr-4">
+                {# Any interface is selectable for delete (source or manual).
+                   A deleted source interface returns on the next re-import;
+                   the backend reference-guard 409s if a referrer would dangle.
+                   Skip stays the in-place, push-only exclude (name dropdown). #}
+                <input type="checkbox" class="iface-row-sel cursor-pointer accent-blue-500"
+                       data-iface-id="{{ iz.id }}" data-iface-name="{{ iz.interface_name }}"
+                       onchange="ifaceRowToggle({{ iz.id }}, this.checked)"
+                       aria-label="Select {{ iz.interface_name }}">
+              </td>
+              <td data-field="interface" class="py-1.5 pr-4 {% if _is_vlan_sub or _is_ae_member %}pl-6{% endif %}">
+                {% set _is_bond = (iz.iface_type or '') == 'bond' %}
+                <div class="flex flex-col gap-0.5">
+                  {% if _is_bond %}
+                  <div class="text-[10px] text-gray-500 font-mono">[aggregate]</div>
+                  {% endif %}
+                  {% if _is_ae_member %}
+                  {% set _bond_id = (iface_zones | selectattr('interface_name', 'equalto', _bond_owner) | map(attribute='id') | first) %}
+                  {% endif %}
+                  <div class="flex items-center gap-2">
+                  <select data-iface-id="{{ iz.id }}"
+                          onchange="changeIfaceMapping({{ iz.id }}, this)"
+                          class="iface-name-select flex-1 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-xs py-0.5 px-0 transition-colors
+                                 {% if iz.deploy_skip %}text-gray-500{% elif iface_renamed %}text-amber-300{% else %}text-gray-200{% endif %}">
+                    {# The name this project shows (the source name unless the project
+                       maps it) - selected unless the interface is excluded from the
+                       push (skip). Renaming writes a row of the project's name map. #}
+                    <option value="src:{{ iz.interface_name }}"
+                            {% if not iz.deploy_skip %}selected{% endif %}>{{ iz.interface_name }}</option>
+                    {% if target_ifaces %}
+                    {# Discovered target interfaces - pick one to RENAME to it. #}
+                    <optgroup label="── Rename to target ──">
+                      {% for tgt in target_ifaces %}
+                      <option value="tgt:{{ tgt }}">{{ tgt }}</option>
+                      {% endfor %}
+                    </optgroup>
+                    {% endif %}
+                    <option value="__rename__">+ Rename…</option>
+                    {# Skip - exclude this source interface from the push (only
+                       legal when unreferenced; backend guards + 409s otherwise). #}
+                    <option value="__skip__"
+                            {% if iz.deploy_skip %}selected{% endif %}>- Don't deploy (skip) -</option>
+                  </select>
+                  {% if _is_ae_member and _bond_id %}
+                  {# Aggregate member stays mappable (select above) - keep the
+                     detach button so the user can still pull it out of the bond. #}
+                  <button type="button" class="bond-remove-btn inline-flex items-center justify-center w-5 h-5 rounded border border-gray-700 hover:border-gray-500 flex-shrink-0"
+                          onclick="bondRemoveMember({{ _bond_id }}, '{{ iz.interface_name }}')"
+                          title="Detach {{ iz.interface_name }} from {{ _bond_owner }}">
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="white"><rect x="0" y="4" width="10" height="2" rx="1"/></svg>
+                  </button>
+                  {% endif %}
+                  </div>
+                  {% if iface_renamed %}
+                  <span class="text-[10px] text-gray-500 font-mono"
+                        title="Original collector name (immutable audit anchor)">
+                    import: {{ iz.import_interface_name }}
+                  </span>
+                  {% endif %}
+                  {% if _inherited %}
+                  {# P2: inherited from a member template of the effective stack - read-only here.
+                     Switch the network scope to {{ iz.src_scope }} (header dropdown) to edit it. #}
+                  <span class="text-[10px] font-mono text-indigo-300/80 inline-flex items-center gap-1"
+                        title="Inherited from template {{ iz.src_scope }}: read-only in this effective (stack) view. Switch the network scope to {{ iz.src_scope }} to edit.">
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+                    ↳ {{ iz.src_scope }}
+                  </span>
+                  {% endif %}
+                  {# `needs IP / needs zone` marker dropped - false-positive
+                     for layer-2 / bond-member / loopback ifaces and noisy on
+                     vendors without iface-tier zones. The deploy validator
+                     surfaces real gaps at push time. #}
+                </div>
+              </td>
+              <td class="py-1.5 pr-4" data-field="type">
+                {% set _type_labels = {'physical': 'Layer 3', 'vlan': 'VLAN', 'bond': 'Aggregate', 'loopback': 'Loopback', 'tunnel': 'Tunnel'} %}
+                {% set _type_label = _type_labels.get(iz.iface_type or 'physical', iz.iface_type) %}
+                {% set _cur_type = iz.iface_type or 'physical' %}
+                {% if _is_ae_member %}
+                {# Structural - the bond owns its members; type is fixed. #}
+                <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono bg-gray-800 border border-gray-700 text-gray-400">{{ _type_label }}</span>
+                {% else %}
+                {# Reclassifiable: a source tunnel can be migrated to a VLAN/L3
+                   on the target. Changing it reloads the row so the VLAN
+                   parent/tag cell appears and the push pre-flight re-evaluates. #}
+                <select onchange="updateIface({{ iz.id }}, 'iface_type', this.value)"
+                        class="bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-[10px] text-gray-300 py-0.5 px-0 transition-colors
+                               {% if _cur_type == 'tunnel' %}text-amber-300{% endif %}">
+                  <option value="physical" {% if _cur_type == 'physical' %}selected{% endif %}>Layer 3</option>
+                  <option value="vlan"     {% if _cur_type == 'vlan' %}selected{% endif %}>VLAN</option>
+                  <option value="bond"     {% if _cur_type == 'bond' %}selected{% endif %}>Aggregate</option>
+                  <option value="loopback" {% if _cur_type == 'loopback' %}selected{% endif %}>Loopback</option>
+                  <option value="tunnel"   {% if _cur_type == 'tunnel' %}selected{% endif %}>Tunnel</option>
+                </select>
+                {% endif %}
+                {% set _plm = (iz.properties or {}).get('pa_link_mode') %}
+                {% if _plm and _plm != 'layer3' %}
+                {# PAN-OS link mode (tap/layer2/vwire/...) - collected source
+                   truth; muted grey (read-only informational, not an action
+                   item) so it doesn't read as a warning. Shown so a non-L3
+                   port doesn't masquerade as the 'Layer 3' type label above. #}
+                <span class="ml-1 inline-block px-1 py-0.5 rounded text-[9px] font-mono bg-gray-800 border border-gray-700 text-gray-500"
+                      title="PAN-OS link mode as configured on the source">{{ _plm }}</span>
+                {% endif %}
+              </td>
+              <td class="py-1.5 pr-4" data-field="vlan">
+                {% if _is_ae_member %}{# bond owns layer3; member has no VLAN #}
+                {% elif (iz.iface_type or '') == 'vlan' %}
+                {# Trailing-numeric heuristic: pull digits from after the last
+                   '.' (PA/CP `eth1.100`) or the whole name (Forti bare-tag
+                   `100`). Mismatch = the embedded number is set but != tag. #}
+                {% set _name_tail = iz.interface_name.rsplit('.', 1)[-1] if iz.interface_name else '' %}
+                {% set _name_digits = _name_tail if _name_tail.isdigit() else '' %}
+                {% set _tag_mismatch = iz.vlan_tag and _name_digits and (_name_digits|int) != iz.vlan_tag %}
+                {# Parent options = physical/bond ifaces by the name this project
+                   shows (the endpoint turns the pick back into the source name);
+                   a later parent rename carries its VLAN children along. #}
+                {% set _par_ifaces = (iface_zones | selectattr('iface_type', 'in', ['physical', 'bond']) | list) if iface_zones else [] %}
+                {% set _par_names = _par_ifaces | map(attribute='interface_name') | list %}
+                <div class="flex items-center gap-2 text-xs">
+                  <select onchange="updateIface({{ iz.id }}, 'parent', this.value)"
+                          title="Parent interface (VLAN rides on this L3/aggregate iface). A parent rename carries its VLAN children along."
+                          class="w-24 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-300 py-0.5 px-0 transition-colors">
+                    <option value="" {% if not iz.parent_iface_name %}selected{% endif %}>Parent…</option>
+                    {% for p in _par_ifaces %}
+                    <option value="{{ p.interface_name }}" {% if iz.parent_iface_name == p.interface_name %}selected{% endif %}>{{ p.interface_name }}</option>
+                    {% endfor %}
+                    {% if iz.parent_iface_name and iz.parent_iface_name not in _par_names %}
+                    <option value="{{ iz.parent_iface_name }}" selected>{{ iz.parent_iface_name }}</option>
+                    {% endif %}
+                  </select>
+                  <input type="text" inputmode="numeric" pattern="[0-9]*"
+                         value="{{ iz.vlan_tag or '' }}"
+                         placeholder="Tag"
+                         onchange="updateIface({{ iz.id }}, 'vlan_tag', this.value)"
+                         class="w-14 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-300 py-0.5 px-0 transition-colors">
+                  {% if _tag_mismatch %}
+                  <span class="text-amber-400" title="VLAN tag {{ iz.vlan_tag }} doesn't match the trailing number in '{{ iz.interface_name }}': push uses interface_name literally. Rename manually if needed">(!)</span>
+                  {% endif %}
+                </div>
+                {% else %}
+                <span class="text-gray-700">-</span>
+                {% endif %}
+              </td>
+              <td class="py-1.5 pr-4" data-field="ip">
+                {% if not _is_ae_member %}
+                <div class="flex items-center gap-2 flex-wrap">
+                  <label class="text-[10px] text-gray-500 flex items-center gap-1 cursor-pointer flex-shrink-0"
+                         title="Configure this interface as a DHCP client. Static IPs are cleared and the renderer emits a vendor-appropriate dhcp-client block on push.">
+                    <input type="checkbox" class="iface-dhcp-toggle accent-blue-500"
+                           data-iface-id="{{ iz.id }}"
+                           {% if iz.dhcp_enabled %}checked{% endif %}
+                           onchange="toggleIfaceDhcp({{ iz.id }}, this.checked)">
+                    DHCP
+                  </label>
+                  <input type="text" value="{{ iz.ip_addresses | join(', ') if iz.ip_addresses and not iz.dhcp_enabled else '' }}"
+                         {% if iz.dhcp_enabled %}disabled placeholder="(DHCP)"{% else %}placeholder="e.g. 192.168.1.1/24, 10.0.0.1/24"{% endif %}
+                         onchange="updateIface({{ iz.id }}, 'ip', this.value)"
+                         class="iface-ip-input flex-1 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-400 text-xs py-0.5 px-0 transition-colors disabled:opacity-40">
+                </div>
+                {% endif %}
+              </td>
+              <td class="py-1.5 pr-4 network-zone-col" data-field="zone">
+                {% if not _is_ae_member %}
+                <div class="flex items-center gap-1.5">
+                  {# Color swatch - clicking opens color picker popover. The
+                     .chip.<tone> token class gives the dot its zone tint;
+                     we override .chip padding/size to make it a 14px circle.
+                     `zcls` carries the tone name (trust/wan/dmz/pub/any/red/
+                     amber/teal/pink/purple) per V2/3.1 ZONE_PALETTE.tone. #}
+                  <div style="position:relative;">
+                    <button type="button"
+                            data-color-key="{{ zone_name_color.get(iz.zone_name, 'blue') if iz.zone_name else 'blue' }}"
+                            data-iface-id="{{ iz.id }}"
+                            onclick="openColorPicker(this)"
+                            title="Change zone color"
+                            class="zone-swatch chip {% if iz.zone_name %}{{ zcls or 'dmz' }}{% else %}any{% endif %}"
+                            style="width:14px;height:14px;border-radius:50%;padding:0;flex-shrink:0;cursor:pointer;transition:transform .12s;"
+                            onmouseover="this.style.transform='scale(1.1)';" onmouseout="this.style.transform='scale(1)';">
+                    </button>
+                  </div>
+                  {% set _cur_zone = iz.zone_name or '' %}
+                  {% set _zone_names = (zones_list | map(attribute='name') | list) if zones_list else [] %}
+                  <select data-iface-id="{{ iz.id }}"
+                          onchange="updateIface({{ iz.id }}, 'zone', this.value)"
+                          class="zone-name-input flex-1 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none text-xs py-0.5 px-0 transition-colors
+                                 {% if iz.zone_name %}text-gray-200{% else %}text-gray-600{% endif %}">
+                    <option value="" {% if not _cur_zone %}selected{% endif %}>- None -</option>
+                    {% if _cur_zone and _cur_zone not in _zone_names %}
+                    <option value="{{ _cur_zone }}" selected>{{ _cur_zone }}</option>
+                    {% endif %}
+                    {% for zn in _zone_names %}
+                    <option value="{{ zn }}" {% if zn == _cur_zone %}selected{% endif %}>{{ zn }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                {% endif %}
+              </td>
+              <td class="py-1.5 pr-4" data-field="vr_name">
+                {% if not _is_ae_member %}
+                <div class="flex flex-col gap-0.5">
+                  <select onchange="updateIface({{ iz.id }}, 'vr_name', this.value)"
+                          class="w-full bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-300 text-xs py-0.5 px-0 transition-colors">
+                    {% set _cur_vr = iz.vr_name or 'default' %}
+                    {% set _vr_names = (vrfs_list | map(attribute='name') | list) if vrfs_list else ['default'] %}
+                    {% if _cur_vr not in _vr_names %}
+                    <option value="{{ _cur_vr }}" selected>{{ _cur_vr }}</option>
+                    {% endif %}
+                    {% for vn in _vr_names %}
+                    <option value="{{ vn }}" {% if vn == _cur_vr %}selected{% endif %}>{{ vn }}</option>
+                    {% endfor %}
+                  </select>
+                  {% if _show_role %}
+                  {% set _cur_role = iz.role or '' %}
+                  <select onchange="updateIface({{ iz.id }}, 'role', this.value)"
+                          title="Interface role: 'wan' marks the external/untrusted side (feeds NAT inference + the NAT to-zone fallback). Push-emitted on FortiGate targets"
+                          class="w-full bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none text-[10px] text-gray-500 py-0.5 px-0 transition-colors">
+                    <option value="" {% if not _cur_role %}selected{% endif %}>- Role -</option>
+                    {% for r in ['lan','wan','dmz','undefined'] %}
+                    <option value="{{ r }}" {% if r == _cur_role %}selected{% endif %}>{{ r }}</option>
+                    {% endfor %}
+                  </select>
+                  {% endif %}
+                </div>
+                {% endif %}
+              </td>
+              <td class="py-1.5 pr-4" data-field="enabled">
+                {% set _en = iz.enabled if iz.enabled is not none else 1 %}
+                <input type="checkbox" class="iface-enabled-toggle accent-blue-500 cursor-pointer"
+                       data-iface-id="{{ iz.id }}"
+                       {% if _en %}checked{% endif %}
+                       onchange="toggleIfaceEnabled({{ iz.id }}, this.checked)"
+                       title="Admin state. Unchecking marks the iface admin-down: push emits the vendor-specific down marker (PA <link-state>down</link-state>, Forti set status down, CP Gaia enabled=false, ASA shutdown).">
+              </td>
+              <td class="py-1.5 pr-4" data-field="description">
+                <input type="text" value="{{ iz.description or '' }}"
+                       placeholder="-"
+                       data-ae-editable
+                       onchange="updateIface({{ iz.id }}, 'description', this.value)"
+                       class="w-full bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none text-xs text-gray-400 py-0.5 px-0 transition-colors">
+              </td>
+            </tr>
+            {% if _is_bond %}
+            {# Bond add-member control - slim sub-row right under the bond
+               parent for adding a new member. Dropdown aligns with the
+               iface-name column (no pl-6 indent); + button sits to its
+               right. Existing members render as their own indented rows. #}
+            {% set _members = iz.member_iface_names or [] %}
+            {% set _avail = free_phys_ifaces or [] %}
+            <tr id="bond-expand-{{ iz.id }}" class="bg-gray-900/30">
+              <td class="py-1"></td>
+              <td class="py-1 pl-6 pr-4">
+                <div class="flex items-center gap-2">
+                  {% if _avail %}
+                  <select class="bond-add-select flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 font-mono"
+                          data-iface-id="{{ iz.id }}">
+                    <option value="">Add member…</option>
+                    {% for f in _avail %}
+                    <option value="{{ f }}">{{ f }}</option>
+                    {% endfor %}
+                  </select>
+                  <button type="button"
+                          onclick="bondAddMember({{ iz.id }})"
+                          class="inline-flex items-center justify-center w-5 h-5 rounded border border-gray-700 hover:border-gray-500 flex-shrink-0">
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="white"><rect x="0" y="4" width="10" height="2" rx="1"/><rect x="4" y="0" width="2" height="10" rx="1"/></svg>
+                  </button>
+                  {% elif not _members %}
+                  <span class="text-[10px] text-amber-400 italic">empty bond</span>
+                  {% else %}
+                  <span class="text-[10px] text-gray-600 italic">no free physical IFs</span>
+                  {% endif %}
+                </div>
+              </td>
+              <td colspan="7" class="py-1"></td>
+            </tr>
+            {% endif %}
+            {% endfor %}

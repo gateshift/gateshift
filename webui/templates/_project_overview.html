@@ -69,7 +69,7 @@
   </form>
   {% endif %}
 {%- endmacro %}
-{# Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3): the read-only refresh of the
+{# Hit counts from the box: the read-only refresh of the
    box's own rule counters, beside the re-import. No dialog: it reads, it resets nothing,
    and it touches neither the rules nor the pipeline. #}
 {% macro read_hits(dev, next_url) -%}
@@ -93,7 +93,7 @@
     </button>
   </div>
 
-  {# the steps of the project moved into the path dialog (docs/UI_USABILITY_PLAN.md, D22, _path_modal.html) #}
+  {# the steps of the project moved into the path dialog #}
 
   {# ── the two devices: what Gateshift holds of each. An optimization has
      one device: its column reads "Optimize" and takes the full width. ── #}
@@ -208,7 +208,7 @@
     </div>
   </div>
   {% endif %}
-  {# ── the project's exclusions (docs/PROJECT_VIEW_DESIGN.md): what this project deleted
+  {# ── the project's exclusions: what this project deleted
      from its view - the device keeps the facts, Restore brings an item back ── #}
   {% if ov_exclusions %}
   <div>

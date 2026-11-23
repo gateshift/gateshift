@@ -8,8 +8,8 @@
 {% block main_class %}{% endblock %}
 {% block content %}
 
-{# Projects-first IA (docs/PROJECTS_UI_DESIGN.md, U6 layout), split in two views
-   on 2026-11-10 (docs/UI_USABILITY_PLAN.md, D30): /projects shows the tenant's
+{# Projects-first IA, split in two views
+   on 2026-11-10: /projects shows the tenant's
    PROJECTS, /devices its DEVICES (the inventory), both from this template.
    One project = one (source, target) pair with its decisions; a pair whose
    target is its source is an OPTIMIZATION (the device is curated and pushed
@@ -24,7 +24,7 @@
   .pl-grid .empty { margin:0 0 22px; }
   /* column headers = the shared .sec-hd (tokens.css) */
   .pl-sub { font-size:var(--fs-small); color:var(--tx3); }
-  /* the status chip (docs/UI_USABILITY_PLAN.md, D8): the step model's word for the project */
+  /* the status chip: the step model's word for the project */
   .pl-status { display:inline-block; font-size:var(--fs-caption); padding:2px 7px; border:1px solid var(--line2); color:var(--tx2); white-space:nowrap; }
   .pl-status.pushed, .pl-status.verified { color:var(--accent); border-color:var(--accent); }
   .pl-status.closed { color:var(--tx3); }
@@ -201,16 +201,6 @@
 {% include "_tenant_modal.html" %}
 
 <script>
-  // U16: the tree items on this page open the picked project at that view -
-  // the workspace consumes the one-shot key (rules.html tab-once).
-  var _NAV_PROJECT_URL = {{ (('/projects/' ~ ov_project.id) if ov_project else '') | tojson }};
-  function _wsGo(key) {
-    if (!_NAV_PROJECT_URL) return;
-    try { if (key) sessionStorage.setItem('tab-once', key); } catch (e) { /* non-fatal */ }
-    showNavOverlay(); window.location.href = _NAV_PROJECT_URL;
-  }
-  function wsNav(primary, rb, sub, obj) { _wsGo([primary, rb, sub, obj].filter(Boolean).join(':')); }
-  function switchOrgSub() { /* the navigation above already left this page */ }
   // ── One text filter over both columns (project rows + device rows) ──
   function pfApply() {
     var q = ((document.getElementById('pf-text') || {}).value || '').trim().toLowerCase();
@@ -225,7 +215,7 @@
     });
   }
 
-  // ── New-project dialog state (docs/PROJECTS_UI_DESIGN.md, D2) ──
+  // ── New-project dialog state ──
   var NP = {
     sources: {{ sources | tojson }},
     targets: {{ targets | tojson }},

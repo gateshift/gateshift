@@ -4,6 +4,80 @@ All notable changes to Gateshift, newest first. This file covers the current
 major version. It ships with every release and is the source of the release
 notes.
 
+## 0.9.6 (2026-11-23)
+
+**Added**
+
+- **An MCP server at the installation's own endpoint**: an AI client connects to `https://<gateshift>/mcp` with a token, nothing is installed beside the client, and no tool pushes, publishes or discards.
+- The MCP server's edit_interface takes type, parent, VLAN tag and addresses.
+- The MCP server retries a call once when the installation closed the connection between two calls.
+- `GATESHIFT_MCP_READ_ONLY=1` in `.env` offers an AI client the reading tools only.
+- **An automation API at `/api/v1`** with its own document: Devices, projects, interfaces, zones, rules, findings and jobs, the review stamp, the build, push, publish and discard as jobs, the last three for a token of scope `full`, every write audited under its token.
+- **The Automation page** under Manage carries the API, the MCP endpoint, where an AI client's data goes, and the API tokens with scope and expiry, the Add API Token dialog says what each scope allows.
+- **The network strand, the NAT rules and the snapshots through the API and the MCP server**: interfaces, routes, zones, virtual routers and NAT rules added, edited and deleted in a project, snapshots taken and restored, and through the API also deleted and branched.
+- A re-import keeps the NAT rules a project added, in their order behind the imported ones.
+- **The curation through the API and the MCP server**: objects listed with lint flags, renamed, left out and merged, the rules' fields, names and order, the target's stored catalogues and the automatic application assignment.
+- A naming workbench in the API and the MCP server renames a selection of objects or rules by a scheme with variables or an explicit map, planned as a whole first.
+- A rule's name and its position are the project's decisions and survive refreshes and re-imports.
+- Editing a rule's zones, service, applications, profiles, logging or track marks the policy strand outdated on the Review & Deploy page.
+- The pickers of Profiles & Settings read the target's stored catalogue and work offline.
+- The Applications pane of a PAN-OS target and a policy-based FortiGate offers a search over the target's application catalogue.
+- A pre-shared key is checked against the target's rule when it is saved.
+- A browser without JavaScript is told so at the top of every page.
+- docs/install.md carries the command that sets the admin password anew.
+
+**Changed**
+
+- The claim under the wordmark reads Migrate & optimize firewalls.
+- The install check after a Check Point policy push names both rules of a conflict.
+- Network > Interfaces re-renders its rows after an edit instead of reloading the page.
+- The hint on the Review & Deploy button offers the PAN-OS fallback ruleset as an option for the transition instead of telling every push to append it.
+
+**Fixed**
+
+- Restoring a project's Original snapshot takes the names back too.
+- The FortiGate policy-NAT fold sets NAT on every outbound policy of a source NAT that matches every source, keeps a renamed rule's flag and never lands on an unrendered default rule.
+- A re-import removes the exclusions of items the import no longer carries and names them in the log.
+- A FortiGate network push releases the interfaces an earlier push's zones hold before it writes the new zones.
+- A FortiGate push clears every kind of its strand, also a kind the new configuration has none of.
+- A NAT rule with an IPv4-only or IPv6-only catch-all side reaches a Check Point target instead of being dropped.
+- A static route whose egress interface the FortiGate target lacks is pushed over its gateway's interface or declared, instead of stopping the push.
+- A stored pre-shared key the target refuses stops the network push before its first write and shows as a Review finding.
+- A first start on a fresh database no longer prints failures about the deploy settings table.
+- The completeness check of a manager's policy scope knows its paired network scope.
+- A Check Point network push to a standalone gateway refreshes the gateway object's interfaces and binds the project's zones to them.
+- A Check Point network push writes both address families and the declared admin state of every physical interface.
+- A FortiOS network push writes both address families of every interface it declares.
+- A `GATESHIFT_SECRET_KEY` that is no Fernet key stops the start with one sentence instead of storing credentials in clear text.
+- A target read the driver does not offer answers with one sentence instead of a Python error.
+- The Threat Prevention apply's catalogue reads report a refused key or an unreachable box like every other read.
+- The Check Point push stages in a session of its own and logs out after Publish or Discard.
+- A route's network is stored as the CIDR in one form, so two routes of one network with different lengths are two rows.
+- The Review names a physical interface the PAN-OS or FortiOS target does not have as a blocker, and a dotted PAN-OS name on a target port passes as the sub-interface it becomes.
+- A PAN-OS network push with no interface to push leaves the interface skeleton in place.
+- An addition that collides with another project's row says so.
+- A skipped VLAN or bond member and an excluded NAT rule reference nothing, so the parent, bond or interface they name can be skipped too.
+- The Review's interface type checks pass a skipped interface.
+- The Firepower (FDM) reader imports a port FDM leaves unnamed under VLAN sub-interfaces, and reads NAT on any-ipv4 and any-ipv6 as any4 and any6.
+- Another project's additions on a shared Device no longer read as deleted, as a leak or as a dangling reference in this project.
+- A Check Point cluster is registered through its first member's Gaia, and its IPv6 preflight no longer stops the member route push.
+- An import stores the connected routes of its interfaces right away.
+- The FortiOS import keeps a customer's own wildcard FQDN address.
+- The Review names forward-proxy decryption rules on a PAN-OS firewall without a forward-trust certificate as a blocker, the certificate read from the vsys or the shared settings.
+- The build's leak check reads only the Devices it renders.
+- The PAN-OS rollback point check reads an unreachable firewall as unknown.
+- A Check Point network push releases an address that moves from a port to a VLAN, a bond or a loopback.
+- The project dashboard's step "Target inventory fetched" no longer counts a catalogue read as the fetch.
+- `install.sh --renew-cert` restarts the web server, so the renewed certificate is served right away.
+- `install.sh` stops on an existing `.env` whose `GATESHIFT_SECRET_KEY` is no Fernet key and says how to replace it.
+
+**Updating from 0.9.5**
+
+- Dump your database before updating, and see the Updating section of docs/install.md for the standing guidance and the dump command.
+- The first start adds the tables of the API tokens, the audit and the rules' names and order, rewrites the stored routes to the one form and seeds the connected routes of every import, which takes a moment.
+- A target configuration built by 0.9.5 stays as it is until its next build.
+- A `GATESHIFT_SECRET_KEY` that is set but no Fernet key now stops the start: the key `install.sh` writes is valid, a hand-written `.env` may carry an invalid one.
+
 ## 0.9.5 (2026-11-16)
 
 **Added**

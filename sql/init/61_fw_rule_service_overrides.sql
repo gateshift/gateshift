@@ -17,7 +17,7 @@ USE gateshift;
 -- still identify the rule for consolidation; the override only changes what
 -- the deploy XML emits for that rule's <service> element.
 --
--- See feedback_rule_identity_hash memory: override tables key on rule_hash.
+-- Override tables key on rule_hash.
 
 CREATE TABLE IF NOT EXISTS fw_rule_service_overrides (
   project_id  INT                   NOT NULL DEFAULT 0,

@@ -9,7 +9,7 @@ wires its import/collect entry points into the registries of main and adds
 the platform to the lists the UI consults (labels, zone-native platforms,
 the source kinds the Overview counts); `init_app()` adds the add-form
 builder and the upload and collector routes. Part of the Community Edition
-since 0.9.4 (docs/CLOUD_SOURCES_PLAN.md, D1): an account, a subscription or
+since 0.9.4: an account, a subscription or
 a project is one source, not a manager.
 """
 from . import aws, azure, gcp

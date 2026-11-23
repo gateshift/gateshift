@@ -3,7 +3,7 @@
 --
 -- "Is this address private" as ONE function in the database, the way the
 -- two identity hashes are (47_fn_nat_hash.sql, 48_fn_rule_hash.sql). Phase 1
--- of docs/IPV6_PLAN.md: the test existed in three independent copies in the
+-- of the IPv6 design: the test existed in three independent copies in the
 -- webapp and the collector and inline in three jobs, with two different
 -- range lists (the internet_public detection knew loopback and link-local,
 -- the NAT evidence knew the CGNAT range). This is their union, the IPv4

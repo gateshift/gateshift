@@ -5,12 +5,12 @@
    family for brand, navigation, UI and data alike, one WOFF2 per subset
    with the whole variable wght axis (200 to 900). The declaration said
    400 500 until 2026-11-10, so every 600 and 700 in the app rendered as
-   the browser's synthetic bold (docs/UI_USABILITY_PLAN.md, D32 and D34);
+   the browser's synthetic bold;
    the files were the same all along, byte-identical with what Google
    serves for 400..700. The product uses 400 to 700. The unicode-range hints
    let the browser download only the subset(s) a page actually needs.
    Source: Google Fonts v5 (2026-08-09, mirrored locally for privacy +
-   offline-lab support).
+   offline use).
 
    Archivo and Space Grotesk remain vendored as the pre-reskin fallback
    stack; nothing references them primarily anymore.

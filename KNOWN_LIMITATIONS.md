@@ -96,7 +96,10 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   route with a declared drop. A Check Point target takes it as a Gaia
   static and declares it too: Gaia accepts the route and leaves it
   inactive until the gateway becomes reachable, for example once the VPN
-  tunnel of the same migration is up.
+  tunnel of the same migration is up. On a FortiGate target a route whose
+  interface the project does not push (a skipped one, for example) goes
+  over the interface its gateway sits on, or is left out when the gateway
+  sits on no pushed interface, each declared in the Review.
   *Workaround:* Network > Routing marks such a route with "no egress" and
   names the gateway. Bind an egress interface there and it renders on
   every target.
@@ -105,24 +108,22 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
 
 - **Captive Portal / identity redirect policies** are not migrated.
   User/group *references* on rules migrate (vendor-native). Portal
-  configuration (authentication rulebases, portal settings, auth profiles)
+  configuration (authentication rulesets, portal settings, auth profiles)
   does not: it depends on local identity infrastructure and is set up
   fresh on the target.
 - **Check Point certificate-based VPN (ICA-issued certs)** as target: PSK and
   third-party cert auth migrate. ICA enrollment does not.
   *Workaround:* complete cert enrollment in SmartConsole after the push.
 - **Cisco ASA is source-only** (config-file import, no push target).
-- **(!) OPNsense 26.7 truncates any HTTP/1.1 response at 64 KiB.** Measured
-  on a live box: the body stops at exactly 65528 bytes (65536 less 8) and
-  ends mid-document, for every request whose reply would exceed that. It is
-  the firewall and not the client: the same request over HTTP/2 returns
-  311408 bytes intact, and Python's HTTP client speaks 1.1. This is why an
-  OPNsense is added from an **exported configuration** rather than over the
-  API: the browser speaks HTTP/2 and gets an intact file, so the ceiling
-  cannot be reached on the normal path. Where the API is used anyway, a
-  device registered with credentials only, Gateshift parses what it
-  receives and **refuses the import** rather than migrating a policy with
-  holes in it.
+- **OPNsense 26.7 truncates any HTTP/1.1 response at 64 KiB.** A larger
+  reply stops mid-document, the same reply over HTTP/2 arrives intact.
+  Gateshift reads the API over HTTP/1.1 and the browser speaks HTTP/2,
+  which is why an OPNsense is added from an **exported configuration**
+  rather than over the API. Where the API is used anyway, a Device
+  registered with credentials only, Gateshift parses what it receives and
+  **refuses the import** of a damaged download rather than migrating a
+  policy with holes in it.
+  *Workaround:* upload the exported configuration.
 - **Cisco FTD is source-only.** A standalone FTD is imported live through
   its on-box FDM REST API (admin credentials). An FTD managed by a Secure
   Firewall Management Center is imported through the Management Center,
@@ -233,18 +234,21 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   device-local config layer (PA) or risk push conflicts with the manager
   (FortiGate). Gateshift detects this and warns (amber "managed" chip). Register
   the manager for the full picture.
-- **A Panorama scope renamed on the Panorama itself is a new device to
+- **A Panorama scope renamed on the Panorama itself is a new Device to
   Gateshift.** PAN-OS gives a device group, a template or a template stack
   no id of its own, so a Panorama scope is matched across imports by its
   name: after a rename made in the Panorama UI, the next import removes the
   old scope with its edits and creates a new one. FortiManager, Check Point
   and Strata Cloud Manager scopes carry the manager's id and keep their
-  device across a rename.
+  Device across a rename.
   *Workaround:* rename a Panorama scope from its manager page in Gateshift,
-  which renames it on the Panorama and keeps the device.
-- **FortiGate policy-held objects survive network wipes by design**: Gateshift
-  never auto-deletes user firewall policies. Push the policy strand first, then
-  the network strand (the push error hints say exactly this when it applies).
+  which renames it on the Panorama and keeps the Device.
+- **FortiGate policy-held objects survive a network push by design.** The
+  network push never deletes a firewall policy, so an interface or tunnel a
+  policy still references stays on the box. The policy strand replaces the
+  policies, as every push replaces the target within its scope. Push the
+  policy strand first, then the network strand (the push error hints say
+  exactly this when it applies).
 - **A FortiGate in profile-based mode takes no per-policy application or
   URL-category match.** FortiOS in its default profile-based mode matches
   applications and URL categories through profiles attached to the policy
@@ -256,13 +260,26 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   applications on its security policies: Gateshift reads the mode from the
   box, never switches it, and refuses a build made for the other mode (see
   docs/vendor-prerequisites.md, FortiGate).
+- **FortiGuard factory objects are recognized by name.** A FortiOS import
+  leaves out the address objects FortiOS ships (the `all` and `none`
+  sentinels and the FortiGuard objects such as `wildcard.google.com`) and
+  names them in the import log. FortiOS marks none of them read-only, so
+  the name decides: a customer object that carries a factory name is left
+  out as factory too.
+  *Workaround:* rename such an object on the source before the import.
+- **A wildcard FQDN does not reach a PAN-OS target.** An address object
+  with a wildcard FQDN (`*.example.com`, as FortiOS carries them) is
+  imported like any other object. PAN-OS FQDN objects take no wildcard, so
+  a PAN-OS target leaves the object out and declares it, a group loses it
+  as a member, and a rule side that names only that object is a blocker in
+  the Review (an unresolved reference, the side would match any).
 - **Cloud HA clusters with DHCP-addressed heartbeat/management ports**: a
   network push never modifies the HA-reserved interfaces, but the config sync
   it triggers can propagate the primary's addressing onto the secondary.
   Both members then hold the same heartbeat address and the cluster goes
-  split-brain (observed on an AWS FortiGate FGCP pair). Gateshift warns before such a
-  push. Give the members static per-member addresses on the heartbeat and
-  management ports, and check HA health after pushing.
+  split-brain. Gateshift warns before such a push. Give the members static
+  per-member addresses on the heartbeat and management ports, and check HA
+  health after pushing.
 - **Check Point object names are unique across all object types.** A pushed
   host, network, group or service whose name the management already holds
   for an object of another type (a security zone of the same name, a
@@ -271,7 +288,9 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   review shows the source name.
 - **Check Point cluster targets get no new interfaces.** A push onto a
   ClusterXL target stages interface VIPs onto the cluster's *existing*
-  interfaces by name match and pushes routes per member via Gaia. Source
+  interfaces by name match and pushes routes per member via Gaia. The VIPs
+  it stages are IPv4 only: an IPv6 address of a source interface gets no
+  cluster VIP, add it on the cluster object in SmartConsole. Source
   interfaces the cluster does not already have, including VLAN
   sub-interfaces, are skipped with a warning (the cluster infrastructure
   stays operator-managed. Standalone CP gateways do get VLAN sub-interfaces
@@ -298,7 +317,7 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
 - **Check Point cluster targets keep their existing VPN domain.** The
   Check Point Management API silently ignores VPN-domain changes on an
   existing cluster object (the set call reports success but changes
-  nothing: name and uid form alike, observed on R81.x / API 1.9), so a
+  nothing, by name and by uid alike, on R81.x with API 1.9), so a
   VPN push onto a ClusterXL target cannot switch the cluster's local
   encryption domain. Peer devices, encryption-domain groups and
   communities are created normally.
@@ -313,39 +332,38 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   never had. Predefined content is shown, not hard-filtered (you decide
   what migrates).
   *Workaround:* review the decryption rules on the target before
-  committing and soft-delete rules you do not want (Rules >
-  Decryption). Forward-proxy also needs a target-side trust certificate
-  anyway (see Palo Alto prerequisites), so a decryption review is expected.
+  committing and soft-delete rules you do not want (Policies >
+  Decryption). Forward-proxy also needs a forward-trust certificate on
+  the target (see Palo Alto prerequisites), and the Review blocks the
+  policy push while it is missing, so a decryption review is expected.
+- **Check Point's Internet object and "HTTPS default services" become any
+  on a PAN-OS target.** Neither has a PAN-OS equivalent. A security or
+  decryption rule that names Internet gets any on that side (the direction
+  stays with the rule's zones), and a decryption rule that names "HTTPS
+  default services" gets the service any. The Review declares each. The
+  predefined HTTPS-inspection rule (destination Internet, services "HTTPS
+  default services") therefore reaches a PAN-OS target with any for both
+  and decrypts more than the source did.
 - **A Check Point push replaces the rulebases and sets objects by name.**
   The access layer, NAT and the Gateshift rulebases of the pinned package are
   wiped and rewritten on every push. Hosts, networks, services and groups
   are created or updated by name, never removed: objects an earlier push
-  from another source created in the same domain stay on the management
-  (measured 2026-11-05: three sources pushed in turn into one virtual
-  system left the union of their objects). Remove them in SmartConsole
-  when a target changes its source.
-- **A Check Point push leaves the gateway object's topology as it was.** The
-  network strand writes interfaces and routes on the gateway through Gaia and
-  creates the zone objects on the management, but it does not rewrite the
-  interface list of the gateway object, the topology SmartConsole shows with
-  its zone bindings and anti-spoofing settings. After a push the object can
-  list interfaces the gateway no longer has and miss the ones the push created
-  (measured 2026-11-15 after a Gaia wipe of 30 VLAN interfaces: the object kept
-  26 of them).
-  *Workaround:* run "Get Interfaces" with topology on the gateway object in
+  from another source created in the same domain stay on the management.
+  Remove them in SmartConsole when a target changes its source.
+- **A Check Point cluster push leaves the cluster object's member interfaces as
+  they were.** On a standalone gateway the network push refreshes the gateway
+  object from the gateway after the Gaia writes (the management's Get
+  Interfaces with topology) and binds the project's zones to its interfaces,
+  which needs SIC and the right to edit the gateway object (see
+  docs/vendor-prerequisites.md, Check Point).
+  On a cluster the push stages the cluster interface VIPs and leaves the member
+  interfaces, topology and zone bindings to the operator.
+  *Workaround:* run "Get Interfaces" with topology on the cluster object in
   SmartConsole after the network push, then install the policy.
 - **Check Point Threat Prevention** pushes as a separate rulebase with CP's own
   semantics (single scope, no service column). Blade-dependent track levels are
   downgraded automatically where a target layer lacks the blade.
 
-## Cross-vendor NAT
-
-- **Cisco FTD NAT rules carry interface references, not zones** (an FDM
-  modeling quirk). On a PAN-OS target those references do not resolve into
-  NAT zones yet, and the NAT push step fails, which stops the policy strand
-  before the firewall rules.
-  *Workaround:* deselect the **NAT Rules** section in the push dialog and
-  build the NAT policy on the target. The firewall rules then push cleanly.
 ## Ruleset installation
 
 - **Check Point refuses to install conflicting rules ("Rule X conflicts
@@ -371,25 +389,31 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
   disabling, with a per-interface deny-all disabled, traffic can reach
   the following block's rules on the flat rulebase.
 
-## Rules referencing skipped resources
+## Target interfaces
 
-- **Interface names are pushed as-is.** A source interface name that is
-  invalid on the target platform (for example `eth0` pushed to PAN-OS)
-  fails the interface push step. Rename source interfaces to target-valid
-  names during curation ("Fetch Target Interfaces" offers the target's
-  names), or skip interfaces that should not migrate: the reference
-  guard walks you through what still depends on them.
+- **A physical interface the target does not have blocks the network
+  push.** No push creates a physical port. A source interface whose name
+  the target lacks (for example `eth0` pushed to PAN-OS) is a blocker in
+  the Review: on PAN-OS and FortiOS once the target's interfaces were
+  fetched ("Fetch Target Interfaces"), on Check Point when the gateway's
+  Gaia API answers. Without that read there is no finding and the push is
+  the gate. Rename source interfaces to the target's names during
+  curation, make one a VLAN on a port, or skip interfaces that should not
+  migrate: the reference guard walks you through what still depends on
+  them.
 
 ## Source modeling gaps
 
-- **FTD VLAN subinterfaces reference their parent by FDM hardware name**
-  (for example `TenGigabitEthernet0/3`), and unnamed parent ports are not
-  imported as interface rows, so the parent cannot be renamed, and the
-  literal hardware name fails on FortiGate (name length) and Check Point
-  (invalid interface) targets.
+- **A Management Center VLAN subinterface on an unnamed port references
+  its parent by hardware name** (for example `TenGigabitEthernet0/3`). The
+  Management Center import leaves an unnamed port out (declared in the
+  import log), so the parent is no interface row and cannot be renamed. A
+  Check Point target blocks the subinterface in the Review (its parent is
+  not in the source's interfaces), on a FortiGate target the literal
+  hardware name fails (name length). An FDM import brings such a port in
+  under its hardware name, ready to be mapped.
   *Workaround:* set the subinterface's type to `physical` in
-  Network > Interfaces: it then deploys as a plain L3 interface (verified
-  end-to-end).
+  Network > Interfaces: it then deploys as a plain L3 interface.
 - **IKE crypto proposals migrate literally.** Verify DH-group
   compatibility per IKE version on the target: PAN-OS, for example,
   rejects DH group21 on an IKEv1 gateway. Adjust the profile on the
@@ -397,8 +421,8 @@ fail silently: where a limit applies, Gateshift blocks or warns explicitly.
 
 ## Hit counts from the box
 
-The box's own rule counters are read beside the rules and shown as Box hits
-and Last hit in the ruleset. They are a decision aid: the
+The box's own rule counters are read beside the rules and shown as Device
+hits and Last hit in the ruleset. They are a decision aid: the
 push never sees them, the Quality Filter keeps judging from logs, and
 nothing is excluded by a counter.
 
@@ -407,7 +431,7 @@ nothing is excluded by a counter.
   and on Check Point (the management API refuses hits on the NAT
   rulebase), a Management Center policy assigned to no device or to
   several (counters are per device and are never summed), an OPNsense
-  device with an uploaded configuration and no API key or whose upload is
+  Device with an uploaded configuration and no API key or whose upload is
   not the box's current configuration (pf keys its counters by the box's
   rule ids), a Check Point row
   without a pinned gateway, and the scopes of a central manager (Panorama,
@@ -430,26 +454,22 @@ nothing is excluded by a counter.
   "not read"): vendor default rules PAN-OS does not count, the
   Management Center's default action, rules synthesised by the import, and
   disabled policies on FortiOS (the box keeps no counter for them).
-- **The Management Center and the Device Manager readers are built from
-  the vendors' references** and not verified against a box in this
-  release. PAN-OS, FortiOS, Check Point and OPNsense were measured in the
-  lab.
 
 ## Projects and tenants
 
-- **A device's tenant is fixed at registration.** There is no move:
-  delete the device and register it in the other tenant. Its projects
-  (which must be deleted first) and imported data stay with the tenant
-  they were made in. A device created from the log stream joins the
-  tenant of the page it was created from. The log senders themselves
-  belong to no tenant.
-- **Repairs of the imported data are the device's, not the project's.**
+- **A Device moves to another tenant only while no project binds it.**
+  With a second tenant its edit dialog offers the move. A Device in a
+  project stays in its tenant, so its projects stay too, and a manager's
+  scopes move with the manager, never alone. A Device created from the
+  log stream joins the tenant of the page it was created from. The log
+  senders themselves belong to no tenant.
+- **Repairs of the imported data are the Device's, not the project's.**
   Resolving two objects that arrived under the same name, and sanitizing a
   group whose members do not exist, fix the import itself: every project of
   that source sees the result. Everything a project does is its own:
   firewall rules, objects, services, groups, schedules, NAT rules, tags and
   the network side (interfaces, zones, routes, virtual routers): deleting
-  one hides it in that project while the device keeps it, editing an
+  one hides it in that project while the Device keeps it, editing an
   interface's or route's fields applies in that project only, a row added
   in a project exists only there, and the project's Dashboard lists what it
   deleted and restores it. Renames work the same way (the source name stays
@@ -457,75 +477,30 @@ nothing is excluded by a counter.
   and push different names, and a re-import keeps all of it.
 - **Snapshots carry what the project holds.** A restore replaces the
   project's names, its per-rule edits, its deletions, its network field
-  edits and the rows it added. What belongs to the device is not part of a
+  edits and the rows it added. What belongs to the Device is not part of a
   snapshot and is not brought back by a restore: the repairs above, and the
   deletions an optimization project applies to the box itself (which have
   their own backup step). A snapshot saved before 0.9.3 carries no names: a
   restore of it keeps the project's current names and says so.
-- **A project follows its source's tenant.** Moving a source to another
-  tenant takes its projects along. A project whose target stays behind has
-  no target on offer until the target is moved too.
 
 ## Log sources
 
-- **Log-source devices (OPNsense) push the policy strand out of the box.
+- **Log-source Devices (OPNsense) push the policy strand out of the box.
   The network strand needs curated addressing.** Traffic logs carry no
   interface addressing, so the network push starts gated (`no_ip`). Add
   interface addresses (and zones) during curation and the network strand
   pushes like any other source. Without them, push the generated policy
   onto a target whose network layout already exists (brownfield), with
   zones pre-provisioned to match the rule zones.
-- **A zone the traffic logs recorded is the device's, not the project's.**
-  For a log source Gateshift fills a rule's zones from the device's own
+- **A zone the traffic logs recorded is the Device's, not the project's.**
+  For a log source Gateshift fills a rule's zones from the Device's own
   addressing while it builds the ruleset. Re-addressing an interface, or
   adding a route, inside a project changes what that project derives for the
   zones still open and what it pushes, not the zones already recorded from
   the logs.
   *Workaround:* curate the addressing before generating, or clear a rule's
   zone (Network > Zones) to have the project derive it again.
-
-## Verification status
-
-What the project could not run against a live system is said here, so a
-failure there is a bug report, not a surprise:
-
-- **Strata Cloud Manager and FortiManager Cloud** were built against the
-  vendors' API documentation (the OpenAPI specifications Palo Alto Networks
-  publishes, Fortinet's FortiManager Cloud API user documentation). No
-  tenant of either was available to the project, so their first live runs
-  are those of their users, in the Enterprise Edition and in the discovery
-  of the Community Edition. The import log and the discovery panel name
-  every call that answers differently from the documentation.
-- **The Cisco Secure Firewall Management Center import** ran against a
-  Management Center 7.6.6 with one managed Threat Defense 7.6.6: the
-  seeded estate (162 access rules, a prefilter policy, a NAT policy, VLAN
-  children, two virtual routers) imported, built for PAN-OS, FortiOS and
-  Check Point, and pushed to all three, and a child domain with a policy
-  inheriting from Global imported with its chain. High-availability pairs
-  and clusters were built against the documentation and the project's
-  fixture only. The cloud-delivered
-  transport (Security Cloud Control) is documentation-built as well. The
-  import log names every call that answers differently from the
-  documentation.
-- **Virtual instances** ran live for FortiGate VDOMs (a multi-VDOM FortiGate
-  7.6 with an admin VDOM and a traffic VDOM: import per VDOM, the estate
-  pushed from the VDOM to PAN-OS and Check Point and from Check Point into
-  the VDOM with the management VDOM untouched). Check Point VSX ran against
-  a VSX cluster (VSLS, R81.20) on a Multi-Domain management with its virtual
-  systems in other domains: registration through the wizard, the virtual
-  systems imported as scopes with their package, interfaces, zones and
-  connected routes. A virtual system as a target ran on the same lab: the
-  estate of one virtual system pushed into the package of another (policy
-  strand staged in its domain, published, the network push refused with
-  the reason, the install done as the operator's step after the five rules
-  the conflict check named were disabled in the project), then the PAN-OS
-  canonical estate and a Check Point estate into the same virtual system.
-  PAN-OS vsys was built against the vendor's API
-  reference and the project's fixture only: no multi-vsys firewall was
-  available, so its first live run is that of its users.
-- **FortiOS and Check Point traffic logs** parse on recorded lines in the
-  vendors' syslog formats. The end-to-end round from a live log stream to
-  a generated ruleset ran with OPNsense, so the add dialog offers only
-  OPNsense as a log-stream source in this version. The receiver still
-  records FortiGate and Check Point senders and the Log Senders page (its
-  button sits on the Devices page) shows them.
+- **OPNsense is the only log-stream source in this version.** The add
+  dialog offers no other vendor's traffic logs. The receiver still records
+  FortiGate and Check Point senders, and the Log Senders page at
+  /devices/senders shows them.

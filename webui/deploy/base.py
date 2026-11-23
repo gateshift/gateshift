@@ -28,10 +28,9 @@ from typing import Any, Iterator
 # The drivers' HTTP helpers retry connection-level failures with a long
 # push-grade backoff (up to minutes total) - right for a push, wrong for an
 # interactive request: a probe/validation/catalog read against a dead box
-# stalled the whole app for the length of the backoff chain (fgt-lab find,
-# 2026-09-22). Interactive entry points wrap driver calls in
-# `fail_fast_transport()`; the helpers consult `transport_fail_fast()` and
-# skip the long backoff for that thread.
+# stalled the whole app for the length of the backoff chain. Interactive
+# entry points wrap driver calls in `fail_fast_transport()`. The helpers
+# consult `transport_fail_fast()` and skip the long backoff for that thread.
 
 _TRANSPORT_CTX = threading.local()
 
@@ -194,7 +193,7 @@ class DroppedField:
                              # outcome - the operator skipped it, the target
                              # derives or already has it, or it is folded into
                              # something else. The Review counts these as an
-                             # explanation, not as a loss (matrix 0.9.4).
+                             # explanation, not as a loss.
     synthesized: bool = False  # the OPPOSITE of a drop: the generate CREATED an
                                # entity the source does not carry as one - a
                                # literal turned into an object, one tcp+udp
@@ -266,7 +265,7 @@ def unresolved_reference(rule_id: str, field: str, lost: list, kept: list, *,
         issue=UNRESOLVED_REFERENCE if blocking else "")
 
 
-# ── IPv6, phase 1 of docs/IPV6_PLAN.md (D6, D7) ──────────────────────
+# ── IPv6, phase 1 of the IPv6 design (D6, D7) ──────────────────────
 # A target that does not carry the family yet declares every IPv6 value it
 # leaves out, on the object AND on the rule that loses it. The rule-level
 # declaration is action-aware: an allow rule that loses IPv6 reach is
@@ -307,7 +306,7 @@ def ipv6_object_drop(name: str, value, note: str) -> "DroppedField":
     family. The renderer remembers the name so the rules that lose the
     member are declared too (ipv6_loss)."""
     return DroppedField(rule_id=name, field="address",
-                        reason=f"IPv6 address object '{value}': {note} (docs/IPV6_PLAN.md)",
+                        reason=f"IPv6 address object '{value}': {note}",
                         fallback="not pushed")
 
 
@@ -343,7 +342,7 @@ def ipv6_loss(rule_id: str, field: str, lost: list, kept: list, *, action,
                         issue=IPV6_DENY_LOSS if deny else "", rhash=rhash)
 
 
-# application-default on a target without App-ID (docs/APPDEF_WIDENING_PLAN.md).
+# application-default on a target without App-ID.
 # The deploy loader resolves the rule's App-IDs to their default ports
 # (deploy.app_defaults). An App-ID the table does not know has no port; when
 # other App-IDs of the rule resolved, the rule goes out narrower, a warning.
@@ -390,7 +389,7 @@ def appdef_result(rule_id: str, action, *, unresolved: list, kept: list,
         issue="" if deny else APPDEF_WIDENED, rhash=rhash)
 
 
-# ── Address values across families (docs/IPV6_PLAN.md, D1, phase 2) ──
+# ── Address values across families ──
 # An address object's value document carries `value` (the representative:
 # the IPv4 half where the object has one, the IPv6 value of a v6-only
 # object) and, for a dual-stack object, `value6`, the IPv6 half. The
@@ -463,7 +462,7 @@ def is_dual_stack(val) -> bool:
 
 def nat_rule_ipv6(n: dict, ipv6_names: set | None) -> str | None:
     """The first IPv6 value or IPv6-carrying object a NAT rule names on any
-    of its address fields, or None (docs/IPV6_PLAN.md, section 8: NAT66,
+    of its address fields, or None (the IPv6 design, section 8: NAT66,
     NPTv6 and NAT64 are not built on spec, so such a rule is declared and
     not pushed by the targets that cannot carry it)."""
     vals: list[str] = []
@@ -484,8 +483,7 @@ def nat_rule_ipv6(n: dict, ipv6_names: set | None) -> str | None:
     return None
 
 
-# The D5 catch-all tokens and the prefix each stands for (docs/IPV6_PLAN.md,
-# phase 4): a source of one family per rule (FortiOS, OPNsense, Cisco ASA's
+# The D5 catch-all tokens and the prefix each stands for: a source of one family per rule (FortiOS, OPNsense, Cisco ASA's
 # any4/any6, FDM's any-ipv4/any-ipv6) emits them, a target that has no
 # catch-all of one family creates the object.
 CATCH_ALL_VALUES = {"any4": "0.0.0.0/0", "any6": "::/0"}
@@ -530,7 +528,7 @@ def catch_all_objects(tokens, address_objects, address_groups) -> tuple[list[dic
 def selector_family(sel: dict) -> int | None:
     """4 or 6 for a traffic selector whose local and remote prefix are of
     one family (an absent side takes the other's), None for a mixed pair,
-    which no vendor can express (docs/IPV6_PLAN.md, phase 5)."""
+    which no vendor can express."""
     fams = set()
     for key in ("local", "remote"):
         v = str((sel or {}).get(key) or "").strip()
@@ -608,7 +606,7 @@ def split_dual_stack_objects(objects: list, safe_name, dropped: list | None = No
     return out_objs, out_grps
 
 
-# ── Management addresses (docs/IPV6_PLAN.md, D3 option A+) ───────────
+# ── Management addresses ───────────
 class ManagementAddressError(RuntimeError):
     """A management address this version does not reach."""
 
@@ -634,8 +632,7 @@ def management_host(host, vendor: str = "") -> str:
 
 class DropTagger:
     """Wraps a renderer's `dropped` list so every DroppedField appended while
-    `current` names a rule hash carries that hash (docs/REVIEW_TAB_DESIGN.md,
-    R2: the change log keys on it). One assignment per rule iteration instead
+    `current` names a rule hash carries that hash. One assignment per rule iteration instead
     of one keyword per drop site; everything else delegates to the list, and
     the driver's final `[d.to_dict() for d in dropped]` iterates through."""
     def __init__(self, target: list):
@@ -729,7 +726,7 @@ def error_hint(hint_fns, ctx: dict) -> str:
     return ""
 
 
-# ── Rollback of a broken-off push (docs/PUSH_ROLLBACK_PLAN.md) ───────────────
+# ── Rollback of a broken-off push ───────────────
 # A push that dies after it started writing must not leave the target in a
 # state that poisons the next attempt, and must not destroy what an EARLIER
 # push legitimately put there. Every vendor answers that differently, because
@@ -771,6 +768,34 @@ def step_modifies(step: str) -> bool:
 def rollback_phrase(kind: str) -> str:
     """The operator-facing guarantee for a rollback of this kind."""
     return _ROLLBACK_PHRASE.get(kind, _ROLLBACK_PHRASE["none"])
+
+
+# What a target read says when the driver has no such read (backlog 37): one
+# sentence for the operator instead of the class name or a Python AttributeError.
+# The routes answer it as 400 with "supported": False, the pickers hide the slot.
+_READ_LABELS = {
+    "applications": "application catalogue",
+    "security_profiles": "security-profile catalogue",
+    "log_forwarding": "log-forwarding catalogue",
+    "threat_layers": "threat-layer catalogue",
+    "threat_profiles": "threat-profile catalogue",
+    "utm_profiles": "UTM-profile catalogue",
+    "url_categories": "URL-category catalogue",
+    "zone_protection_profiles": "zone-protection-profile catalogue",
+    "address_objects": "address-object catalogue",
+    "service_objects": "service-object catalogue",
+    "interfaces": "interface inventory",
+    "zones": "zone inventory",
+    "routes": "route inventory",
+    "vrfs": "virtual-router inventory",
+}
+
+
+def no_target_read(kind: str) -> NotImplementedError:
+    """The exception a driver raises, or the dispatcher raises on its behalf,
+    when the target has no read of this kind."""
+    label = _READ_LABELS.get(kind, kind.replace("_", " "))
+    return NotImplementedError(f"The target has no {label}.")
 
 
 class DeployDriver(ABC):
@@ -834,8 +859,7 @@ class DeployDriver(ABC):
         readers share the answer, none stores it: the build drops the
         strand's sections and declares the strand in the artefact, the
         deploy tab offers no push of it, the push route refuses it with
-        HTTP 409, and ``push()`` refuses it before any login
-        (docs/VSX_TARGET_PLAN.md, D2). Default: every strand is pushed.
+        HTTP 409, and ``push()`` refuses it before any login. Default: every strand is pushed.
         """
         return None
 
@@ -895,7 +919,7 @@ class DeployDriver(ABC):
                 (zones / interfaces / routes). Each strand pushes only its
                 own slice of ``config``; cross-strand sections are ignored.
                 Two independently triggerable push buttons in the UI map to
-                the two strands - see project_network_strand.md.
+                the two strands.
 
         Yields StepResult for each phase (enables live streaming).
         Stops on first failure.
@@ -947,8 +971,7 @@ class DeployDriver(ABC):
           - ``description`` (str | None)
         Drivers may include extra vendor-specific keys; the UI ignores them.
 
-        Snapshot for Discover-as-Verarbeitung-input (see
-        project_network_strand.md "Target-read"). Stored in
+        Snapshot for Discover as processing-stage input. Stored in
         ``fw_target_discover``; the user explicitly saves selected rows into
         the source's ``fw_interfaces`` via the ``/network/discover/.../save``
         route. Never silent auto-merge into push.
@@ -956,9 +979,7 @@ class DeployDriver(ABC):
         Default: NotImplementedError. UI hides the panel for drivers that
         don't implement it.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support target-interface discovery"
-        )
+        raise no_target_read("interfaces")
 
     def list_target_zones(self, *, device: dict) -> list[dict]:
         """Read the target's current zone configuration.
@@ -969,9 +990,7 @@ class DeployDriver(ABC):
           - ``zone_type`` (str | None, e.g. "layer3")
         See ``list_target_interfaces`` for semantics.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support target-zone discovery"
-        )
+        raise no_target_read("zones")
 
     def list_target_routes(self, *, device: dict) -> list[dict]:
         """Read the target's current routing table.
@@ -984,23 +1003,19 @@ class DeployDriver(ABC):
           - ``is_connected`` (bool)
         See ``list_target_interfaces`` for semantics.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support target-route discovery"
-        )
+        raise no_target_read("routes")
 
     def list_url_categories(self, *, device: dict) -> list[str]:
         """Read the target's predefined URL / application-site CATEGORY catalog
         - the category names a cross-vendor decryption rule can reference
         (site-category). Returns a sorted list of name strings.
 
-        Snapshot for the URL-category mapping (project_cp_url_category_map_plan):
+        Snapshot for the URL-category mapping:
         the operator attaches a source category to one of these; the resolver
         name-matches against them. Default: NotImplementedError (target has no
         URL-category catalog, e.g. FortiGate does TLS inspection via profiles).
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not expose a URL-category catalog"
-        )
+        raise no_target_read("url_categories")
 
     def list_target_vrfs(self, *, device: dict) -> list[dict]:
         """Read the target's VRF / virtual-router / VDOM list.
@@ -1011,9 +1026,7 @@ class DeployDriver(ABC):
           - ``properties`` (dict | None) - vendor-opaque (e.g. ``ecmp``)
         See ``list_target_interfaces`` for semantics.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support target-VRF discovery"
-        )
+        raise no_target_read("vrfs")
 
     def warn_discover(self, message: str) -> None:
         """A discover read that succeeded with a part missing says so (product finding 10,
@@ -1076,17 +1089,14 @@ class DeployDriver(ABC):
         iterates whatever the driver returns; it doesn't enumerate categories
         itself.
 
-        Out-of-scope catalog read (see project_design_decisions.md
-        "Target-read scoping"): customer manages these objects, Gateshift only
-        observes/references them.
+        Out-of-scope catalog read: the customer manages these objects,
+        Gateshift only observes and references them.
 
         Default: NotImplementedError. Drivers without remote catalog reads
         leave this unimplemented; the Enrichment vendor sub-tab shows an
         "unsupported" hint.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support security-profile listing"
-        )
+        raise no_target_read("security_profiles")
 
     def list_applications(self, *, device: dict) -> dict[str, list[dict]]:
         """Read the target's user-curated application catalog.
@@ -1099,9 +1109,7 @@ class DeployDriver(ABC):
         intentionally NOT enumerated - only customer-curated objects are
         surfaced, mirroring the rule-attachment dropdown semantics.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support application listing"
-        )
+        raise no_target_read("applications")
 
     def list_threat_layers(self, *, device: dict) -> list[dict]:
         """Read the target's Threat-Prevention layer catalog.
@@ -1116,9 +1124,7 @@ class DeployDriver(ABC):
         Default: NotImplementedError. UI hides the TP-layer dropdown for
         drivers that don't implement it.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support threat-layer listing"
-        )
+        raise no_target_read("threat_layers")
 
     def list_threat_profiles(self, *, device: dict) -> list[dict]:
         """Read the target's Threat-Prevention profile catalog.
@@ -1131,9 +1137,7 @@ class DeployDriver(ABC):
 
         Default: NotImplementedError. See ``list_threat_layers``.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support threat-profile listing"
-        )
+        raise no_target_read("threat_profiles")
 
     def generate_tp_rules(
         self,
@@ -1158,8 +1162,7 @@ class DeployDriver(ABC):
           - Sane V1 default scope: ``source=destination=service=Any``,
             ``protected-scope`` = mapping target (e.g. dst-cidrs).
 
-        Returns a list of dicts with the TP-rule shape (see
-        project_cp_tp_rulebase_api.md for the response shape).
+        Returns a list of dicts with the TP-rule shape.
 
         Default: NotImplementedError. Drivers without a TP rulebase concept
         leave this unimplemented.
@@ -1331,8 +1334,7 @@ def post_nat_destination_hits(rules: list[dict], nat_rules: list[dict],
     A FortiGate in central NAT mode translates through its VIPs before the
     policy lookup, so its rules for a published server name the server's
     mapped (internal) address; the importer synthesises one dest-NAT rule
-    per VIP and marks it ``central_nat`` with the VIP's name
-    (docs/FGT_POLICY_MODE_PLAN.md, D11 and D12). Returns, per rule name, the
+    per VIP and marks it ``central_nat`` with the VIP's name. Returns, per rule name, the
     destinations that are such a mapped address with the VIP and its
     external address, and nothing for a source that matched before
     translation (no marked rule)."""

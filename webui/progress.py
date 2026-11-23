@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
-"""The step model of a project (docs/UI_USABILITY_PLAN.md, D1 and section
-12): the operator's path from the two Devices to the verified push, each
+"""The step model of a project: the operator's path from the two Devices to the verified push, each
 step judged from what the product holds. The fixed steps carry evidence (an
 import, a fetch, the mapping gaps, a build, the stamps). The sections of the
 project (routes, policy routing, VPN tunnels, the rulesets, objects, and since
@@ -253,6 +252,12 @@ KINDS = {'excluded_leak': ['Deleted items still generated',
                                 'interfaces',
                                 "Name the interfaces like the cluster's under Network > Interfaces (Fetch "
                                 'Target Interfaces lists them).'],
+ 'target_iface_unmatched': ['Physical interfaces the target does not have',
+                            'network',
+                            'interfaces',
+                            'The push creates no physical port. Rename each to one of the target\'s ports '
+                            'under Network > Interfaces (Fetch Target Interfaces lists them), make it a '
+                            'VLAN on a port, or mark it skip.'],
  'cp_iface_unmatched': ['Physical interfaces the gateway does not have',
                         'network',
                         'interfaces',
@@ -299,6 +304,17 @@ KINDS = {'excluded_leak': ['Deleted items still generated',
                     'resolve them, so the migrated rule would allow every service. If every service is '
                     "acceptable, set the rule's service mode to any under Policies > Security, which records "
                     'your decision. Otherwise exclude or disable the rule. Then build again.'],
+ 'vpn_psk_rule': ['Pre-shared keys the target refuses',
+                  'network',
+                  'vpn',
+                  'A stored key does not meet the rule of this target (the finding names the rule). Set '
+                  'the key again under Network > VPN, then push. The network push refuses until then.'],
+ 'pa_forward_trust_missing': ['Decryption rules without a forward-trust certificate on the target',
+                              'ruleset',
+                              'decryption',
+                              'The firewall has no forward-trust certificate, so the commit would fail. '
+                              'Provision it on the firewall (Device > Certificate Management > SSL '
+                              'Decryption) and build again, or exclude the decryption rules.'],
  'unresolved_reference': ['Rules referencing objects the build does not create',
                           'objects',
                           None,
@@ -354,7 +370,7 @@ def mapping_gaps(rows, target_platform, target_ifaces, name_of=None) -> dict:
     member_names: set[str] = set()
     for r in rows or ():
         member_names.update(_members(r.get("member_iface_names")))
-    total = unzoned = unmatched = 0
+    total = unzoned = 0
     for r in rows or ():
         if r.get("deploy_skip"):
             continue
@@ -366,11 +382,42 @@ def mapping_gaps(rows, target_platform, target_ifaces, name_of=None) -> dict:
         if (tp in ZONE_TARGETS and enabled and itype not in ZONE_WAIVED_TYPES
                 and name not in member_names and not str(r.get("zone_name") or "").strip()):
             unzoned += 1
-        if checked and itype == "physical":
-            pname = str(name_of(r) if name_of else name) or name
-            if pname not in names:
-                unmatched += 1
+    unmatched = len(unmatched_physical(rows, names, name_of, target_platform=tp)) if checked else 0
     return {"total": total, "unzoned": unzoned, "unmatched": unmatched, "checked_names": checked}
+
+
+# Targets whose renderer derives a sub-interface from a dotted name: PAN-OS
+# renders ethernet1/2.100 as unit 100 of ethernet1/2 whatever the row's type
+# (deploy/panw.py, the ethernet/ae units). FortiOS derives nothing from a name.
+DOTTED_SUB_TARGETS = frozenset({"panw"})
+
+
+def unmatched_physical(rows, target_ifaces, name_of=None, target_platform=None) -> list[str]:
+    """The project names of the physical interfaces (skipped rows left out)
+    the target does not have, sorted, each once. One rule for the step
+    model's mapping gap and the Review's target_iface_unmatched finding.
+    Empty when the target inventory is not fetched: the fetch is the
+    operator's, nothing is guessed. `name_of` maps a row to its project
+    name (the name map). On a target in DOTTED_SUB_TARGETS a dotted name
+    whose parent the target has is the sub-interface the push derives
+    (for example ethernet1/2.100)."""
+    names = set(target_ifaces or ())
+    if not names:
+        return []
+    dotted = (target_platform or "").lower() in DOTTED_SUB_TARGETS
+    out: list[str] = []
+    for r in rows or ():
+        if r.get("deploy_skip"):
+            continue
+        if (r.get("iface_type") or "").lower() != "physical":
+            continue
+        name = str(r.get("interface_name") or "")
+        pname = str(name_of(r) if name_of else name) or name
+        if dotted and "." in pname and pname.split(".")[0] in names:
+            continue
+        if pname and pname not in names and pname not in out:
+            out.append(pname)
+    return sorted(out)
 
 
 def _plural(n: int, one: str, many: str) -> str:

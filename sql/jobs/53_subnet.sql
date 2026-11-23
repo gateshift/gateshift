@@ -75,7 +75,7 @@ WHERE generated_at = @run_ts
   AND NOT EXISTS (SELECT 1 FROM fw_rules_accumulated WHERE generated_at = @run_ts LIMIT 1)
 GROUP BY vendor, device_id, action, direction, proto, dst_port,
   CASE WHEN source_type = 'api_import' THEN rule_name ELSE NULL END,
-  -- Negate-split per project_rule_negation_plan conflict-policy
+  -- Negate-split: rules with disagreeing negate flags stay separate
   negate_source, negate_destination, negate_service;
 
 -- ============================================================

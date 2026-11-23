@@ -73,7 +73,7 @@ def _safe_pa_name(name: str) -> str:
         # start with a dash gets the 'ip6' prefix. The generic path stripped
         # the leading characters to nothing: '::/0' became the object '0',
         # '::/32' became '32', '::' the fallback 'obj', all accepted by PAN-OS
-        # and declared by nothing (docs/IPV6_PLAN.md, defect 7).
+        # and declared by nothing.
         s = raw.replace(":", "-").replace("/", "_")
         s = _PA_NAME_SAFE_RE.sub("-", s)
         if not s or not s[0].isalnum():
@@ -302,8 +302,7 @@ def _pa_spec_render(root_tag, objs, name_of, builders, ctx=None, entry_skip=None
         # Two distinct source objects can sanitize to the SAME PA name - PAN-OS
         # rejects a duplicate <entry name> with "'…' is already in use", failing
         # the whole push. Emit the first, skip the rest so the set stays valid,
-        # and SAY so: the skipped object's rules bind to the first one's value
-        # (docs/IPV6_PLAN.md, defect 7: the skip used to be silent).
+        # and SAY so: the skipped object's rules bind to the first one's value.
         if nm in seen:
             dropped = (ctx or {}).get("dropped")
             if dropped is not None:
@@ -390,8 +389,8 @@ def _paf_addr_group_body(grp, ctx):
 
 
 def _addr_is_wildcard_fqdn(obj) -> bool:
-    """True for a wildcard FQDN address (e.g. FortiGate's factory
-    '*.google.com' internet-service objects). PAN-OS FQDN objects reject a
+    """True for a wildcard FQDN address (a customer's '*.example.com', or a
+    FortiGate factory object the import did not filter). PAN-OS FQDN objects reject a
     '*', so this push cannot create such an object - it is skipped, and any
     group member / rule reference to it must be pruned to match. Pure (no
     side effects) so both the skip and the reference-pruning agree."""
@@ -1140,8 +1139,7 @@ _NET   = f"{_DEV}/network"
 
 
 def _vsys_of(device: dict) -> str:
-    """The vsys a Device row addresses (`config.panw.vsys`, docs/VIRTUAL_INSTANCES_PLAN.md
-    F-3): `vsys1` for a firewall row, the instance's vsys for an instance row, `shared` for
+    """The vsys a Device row addresses (`config.panw.vsys`): `vsys1` for a firewall row, the instance's vsys for an instance row, `shared` for
     the root scope. Only a value other than vsys1 changes an XPath."""
     try:
         cfg = device.get("config")
@@ -1255,7 +1253,7 @@ class PanwDriver(DeployDriver):
         "profile-group":     (),
     }
 
-    # ── Discover (Verarbeitung-stage input - see project_network_strand.md) ──
+    # ── Discover (processing-stage input) ──
 
     def _api_get(self, device: dict, xpath: str) -> ET.Element:
         """PAN-OS API: get config at xpath. Returns the <result> Element.
@@ -1783,8 +1781,8 @@ class PanwDriver(DeployDriver):
         never the nested ones. A profile carries entries of its own (the
         rules of a spyware or vulnerability profile, threat exceptions, DNS
         lists), a custom application its signatures, and a recursive
-        .//entry listed those as catalog items (0.9.4 matrix, 2026-10-18:
-        13 anti-spyware entries offered for 7 profiles on the box)."""
+        .//entry listed those as catalog items (13 anti-spyware entries
+        offered for 7 profiles on the box)."""
         result = root if root.tag == "result" else root.find("result")
         if result is None:
             return []
@@ -2152,7 +2150,7 @@ class PanwDriver(DeployDriver):
         # could synthesise a rule from (properties.vip_ref names the one it
         # did), so its translation does not travel - only the external address
         # above does. Said out loud: on a FortiGate source these were invisible
-        # in both directions, present on the box and absent here (matrix 0.9.4).
+        # in both directions, present on the box and absent here.
         _wired_vips = {str(((_n.get("properties") or {}).get("vip_ref") or "")).strip()
                        for _n in (nat_rules or [])}
         _unwired_vips = [str(_v.get("name") or "").strip() for _v in (nat_vips or [])
@@ -2188,7 +2186,7 @@ class PanwDriver(DeployDriver):
                          "translation is not"))
         # The addresses materialised above for VIPs and SNAT pools are objects
         # the source does not have as such - the Review's surplus check needs
-        # to hear that (a FortiGate source: 9 VIP addresses on every PA leg).
+        # to hear that (a FortiGate source: the addresses of its VIPs).
         for _o in _vip_objs:
             dropped.append(DroppedField(
                 rule_id=_o["name"], field="address", synthesized=True,
@@ -2231,13 +2229,12 @@ class PanwDriver(DeployDriver):
             service_objects, service_groups, dropped)
 
         # A dual-stack object becomes two objects under a group that keeps
-        # its name (docs/IPV6_PLAN.md, phase 2, D1): PAN-OS holds one value
+        # its name: PAN-OS holds one value
         # per address object and both families in a group and in a rule.
         address_objects, _ds_groups = split_dual_stack_objects(address_objects, _safe_pa_name, dropped)
         if _ds_groups:
             address_groups = list(address_groups or []) + _ds_groups
-        # A rule side of one family ('any4', 'any6', D5 of docs/IPV6_PLAN.md,
-        # phase 4): PAN-OS has no catch-all of one family, the object is
+        # A rule side of one family ('any4', 'any6'): PAN-OS has no catch-all of one family, the object is
         # created here and declared as synthesized
         _tok_objs, _tok_names = catch_all_objects(
             used_catch_all_tokens(rules, nat_rules, ssl_rules), address_objects, address_groups)
@@ -2289,7 +2286,7 @@ class PanwDriver(DeployDriver):
         # An interface without an IPv6 address that an IPv6 static route
         # leaves through, or that an IPv6 tunnel binds, needs IPv6 enabled
         # or PAN-OS refuses the route ("interface 'tunnel.N' is not a valid
-        # reference", fgt2pa of the phase-6 matrix)
+        # reference")
         _ipv6_on: set[str] = set()
         for _r in routes or []:
             _n = (_r.get("interface_name") or "").strip()
@@ -2327,10 +2324,10 @@ class PanwDriver(DeployDriver):
         # Zone-slot sanitation (invariant I1 for zones): an interface-based
         # SOURCE (FortiGate) lands srcintf/dstintf tokens in the rule/NAT zone
         # slots; a stale or unresolved token would render as a literal zone
-        # name and fail the PA set ("'ethernet1/1' is not an allowed keyword",
-        # fgt2pa finding 2026-08-31) - while the UI already displays such
-        # tokens as 'any'. Keep known zones, map an interface token to its
-        # bound zone (faithful), relax anything else to 'any' + DroppedField.
+        # name and fail the PA set ("'ethernet1/1' is not an allowed keyword"),
+        # while the UI already displays such tokens as 'any'. Keep known
+        # zones, map an interface token to its bound zone (faithful), relax
+        # anything else to 'any' + DroppedField.
         _zone_names = {str(z.get("name") or z.get("zone_name") or "").strip()
                        for z in (zones or [])} - {""}
         _iface_zone = {}
@@ -2343,8 +2340,8 @@ class PanwDriver(DeployDriver):
         # (!) This pass runs BEFORE the rule loop, so the DropTagger that
         # normally stamps the rule's hash onto a drop is not in scope yet -
         # the hash has to travel explicitly, or the Review's change log cannot
-        # tell the operator WHICH rule lost its zone (matrix 0.9.4: 372
-        # unattributed drops on a Check Point source).
+        # tell the operator WHICH rule lost its zone (372 unattributed drops
+        # on a Check Point source).
         def _sane_zone_slot(vals, rule_id, field, rhash=""):
             out: list[str] = []
             for t in (vals or []):
@@ -2856,7 +2853,7 @@ class PanwDriver(DeployDriver):
     def _pa_iface_addresses(parent: "ET.Element", ips: list, ipv6_on: bool = False) -> None:
         """An interface's addresses by family: IPv4 under <ip>, IPv6 under
         <ipv6><enabled>yes</enabled><address> (the node section 2a of
-        docs/IPV6_PLAN.md named; phase 3). Used at every layer3 site.
+        the IPv6 design named; phase 3). Used at every layer3 site.
         `ipv6_on` enables IPv6 without an address: an IPv6 route leaves
         through the interface, or an IPv6 tunnel binds it."""
         v4 = [str(ip) for ip in (ips or []) if ip and ":" not in str(ip)]
@@ -2928,8 +2925,8 @@ class PanwDriver(DeployDriver):
         # On-link check for next-hop-only routes: PAN-OS resolves the egress
         # itself when the next hop sits in a pushed interface's subnet of
         # this VR, and REFUSES the whole candidate otherwise ("can't find
-        # interface in 'default' for next hop X" at validate - matrix 0.9.3
-        # cp2pa: six Gaia statics via VPN peer addresses, no interface).
+        # interface in 'default' for next hop X" at validate, seen with six
+        # Gaia statics via VPN peer addresses and no interface).
         # Such a route is dropped and declared; the operator binds its
         # interface in Network > Routing, which makes it render.
         # The on-link rule itself is vendor-independent and lives in
@@ -2947,10 +2944,10 @@ class PanwDriver(DeployDriver):
         # A static route's <interface> must be a member of ITS virtual router:
         # PAN-OS rejects a pushed interface that belongs to another VR with
         # "interface 'ethernetX' is not a valid reference" and the whole
-        # router step fails (measured 2026-10-18 on the 0.9.4 matrix, a
-        # route added in VR default to an interface of the source's VR). Such
-        # a route is pushed by its next hop alone when that is on-link here,
-        # otherwise it is dropped and declared, never sent.
+        # router step fails (measured with a route added in VR default to an
+        # interface of the source's VR). Such a route is pushed by its next
+        # hop alone when that is on-link here, otherwise it is dropped and
+        # declared, never sent.
         iface_vr = {
             self._pa_iface_name(iface["interface_name"]): (iface.get("vr_name") or "default")
             for iface in interfaces if iface.get("interface_name")
@@ -2998,9 +2995,9 @@ class PanwDriver(DeployDriver):
                 # A whole route gone is filed under the routes kind of the Review
                 # (route_device, as the FortiOS driver declares a route without an
                 # egress): declared as "interface" it counted against the
-                # interfaces row and left the routes row one short (azure2pa,
-                # 0.9.5 matrix). The on-link case above keeps "interface": the
-                # route is pushed, only its binding is left out.
+                # interfaces row and left the routes row one short. The on-link
+                # case above keeps "interface": the route is pushed, only its
+                # binding is left out.
                 dropped.append(DroppedField(rule_id=_prefix_of(r), field="next_hop" if not other_vr else "route_device",
                                             reason=reason, fallback=fallback))
             elif dropped is not None:
@@ -3021,7 +3018,7 @@ class PanwDriver(DeployDriver):
             return
         rt_table = ET.SubElement(parent, "routing-table")
         # IPv4 under <ip>, IPv6 under <ipv6> with an ipv6-address next hop
-        # (section 2a of docs/IPV6_PLAN.md: the ip node refuses a v6 route)
+        # (section 2a of the IPv6 design: the ip node refuses a v6 route)
         for fam, node, nh_tag in ((4, "ip", "ip-address"), (6, "ipv6", "ipv6-address")):
             fam_routes = [rt for rt in usable_routes
                           if (":" in str(rt.get("prefix") or "")) == (fam == 6)]
@@ -3209,9 +3206,9 @@ class PanwDriver(DeployDriver):
         pa_description). If no pa_list is present (object came from a
         CP/Forti import), the object is skipped and reported as
         DroppedField - the user has to make the mapping decision on the
-        target manually (feedback_user_owns_migration_decisions applies).
+        target manually.
 
-        XPath am Target:
+        XPath on the target:
           /config/.../vsys/entry/profiles/custom-url-category/entry[@name=X]
         """
         root = _el("custom-url-category")
@@ -3224,7 +3221,7 @@ class PanwDriver(DeployDriver):
                     if isinstance(u, str) and u.strip()]
             if not urls:
                 # No PA-side slot - cross-vendor import without explicit
-                # PA mapping. User entscheidet manually am Target.
+                # PA mapping. The user decides manually on the target.
                 if dropped is not None:
                     dropped.append(DroppedField(
                         rule_id=name, field="url_category",
@@ -3355,9 +3352,7 @@ class PanwDriver(DeployDriver):
         Schedule cross-vendor V1: prefers value.pa_* slots (lossless
         same-vendor), then falls back to the universal value.intervals
         (LCD, possibly lossy). monthly + group don't exist in PA →
-        DroppedField warn per [[feedback_user_owns_migration_decisions]].
-
-        Plan: project_schedule_cross_vendor_active_plan (Phase 4).
+        DroppedField warn, the operator decides the mapping.
         """
         root = _el("schedule")
         weekdays = ("sunday", "monday", "tuesday", "wednesday",
@@ -3457,8 +3452,8 @@ class PanwDriver(DeployDriver):
         """Emit PA service objects. L3 protos (icmp/gre/esp/...) are skipped -
         PA represents them as predefined apps, not as service objects, and
         leaving them in fails the push with "protocol X is unexpected". The
-        skip is declared (matrix 0.9.4: 55 of 395 CP services vanished from
-        the statistics without a word)."""
+        skip is declared (55 of 395 CP services vanished from the
+        statistics without a word)."""
         return _pa_spec_render("service", objects, lambda o: o["name"],
                                [_paf_service_protocol, _paf_description],
                                ctx={"dropped": dropped},
@@ -3528,9 +3523,9 @@ class PanwDriver(DeployDriver):
             if name_suffix:
                 rule_name = _safe_pa_name(f"{rule_name}{name_suffix}")
             # PAN-OS reserves its default-rule names. A SOURCE rule can
-            # legitimately carry one - PA defaults that travelled through
-            # another vendor re-import as ordinary rules (matrix finding
-            # M-8, CP->PA) - and the whole rulebase set then fails with
+            # legitimately carry one (PA defaults that travelled through
+            # another vendor re-import as ordinary rules), and the whole
+            # rulebase set then fails with
             # "'intrazone-default' is a reserved name". Rename declared;
             # the rule's content pushes unchanged.
             if rule_name in _PA_RESERVED_RULE_NAMES:
@@ -3588,7 +3583,7 @@ class PanwDriver(DeployDriver):
     @staticmethod
     def _nat_rule_ipv6(n: dict, ipv6_names: set[str] | None) -> str | None:
         """The first IPv6 value or IPv6-carrying object a NAT rule names on
-        any of its address fields, or None (docs/IPV6_PLAN.md, section 8 and
+        any of its address fields, or None (the IPv6 design, section 8 and
         phase 3: PAN-OS has no stateful NAT66, NPTv6 and NAT64 are out of
         scope, so such a rule is declared and not pushed)."""
         return nat_rule_ipv6(n, ipv6_names)
@@ -3636,7 +3631,7 @@ class PanwDriver(DeployDriver):
                 dropped.append(DroppedField(
                     rule_id=rid, field="nat_rule",
                     reason=f"carries IPv6 ('{_v6}'): PAN-OS has no stateful NAT66, and NPTv6 "
-                           "and NAT64 are not built on spec (docs/IPV6_PLAN.md, section 8)",
+                           "and NAT64 are not built on spec",
                     fallback="not pushed"))
                 return
             name = base_name
@@ -3721,7 +3716,7 @@ class PanwDriver(DeployDriver):
             # that names no egress) takes the one interface of its destination
             # zone. Without that it is not pushed: a NAT rule rendered without
             # its translation would match the traffic and translate nothing,
-            # silently (lab finding 2026-11-04, fmc2pa).
+            # silently.
             if nat_type in ("snat", "static") and trans_src_type == "interface-address" and not trans_src:
                 _cands = [i for i in (zone_ifaces.get(_dz[0]) or []) if i] if len(_dz) == 1 else []
                 if len(_cands) == 1:
@@ -3984,8 +3979,8 @@ class PanwDriver(DeployDriver):
 
         def _tok(vals):
             # a side of one family ('any4', 'any6') names the catch-all
-            # object of that family, as on the security rules (fgt2pa of the
-            # phase-6 matrix: "destination 'any4' is not an allowed keyword")
+            # object of that family, as on the security rules (PAN-OS refuses
+            # the token: "destination 'any4' is not an allowed keyword")
             return [(tok_names or {}).get(x, x) for x in (vals or [])]
 
         for i, s in enumerate(ssl_rules):
@@ -4028,11 +4023,11 @@ class PanwDriver(DeployDriver):
         _indent(root)
         return _to_xml_str(root)
 
-    # ── IPSec VPN (CE plan P3a) ──────────────────────────────────
+    # ── IPSec VPN ──────────────────────────────────
     # Render crypto profiles + IKE gateways + IPSec tunnels from the agnostic
     # model. Route-based S2S. The PSK is pushed as a PLACEHOLDER (operator sets
     # the real secret); cert-auth gateways are deferred (PA cert-auth structure
-    # unverified on the lab). Builtin crypto profiles are skipped (they ship with
+    # not verified live). Builtin crypto profiles are skipped (they ship with
     # every PA). Canonical tokens are PA-native, so they render directly.
     _VPN_PSK_PLACEHOLDER = "GATESHIFT-PLACEHOLDER-PSK-CHANGE-ME"
 
@@ -4131,8 +4126,8 @@ class PanwDriver(DeployDriver):
             if not (v.get("local_interface") or "").strip():
                 # Same rule as the FortiGate phase1: a PAN-OS IKE gateway needs
                 # a local interface, and an empty <local-address/> fails the
-                # candidate validation for EVERY gateway (matrix 0.9.3 cp2pa:
-                # 'local-address is invalid' x4, commit blocked). The source
+                # candidate validation for EVERY gateway ('local-address is
+                # invalid' for each, commit blocked). The source
                 # carries none (Check Point communities) - the operator picks
                 # it in the VPN tab ('set local IF').
                 dropped.append(DroppedField(
@@ -4202,7 +4197,7 @@ class PanwDriver(DeployDriver):
                 ET.SubElement(entry, "peer-id").text = v["peer_id"]
             # an IPv6 peer or local address needs the gateway's ipv6 flag
             # (measured 11.2: without it the local address "is not a valid
-            # reference", docs/IPV6_PLAN.md phase 5)
+            # reference")
             if ":" in peer or ":" in str(v.get("local_address") or ""):
                 ET.SubElement(entry, "ipv6").text = "yes"
             _peer6 = ((v.get("raw_extras") or {}).get("peer_address6")
@@ -4242,7 +4237,7 @@ class PanwDriver(DeployDriver):
             # tunnels carry no selectors → no proxy-id (PA's auto default).
             sels = v.get("traffic_selectors") or []
             # v4 pairs under proxy-id, v6 pairs under proxy-id-v6 (the same
-            # shape, docs/IPV6_PLAN.md phase 5); a mixed pair is declared
+            # shape); a mixed pair is declared
             _s4, _s6, _mixed = split_selectors_by_family(sels)
             for _m in _mixed:
                 dropped.append(mixed_selector_drop(v.get("name") or "?", _m))
@@ -4295,7 +4290,7 @@ class PanwDriver(DeployDriver):
                     ET.SubElement(entry, "tunnel-interface").text = _ti
             # the tunnel of an IPv6 gateway carries the ipv6 flag too: the
             # gateway reference is checked by family (measured 11.2: without
-            # it the gateway "is not a valid reference", docs/IPV6_PLAN.md phase 5)
+            # it the gateway "is not a valid reference")
             if ":" in str(v.get("peer_address") or "") or ":" in str(v.get("local_address") or ""):
                 ET.SubElement(entry, "ipv6").text = "yes"
             if v.get("disabled"):
@@ -4307,14 +4302,14 @@ class PanwDriver(DeployDriver):
 
     # Each entry: (label, delete_xpath, push_xpath, config_section_key, strand)
     # Strand assigns the step to either the Policy or the Network push.
-    # Zones moved to 'network' per Migration-Note #1 - Network-Strang owns
-    # zone definition + interface binding + zone-object push.
+    # Zones moved to 'network': the network strand owns zone definition,
+    # interface binding and the zone-object push.
     # Rulebase deletes target the PARENT node (rulebase/security, not
     # .../rules): deleting only the rules child leaves an EMPTY container
     # (<decryption/>) behind, which PAN-OS accepts at commit but refuses
     # to load back - 'revert config' then fails with "Schema verification
     # failed: rulebase -> decryption is missing 'rules'" exactly when
-    # revert-on-failure needs it (matrix finding M-9, CP->PA). An absent
+    # revert-on-failure needs it. An absent
     # node is the valid fresh-box state; the set phase recreates the path.
     _PUSH_STEPS = [
         ("Security Rules",  f"{_VSYS}/rulebase/security",       f"{_VSYS}/rulebase/security", "Security Rules",  "policy"),
@@ -4403,6 +4398,43 @@ class PanwDriver(DeployDriver):
         return {"panorama": False, "base_url": _api_url(device),
                 "api_key": device.get("api_key") or "", "vsys": _vsys_of(device)}
 
+    @staticmethod
+    def decryption_needs_forward_trust(xml_str: str) -> bool:
+        """True when the rendered Decryption Rules section carries a
+        forward-proxy rule: the one kind that needs the firewall's forward-trust
+        certificate (inbound inspection names its own server certificate, SSH
+        proxy none)."""
+        if not (xml_str or "").strip():
+            return False
+        try:
+            root = ET.fromstring(f"<r>{xml_str}</r>")
+        except ET.ParseError:
+            return False
+        return root.find(".//entry/type/ssl-forward-proxy") is not None
+
+    def has_forward_trust_cert(self, device: dict) -> bool | None:
+        """Whether the target's vsys carries a forward-trust certificate
+        (ssl-decrypt), the prerequisite of every forward-proxy decryption rule:
+        without it every push step succeeds and the commit fails with "forward
+        decrypt trust cert is not configured". One read for the push's
+        prerequisite step and the Review's pa_forward_trust_missing finding. The vsys's own setting or the shared
+        one: a firewall without multiple virtual systems keeps it under
+        /config/shared (the web interface writes it there, and the commit
+        accepts it for vsys1, measured on PAN-OS 11.2). None
+        when the target is reached through Panorama or the read fails:
+        nobody cries wolf on a guess."""
+        try:
+            ctx = self._deploy_ctx(device)
+            if ctx.get("panorama"):
+                return None
+            for xp in (self._reroot(f"{_VSYS}/ssl-decrypt", ctx, "policy"),
+                       "/config/shared/ssl-decrypt"):
+                if self._api_get(device, xp).find(".//forward-trust-certificate") is not None:
+                    return True
+            return False
+        except Exception:
+            return None
+
     def _reroot(self, xpath: str, ctx: dict, strand: str) -> str:
         """Map a push xpath for the deploy context. CE: identity (direct push),
         except a vsys instance row, whose vsys subtree replaces vsys1 (the
@@ -4416,7 +4448,7 @@ class PanwDriver(DeployDriver):
 
     # The push stages into the firewall's candidate configuration, which it
     # shares with every other administrator, so taking a broken-off push back
-    # means restoring a snapshot of that candidate (docs/PUSH_ROLLBACK_PLAN.md).
+    # means restoring a snapshot of that candidate.
     rollback_kind = "snapshot"
 
     # Named snapshot of the candidate, taken before the push and loaded back
@@ -4444,7 +4476,7 @@ class PanwDriver(DeployDriver):
         mgmt_override: bool = False,
         vpn_certs: dict | None = None,
         merge: bool = False,
-        push_options: dict | None = None,   # push_without_rescue_point (docs/PUSH_OPTIONS_PLAN.md)
+        push_options: dict | None = None,   # push_without_rescue_point
     ) -> Iterator[StepResult]:
         """Rollback-on-failure wrapper around _push_impl (the CP analog is the
         driver's discard-session in its finally): a push that dies mid-way
@@ -4456,8 +4488,7 @@ class PanwDriver(DeployDriver):
         A named snapshot of the candidate is taken before the push and loaded
         back when the push breaks off after it started writing. That keeps what
         was in the candidate BEFORE this push, which is the point: a previously
-        pushed, uncommitted Network strand survives a failed Policy push
-        (docs/PUSH_ROLLBACK_PLAN.md, CE backlog 11). The fallback is the
+        pushed, uncommitted Network strand survives a failed Policy push. The fallback is the
         admin-scoped 'revert config' this driver used until 2026-10-12, which
         drops the whole candidate to the running config - and which the box
         refuses outright once any configuration load has happened on it.
@@ -4482,8 +4513,8 @@ class PanwDriver(DeployDriver):
                 # which a configuration load on it leaves behind. Without it
                 # a broken-off push would leave a half-wiped candidate, so
                 # the push stops before writing, unless the operator chose
-                # to go on in the push dialog (docs/PUSH_OPTIONS_PLAN.md).
-                # 0.9.4 matrix, 2026-10-18: a baseline loaded by hand, no commit.
+                # to go on in the push dialog.
+                # Seen after a baseline was loaded by hand without a commit.
                 why = (f"the firewall refused to save a rescue point, a copy of its "
                        f"candidate configuration, before this push ({snap_error}). "
                        "It demands a full commit, which a configuration load on it "
@@ -4535,9 +4566,8 @@ class PanwDriver(DeployDriver):
         Returns (filename, error): on failure the push goes ahead without a
         rescue point and the rollback step says so. PAN-OS refuses to save
         while it demands a full commit ("Partial save is not allowed"), which
-        any configuration load on that box leaves behind - measured on the lab
-        PA, and not something Gateshift can clear, because clearing it means
-        committing."""
+        any configuration load on that box leaves behind (measured on PAN-OS).
+        Gateshift cannot clear that, because clearing it means committing."""
         name = f"{self._SNAPSHOT_PREFIX}-{strand}.xml"
         if len(name) > 32:      # a strand name nobody has today would do this
             name = f"{self._SNAPSHOT_PREFIX}.xml"
@@ -4552,7 +4582,7 @@ class PanwDriver(DeployDriver):
             return None, str(e)
 
     def rescue_point_refusal(self, device: dict) -> str | None:
-        """The generate-time probe behind the push option (docs/PUSH_OPTIONS_PLAN.md):
+        """The generate-time probe behind the push option:
         None when the firewall saves a rescue point, else its refusal. Uses the
         fixed fallback name, so the probe leaves one file the next push
         overwrites. A Panorama target has no rescue point and is never asked."""
@@ -4564,6 +4594,11 @@ class PanwDriver(DeployDriver):
             dev = device
         try:
             self._api_op(dev, f"<save><config><to>{self._SNAPSHOT_PREFIX}.xml</to></config></save>")
+            return None
+        except requests.exceptions.RequestException:
+            # no answer is no refusal: an unreachable firewall read as "it demands
+            # a full commit". The push
+            # meets the box itself and says what it finds.
             return None
         except Exception as e:
             return str(e)
@@ -4738,14 +4773,11 @@ class PanwDriver(DeployDriver):
         # migrates key material), and without it the candidate config is
         # INVALID: every push step reports success and the failure only shows
         # up at commit as "forward decrypt trust cert is not configured".
-        # Surface it at push time instead (QA finding, PA cluster leg).
+        # Surface it at push time instead.
         if (not ctx["panorama"]
                 and any(k == "Decryption Rules" for _, _, _, k in active)):
-            try:
-                _sd = self._api_get(
-                    device, self._reroot(f"{_VSYS}/ssl-decrypt", ctx, strand))
-                _has_fwd = _sd.find(".//forward-trust-certificate") is not None
-            except Exception:
+            _has_fwd = self.has_forward_trust_cert(device)
+            if _has_fwd is None:
                 _has_fwd = True     # can't read → don't cry wolf
             if not _has_fwd:
                 yield StepResult(
@@ -4901,7 +4933,7 @@ class PanwDriver(DeployDriver):
         # ── Delete phase (top-down order) ── skipped in ADDITIVE-MERGE mode: no wipe, so the SET
         # phase below merges the source entries into the dest's EXISTING config (PA set = union; a
         # same-name entry is overwritten, everything else already on the dest is kept).
-        for label, del_xpath, _, _ in ([] if merge else steps):
+        for label, del_xpath, _, del_key in ([] if merge else steps):
             del_xpath = self._reroot(del_xpath, ctx, strand)
             step_name = f"Delete {label}"
             if "interface" in del_xpath:
@@ -4952,6 +4984,16 @@ class PanwDriver(DeployDriver):
                         except Exception as e:
                             yield StepResult(step=f"{step_name} ({sub})", success=False, detail=str(e))
                             return
+                if not _has_data(del_key):
+                    # Nothing follows for this section: the delete left an
+                    # empty <interface/>, which the candidate refuses at the
+                    # commit ("network -> interface is invalid"). Leave the skeleton PAN-OS itself
+                    # keeps; set merges, a preserved HA port stays.
+                    try:
+                        _api_set(base_url, api_key, del_xpath, "<ethernet/>")
+                    except Exception as e:
+                        yield StepResult(step=f"{step_name} (skeleton)", success=False, detail=str(e))
+                        return
                 yield StepResult(
                     step=step_name, success=True,
                     detail=(f"HA-reserved preserved: {', '.join(sorted(ha_reserved))}"
@@ -4988,8 +5030,7 @@ class PanwDriver(DeployDriver):
                     # phase, so it can be the first write of the push; without
                     # the prefix a later failure would leave the imported
                     # certificate behind. The snapshot takes back exactly this
-                    # import, which is why arming it is right now
-                    # (docs/PUSH_ROLLBACK_PLAN.md, follow-up 1).
+                    # import, which is why arming it is right now.
                     yield StepResult(step=f"Push VPN cert {name}", success=True)
                 except Exception as e:
                     yield StepResult(step=f"Push VPN cert {name}", success=False,
@@ -5078,7 +5119,7 @@ class PanwDriver(DeployDriver):
                 # status=success but does not persist the group-tag).
                 # Workaround: after the bulk push, issue a second action=set
                 # per affected rule with only the <group-tag> element.
-                # Verified via lab probe 2026-06-03.
+                # Verified via a live probe.
                 if section_key in ("Security Rules", "NAT Rules"):
                     try:
                         rules_root = ET.fromstring(f"<r>{xml_str}</r>")

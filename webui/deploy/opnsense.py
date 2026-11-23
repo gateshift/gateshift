@@ -1560,7 +1560,7 @@ class OPNsenseDriver(DeployDriver):
             # "192.0.2.70/24". Reading addr4 in the ipv4 shape iterated the
             # string CHARACTER BY CHARACTER ('str' has no attribute 'get') -
             # and only on an interface that actually has an address, which is
-            # why an all-unaddressed lab box never showed it.
+            # why a box with no addressed interface never showed it.
             addrs = [a.get("ipaddr") for a in (row.get("ipv4") or [])
                      if isinstance(a, dict) and a.get("ipaddr")]
             if not addrs and isinstance(row.get("addr4"), str) and row["addr4"]:

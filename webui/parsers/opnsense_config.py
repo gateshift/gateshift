@@ -217,7 +217,7 @@ def _literal_name(value: str) -> str:
 
 def _addr_kind(value: str) -> str:
     """Classify an alias entry the way the shared object model names it
-    (either family, docs/IPV6_PLAN.md phase 4)."""
+    (either family)."""
     v = (value or "").strip()
     if "-" in v and not v.startswith("-"):
         return "ip-range"
@@ -526,7 +526,7 @@ def parse_rules(root, port_aliases: dict | None = None,
             # equivalent on any target we push to.
             drops.setdefault("action_match", []).append(name)
             continue
-        # the rule's family (D5 of docs/IPV6_PLAN.md): a pf rule is of one
+        # the rule's family: a pf rule is of one
         # family, so an unqualified side is that family's catch-all; the
         # legacy `inet46` is both
         _fam = (_text(el, "ipprotocol") or "inet").strip().lower()

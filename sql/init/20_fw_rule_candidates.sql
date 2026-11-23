@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS fw_rule_candidates (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   vendor VARCHAR(64) NULL,
-  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  -- the Device, the key once phase 7 drops the name
   device_id INT NULL,
 
   action ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',

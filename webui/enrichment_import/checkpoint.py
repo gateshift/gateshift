@@ -35,9 +35,9 @@ schema slot - vpn, install_on, time, inline_layer, cp_section. These
 remain Drop-only until a schema-extension slice adds dedicated columns.
 
 negate_source / negate_destination / negate_service got first-class
-columns + a dedicated override table in the rule-negation scope (V1a–V1d,
-see project_rule_negation_plan). The source-parser writes them directly
-to fw_imported_rules, so this promoter no longer sees them in raw_extras.
+columns + a dedicated override table in the rule-negation scope (V1a to
+V1d). The source-parser writes them directly to fw_imported_rules, so this
+promoter no longer sees them in raw_extras.
 """
 
 from __future__ import annotations

@@ -6,10 +6,9 @@ USE gateshift;
 -- Tag-Catalog per Source-Device.
 --
 -- Vendor-specific concept (PA + CP have tag-objects with color+comments;
--- Forti has no policy tags). UI tab is target-driven - see
--- feedback_enrichment_target_driven. Cross-vendor migration is
--- user-driven (feedback_user_owns_migration_decisions): no auto color
--- translation, user explicitly maps a source-tag onto a target-tag.
+-- Forti has no policy tags). The UI tab is target-driven. Cross-vendor
+-- migration is user-driven: no auto color translation, the user explicitly
+-- maps a source-tag onto a target-tag.
 --
 -- Properties JSON holds vendor-prefixed slots (pa_color, pa_comments,
 -- cp_color, cp_icon, cp_comments) per webui/tag_schemas.py - single

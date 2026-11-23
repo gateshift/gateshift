@@ -10,7 +10,7 @@ deploy/ so the driver doesn't import from main.py - the collector imports
 from here.
 
 V1 scope: IPv4, single VDOM (from device.config.fortigate.vdom, default
-'root'). Bearer-token auth. SSL-verify off (lab self-signed certs).
+'root'). Bearer-token auth. SSL-verify off (self-signed certs).
 """
 
 from __future__ import annotations
@@ -77,8 +77,7 @@ def _connection_dropped(exc: BaseException) -> bool:
 # ── REST API ─────────────────────────────────────────────────────
 
 # ── FortiGate Cloud as the transport ─────────────────────────────
-# A FortiGate reached through FortiGate Cloud (docs/CLOUD_SOURCES_PLAN.md,
-# C1) is the same FortiOS REST API, proxied per serial number under the
+# A FortiGate reached through FortiGate Cloud is the same FortiOS REST API, proxied per serial number under the
 # account's regional host, with an IAM API user's token instead of the
 # box's own API key. The device row keeps its config under
 # config.fortigate.cloud = {region, serial, api_id}; the IAM API user's
@@ -328,6 +327,19 @@ def cidr_to_subnet(cidr: str | None) -> str | None:
         return None
 
 
+NO_IPV4 = "0.0.0.0 0.0.0.0"   # FortiOS's own value of a port without an IPv4 address
+
+
+def ipv6_block(addrs: list[str]) -> dict:
+    """The interface's ipv6 block with exactly the given addresses: the first
+    static, the rest as extra addresses, FortiOS's own empty values for none
+    (`::/0`, empty table). Always written, so a stale IPv6 address of an
+    earlier estate cannot survive on a port the push declares IPv4-only."""
+    return {"ip6-mode": "static",
+            "ip6-address": addrs[0] if addrs else "::/0",
+            "ip6-extra-addr": [{"prefix": x} for x in addrs[1:]]}
+
+
 def iface_cidr_to_payload(cidr: str | None) -> str | None:
     """Render a host-preserving CIDR (e.g. '10.0.0.5/24') as Forti's iface
     'ip' payload 'addr mask' WITHOUT normalizing host→network. Used for
@@ -365,7 +377,7 @@ def any_names(items) -> list[str]:
 def family_names(items4, items6) -> list[str]:
     """One rule side from its two FortiOS lists (srcaddr and srcaddr6, dst
     likewise): the union of the names, each family's `all` as the D5 token
-    of that family (docs/IPV6_PLAN.md, phase 4). `all` on both lists is
+    of that family. `all` on both lists is
     `any`, `all` with the other list empty is `any4` or `any6`, `all` beside
     names of the other family is that family's token beside them; a name
     on both lists (a dual-stack object) appears once. Two empty lists are
@@ -459,9 +471,9 @@ def _policy_utm_and_log(e: dict, raw_extras: dict, dropped: list[str]) -> None:
 
 def _policy_negates(e: dict) -> tuple[int, int, int]:
     """FortiOS exposes srcaddr-negate / dstaddr-negate / service-negate as
-    "enable"/"disable" strings (V0 lab-probe). First-class on the rule-dict
+    "enable"/"disable" strings (probed live). First-class on the rule-dict
     so fw_imported_rules.negate_* columns capture them; downstream
-    COALESCEs against fw_rule_negate_overrides per project_rule_negation_plan."""
+    COALESCEs against fw_rule_negate_overrides."""
     flags = tuple(1 if (e.get(f) or "").strip().lower() == "enable" else 0
                   for f in ("srcaddr-negate", "dstaddr-negate", "service-negate"))
     return flags[0], flags[1], flags[2]
@@ -469,8 +481,7 @@ def _policy_negates(e: dict) -> tuple[int, int, int]:
 
 def parse_security_policies(payload: dict, app_names: dict | None = None) -> list[dict]:
     """FortiOS firewall/security-policy entries (NGFW policy-based mode)
-    into agnostic rule dicts: the ruleset of a policy-based box
-    (docs/FGT_POLICY_MODE_PLAN.md, D8). Applications come by FortiGuard id
+    into agnostic rule dicts: the ruleset of a policy-based box. Applications come by FortiGuard id
     and read as names through `app_names` (id -> name, from
     application/name); an id the catalog does not carry is declared.
     Application groups ride as names. `enforce-default-app-port enable`
@@ -551,8 +562,7 @@ def parse_security_policies(payload: dict, app_names: dict | None = None) -> lis
 
 def synth_central_vip_dnat_rules(objects: list[dict]) -> tuple[list[dict], list[dict]]:
     """Central NAT mode: a static-nat VIP translates on its own, before the
-    policy lookup, no policy references it (docs/FGT_POLICY_MODE_PLAN.md,
-    D11). Each VIP object becomes one dest-NAT rule (external address and
+    policy lookup, no policy references it. Each VIP object becomes one dest-NAT rule (external address and
     port to mapped address and port), marked synthesized with the VIP
     reference so a FortiGate target renders the VIP itself and PAN-OS or
     Check Point render the NAT rule. A port-forward VIP needs a service
@@ -606,7 +616,7 @@ def synth_central_vip_dnat_rules(objects: list[dict]) -> tuple[list[dict], list[
 
 def declare_post_nat_destinations(rules: list[dict], objects: list[dict]) -> int:
     """Central NAT mode matches the translated destination, PAN-OS and
-    Check Point match the original one (docs/FGT_POLICY_MODE_PLAN.md, D12):
+    Check Point match the original one:
     every rule whose destination is a VIP's mapped address gets the import
     drop `dnat_post_nat_dst` and the VIPs on raw_extras, so the Review
     names the rules and the operator adds the external address on such
@@ -672,7 +682,7 @@ def port_subnet_overlaps(rendered: list[dict], live: list[dict],
                          protected: set[str] | None = None) -> list[dict]:
     """The -54 case the push cannot talk its way out of: a physical port the
     configuration does not address still carries a subnet that overlaps one
-    the configuration assigns (docs/PUSH_OPTIONS_PLAN.md, D2). `rendered`
+    the configuration assigns. `rendered`
     are the Interfaces entries of the build (physical ports carry no
     `type`), `live` the target's interfaces as list_target_interfaces
     returns them. Protected ports (management, HA) are never reported:
@@ -907,13 +917,10 @@ def parse_url_categories(payload: dict) -> list[dict]:
     Structurally richer (per-entry action) than PA, but the core
     pattern-list semantics are the same.
 
-    Value slots (forti_-prefixed per
-    feedback_vendor_properties_schema_driven):
+    Value slots (forti_-prefixed):
       forti_entries  list[{url, type, action}] - type: simple/regex/wildcard
                      action: exempt/block/allow/monitor (default: block)
       forti_description  str (from 'comment')
-
-    Plan: project_phase_1_schedule_urlcustom_active_plan (Phase 1a).
     """
     objects: list[dict] = []
     for e in payload.get("results") or []:
@@ -982,7 +989,7 @@ def parse_addresses(payload: dict) -> tuple[list[dict], dict]:
 
 def parse_addresses6(payload: dict) -> tuple[list[dict], dict]:
     """Parse FortiOS firewall/address6 entries → address objects of the IPv6
-    family (docs/IPV6_PLAN.md, phase 4): ipprefix → ip-netmask, iprange →
+    family: ipprefix → ip-netmask, iprange →
     ip-range, fqdn → fqdn. Others → drops['address_unsupported']. The merge
     with a same-named IPv4 object happens in merge_dual_stack_objects."""
     objects: list[dict] = []
@@ -1032,8 +1039,7 @@ def _value_family(val: dict) -> int | None:
 
 
 def merge_dual_stack_objects(objects: list[dict], drops: dict | None = None) -> list[dict]:
-    """A name that exists in both FortiOS namespaces is one dual-stack object
-    (D1 of docs/IPV6_PLAN.md): the IPv4 object keeps `value`, the IPv6 one
+    """A name that exists in both FortiOS namespaces is one dual-stack object: the IPv4 object keeps `value`, the IPv6 one
     becomes its `value6`; a group of both namespaces keeps the union of its
     members. Two objects of one family with one name (which FortiOS cannot
     hold) keep the first. Returns the new list; the merged names go to
@@ -1114,19 +1120,24 @@ def parse_address_groups(payload: dict) -> list[dict]:
     return objects
 
 
-# ── FortiGuard factory address objects ────────────────────────────────────
+# ── FortiGuard factory address objects ──────────────────────────────────────
 # FortiOS ships a set of default "factory" address objects and groups (wildcard
 # FQDNs for well-known SaaS, the 'all'/'none' sentinels, a few named defaults).
-# They are Fortinet's, not the customer's policy - and the wildcard FQDNs can't
-# even be represented on other vendors (PAN-OS rejects a '*' in an FQDN object).
-# An import drops them from the migration set (reported), so the target gets the
-# customer's config, not the vendor's shipped cruft. Detection is best-effort by
-# VALUE (reliable: wildcard FQDN) + NAME, because /firewall/address exposes no
-# read-only flag (q_origin_key just mirrors the name). Extend the name list as
-# real-world cases surface - the wildcard-value rule already catches the bulk.
+# They are Fortinet's, not the customer's policy: an import drops them from the
+# migration set (reported), so the target gets the customer's config, not the
+# vendor's shipped cruft. Detection is by NAME, because /firewall/address
+# exposes no read-only flag (q_origin_key just mirrors the name). Until
+# 2026-11-22 every wildcard FQDN counted as factory by its value, which dropped
+# a customer's own wildcard object and left its rules with an unresolved
+# reference on every target: the targets carry
+# a wildcard FQDN themselves (FortiOS as an fqdn address, Check Point as a
+# dns-domain, PAN-OS declares the drop in the render), so the import keeps it.
+# Extend the name list as real-world cases surface.
 _FORTI_FACTORY_ADDR_NAMES = frozenset({
     "swscan.apple.com", "firmware.apple.com", "autoupdate.opera.com",
     "google-play", "Gotomeeting", "adobe", "Adobe Login",
+    # the factory wildcard FQDN addresses of a pristine 7.x box
+    "gmail.com", "wildcard.google.com", "wildcard.dropbox.com",
 })
 
 # FortiOS factory service objects and service groups, captured from pristine
@@ -1163,7 +1174,7 @@ FORTI_FACTORY_SERVICE_NAMES = FORTI_STOCK_SERVICE_NAMES | FORTI_STOCK_SERVICE_GR
 # the any sentinels), this one says what the PUSH must never delete on the
 # target, which is every vendor entry, including the plain FQDN objects a
 # customer rule may reference (login.microsoft.com migrates like any FQDN).
-# The lab wipe tool reads the same sets so a wiped box equals a fresh one.
+# A wipe that reads the same sets leaves a box equal to a fresh one.
 FORTI_STOCK_ADDRESS_NAMES = frozenset({
     "all", "none", "EMS_ALL_UNKNOWN_CLIENTS", "EMS_ALL_UNMANAGEABLE_CLIENTS",
     "FABRIC_DEVICE", "FIREWALL_AUTH_PORTAL_ADDRESS", "LocalMachine_Loopback",
@@ -1173,7 +1184,7 @@ FORTI_STOCK_ADDRESS_NAMES = frozenset({
 })
 FORTI_STOCK_ADDRGRP_NAMES = frozenset({"G Suite", "Microsoft Office 365"})
 # the IPv6 namespaces (firewall/address6, firewall/addrgrp6) ship their own
-# catch-alls and the SSL-VPN pool (docs/IPV6_PLAN.md, phase 3)
+# catch-alls and the SSL-VPN pool
 FORTI_STOCK_ADDRESS6_NAMES = frozenset({"all", "none", "SSLVPN_TUNNEL_IPv6_ADDR1"})
 FORTI_STOCK_ADDRGRP6_NAMES: frozenset = frozenset()
 FORTI_STOCK_SCHEDULE_NAMES = frozenset({"always", "none", "default-darrp-optimize"})
@@ -1193,29 +1204,22 @@ _STOCK_BY_PATH = {
 
 def is_stock_entry(cmdb_path: str, name, entry: dict | None = None) -> bool:
     """True for a vendor-shipped entry of a FortiOS object section: the push's
-    delete phase keeps it, the lab wipe leaves it. By name per section, and
-    for addresses also by value (a wildcard FQDN is FortiGuard's), the same
-    rule the import filter applies."""
+    delete phase keeps it, a wipe leaves it. By name per section, the
+    same rule the import filter applies (`entry` is accepted for the callers'
+    sake, a value decides nothing since 2026-11-22: a customer's wildcard FQDN
+    is the customer's)."""
     path = (cmdb_path or "").strip("/").replace("/firewall/", "firewall/")
     names = _STOCK_BY_PATH.get(path)
     if names is None:
         return False
-    n = str(name or "").strip()
-    if n in names:
-        return True
-    if path == "firewall/address" and isinstance(entry, dict):
-        if (entry.get("type") or "").lower() == "fqdn" and "*" in str(entry.get("fqdn") or ""):
-            return True
-    return False
+    return str(name or "").strip() in names
 
 
 def is_factory_address(name: str, value: dict | None) -> bool:
-    """True for a FortiGuard-shipped factory address object (see note above)."""
+    """True for a FortiGuard-shipped factory address object (see note above):
+    by name, `value` decides nothing."""
     n = (name or "").strip()
     if n.lower() in ("all", "none"):
-        return True
-    v = value or {}
-    if v.get("type") == "fqdn" and "*" in (v.get("value") or ""):
         return True
     return n in _FORTI_FACTORY_ADDR_NAMES
 
@@ -1442,7 +1446,7 @@ def parse_central_snat_rules(payload: dict) -> list[dict]:
         # marked disabled instead of dropped.
         nat_state = (e.get("nat") or "").strip().lower()
         # an entry of type ipv6 keeps its addresses and pool in the v6 fields
-        # (docs/IPV6_PLAN.md, phase 4)
+        #
         pool_refs = ref_names(e.get("nat-ippool")) + ref_names(e.get("nat-ippool6"))
         if pool_refs:
             trans_src = pool_refs[0]
@@ -1889,7 +1893,7 @@ def parse_interfaces(payload: dict, zone_map: dict[str, str]) -> tuple[list[dict
             if cidr:
                 ips.append(cidr)
         # the interface's ipv6 block: ip6-address (::/0 when unset) and
-        # the extras (docs/IPV6_PLAN.md, phase 3)
+        # the extras
         v6 = e.get("ipv6") or {}
         if isinstance(v6, dict):
             for raw6 in [v6.get("ip6-address")] + [x.get("prefix") for x in (v6.get("ip6-extra-addr") or [])
@@ -2003,8 +2007,7 @@ def parse_routes(payload: dict, iface_names: set[str],
         # FortiOS may report vrf 0/'unspecified' on a route whose egress
         # DEVICE sits in a VRF - the route then lives in the device's table.
         # Without this fallback two defaults (main + guest VRF) collapse
-        # onto vr 'default' and the collect INSERT dies on uq_dev_prefix_vr
-        # (found on the CE run of the FGT->PA leg).
+        # onto vr 'default' and the collect INSERT dies on uq_dev_prefix_vr.
         if vrf_id == 0 and iface_vrf and iface_name:
             vrf_id = int(iface_vrf.get(iface_name) or 0)
         vr_name = "default" if vrf_id == 0 else f"vrf-{vrf_id}"
@@ -2023,7 +2026,7 @@ def parse_routes6(payload: dict, iface_names: set[str],
                   iface_vrf: dict[str, int] | None = None) -> list[dict]:
     """Parse router/static6 entries the way parse_routes parses router/static:
     the dst is a prefix, the gateway '::' means none, a blackhole carries
-    route_type (docs/IPV6_PLAN.md, phase 3)."""
+    route_type."""
     routes: list[dict] = []
     for e in payload.get("results") or []:
         status = (e.get("status") or "enable").lower()
@@ -2170,8 +2173,7 @@ def tunnel_iface_names(vpn_tunnels: list) -> dict[str, str]:
 
 
 def _forti_p2_sides(sel: dict) -> dict:
-    """The phase2 fields of one selector pair in its family's form
-    (docs/IPV6_PLAN.md, phase 5): a prefix as subnet/subnet6, a first-last
+    """The phase2 fields of one selector pair in its family's form: a prefix as subnet/subnet6, a first-last
     range as range/range6 with its start and end addresses."""
     out: dict = {}
     for side, key in (("src", "local"), ("dst", "remote")):
@@ -2253,7 +2255,7 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
         else:
             p1["type"] = "static"
             # a phase1 is bound to one family: an IPv6 peer takes ip-version 6
-            # and remote-gw6 (measured 7.6.7, docs/IPV6_PLAN.md phase 5)
+            # and remote-gw6 (measured 7.6.7)
             if ":" in peer:
                 p1["ip-version"] = "6"
                 p1["remote-gw6"] = peer
@@ -2342,8 +2344,7 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
 
 # ── FortiManager transport (on-prem token, FortiManager Cloud session) ────
 # Shared by the Community Edition's manager discovery (managerdiscovery.py)
-# and the Enterprise FortiManager driver, which imports it from here
-# (docs/MANAGER_DISCOVERY_PLAN.md, M2). FortiManager Cloud is the same
+# and the Enterprise FortiManager driver, which imports it from here. FortiManager Cloud is the same
 # JSON-RPC behind https://<customer id>.<region>.fortimanager.forticloud.com,
 # but the credential is a FortiCloud IAM API user: its password grant (client
 # id "FortiManager", four hours) buys an access token, the instance login
@@ -2353,7 +2354,7 @@ def render_vpn(vpn_tunnels: list, ike_cryptos: dict, ipsec_cryptos: dict,
 # renewed once when a call answers status -11, which is how a FortiManager
 # reports a session it no longer knows. Built from the documentation
 # (Fortinet community tip 132120, FortiManager Cloud 7.6 "Adding API
-# users"), docs/CLOUD_MANAGERS_PLAN.md carries the assumptions until a live
+# users"), the cloud managers design carries the assumptions until a live
 # run ticks them.
 FMG_CLOUD_CLIENT_ID = "FortiManager"
 _FMG_SESSIONS: dict[tuple[str, str], str] = {}     # (host, api_id) -> session

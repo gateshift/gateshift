@@ -31,7 +31,7 @@
     /* header project picker (U16, user decision 2026-10-04): left of the version chip, every tenant's projects */
     .hdr-project-pick { width:260px; font-size:var(--fs-small); padding:4px 24px 4px 8px; appearance:none; -webkit-appearance:none; background-image:url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%226%22 viewBox=%220 0 10 6%22><path d=%22M1 1l4 4 4-4%22 stroke=%22%23FFFFFF%22 stroke-width=%221.4%22 fill=%22none%22/></svg>'); background-repeat:no-repeat; background-position:right 8px center; text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }
     .hdr-pair { display:inline-flex; align-items:center; gap:4px; }
-    /* the next step (docs/UI_USABILITY_PLAN.md, D6): one sentence from the step model, linked to the place
+    /* the next step: one sentence from the step model, linked to the place
        that completes it, in a box of its own in the page head (D33) */
     .ws-next-box { display:flex; flex-direction:column; gap:3px; max-width:60vw; min-width:0; padding:6px 12px; border:1px solid var(--line); background:var(--bg2); }
     .hdr-next { display:inline-flex; align-items:center; gap:8px; min-width:0; font-size:var(--fs-small); color:var(--tx2); }
@@ -49,7 +49,7 @@
     .hdr-next .hdr-skipped:hover { color:var(--tx); border-bottom-color:var(--tx); }
     .hdr-next .cap { white-space:nowrap; }
     .hdr-next .pre, .ws-hint .pre { color:var(--tx3); white-space:nowrap; }   /* the word before the sentence: Next:, Hint: (2026-11-10) */
-    /* the Next tag (docs/UI_USABILITY_PLAN.md, D14): one signature in the page head, the navigation and the path dialog */
+    /* the Next tag: one signature in the page head, the navigation and the path dialog */
     .gs-nx { display:inline-block; font-size:var(--fs-caption); line-height:1; padding:3px 5px; background:var(--accent); color:var(--bg); font-weight:600; letter-spacing:.06em; text-transform:uppercase; white-space:nowrap; }
     .gs-nx.done { background:var(--line2); color:var(--tx); }
     .hdr-next .txt { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -84,6 +84,15 @@
   <script src="/static/htmx.min.js"></script>
 </head>
 <body class="min-h-screen">
+{# the one sentence a browser without JavaScript gets: the pickers, the tenant cookie and the tree
+   states run on it, and the pages stayed silently empty without it #}
+<noscript><div style="background:#d4a017;color:#000;padding:10px 16px;font-weight:500;">Gateshift needs JavaScript. Enable it for this site, the pages stay empty without it.</div></noscript>
+{% if demo_mode %}
+{# the live demo's seat banner: fixed at the bottom, so the
+   navigation's full-height layout stays as it is, the body gets the room below #}
+<style>.app{padding-bottom:44px}#ws-nav{padding-bottom:44px}#toast-container{bottom:60px!important}</style>
+<div id="gs-demo-banner" role="note" style="position:fixed;left:0;right:0;bottom:0;z-index:60;background:var(--surface);border-top:1px solid var(--line2);color:var(--tx2);padding:10px 16px;font-size:var(--fs-small);">{{ demo_banner }} <a href="https://gateshift.org/install" style="color:var(--accent);text-decoration:underline;">Install Gateshift</a> and connect real firewalls for full functionality.</div>
+{% endif %}
 {# the symbol sprite: the check and the arrow of the navigation's gutter and the path dialog (D13) #}
 <svg width="0" height="0" style="position:absolute;" aria-hidden="true" focusable="false"><symbol id="gs-ic-check" viewBox="0 0 16 16"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></symbol><symbol id="gs-ic-arrow" viewBox="0 0 16 16"><path d="M2.5 8h10M8 3.5 12.5 8 8 12.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square"/></symbol><symbol id="gs-brand-mark" viewBox="12.644 1.055 38.712 62.945"><path d="M28.127 1.055 L34.919 2.748 L19.647 64 L16.040 64 L12.644 63.153 Z"/><path d="M35.873 1.055 L29.081 2.748 L44.353 64 L47.960 64 L51.356 63.153 Z"/></symbol></svg>
   {# Token defaults take over: bg/text/font come from tokens.css html,body rule.
@@ -184,7 +193,7 @@
        style="display:inline-flex;align-items:center;text-decoration:none;">
       <span class="brand">g<svg class="brand-a" aria-hidden="true"><use href="#gs-brand-mark"/></svg>teshift</span>
       <span class="brand-rule" aria-hidden="true"></span>
-      <span class="brand-claim">The firewall<br>migration tool</span>
+      <span class="brand-claim">Migrate &amp; optimize<br>firewalls</span>
     </a>
 
     {# Manager-View: identity crumb in the top bar (parallel to the /rules source crumb) -
@@ -526,7 +535,7 @@
       if (o && o.dataset.tenant) gsSetTenant(o.dataset.tenant);
       showNavOverlay(); window.location.href = sel.value;
     }
-    // the page head's next sentence lights the navigation entry it points to (docs/UI_USABILITY_PLAN.md, D14)
+    // the page head's next sentence lights the navigation entry it points to
     function wsNavGlow(id, on) {
       var b = id ? document.getElementById(id) : null; var li = b ? b.closest('li') : null;
       if (li) li.classList.toggle('ws-glow', !!on);
@@ -769,7 +778,7 @@
       var btn = form.querySelector('button');
       if (btn) btn.disabled = true;
       // FIRST import: nothing on file to replace or keep - no dialog,
-      // straight to the import (matrix finding M-1).
+      // straight to the import.
       if (hasData === false) {
         _setOverlay(true, busyLabel || 'Importing…');
         form.dataset.confirmed = '1';
@@ -1074,7 +1083,7 @@
     <div class="abx" role="dialog" aria-label="About Gateshift">
       <p style="color:var(--tx);font-size:var(--fs-title);font-weight:600;margin:0 0 2px;">
         g<svg viewBox="12.644 1.055 38.712 62.945" aria-hidden="true" style="width:0.5em;height:0.78em;display:inline-block;fill:var(--accent);margin:0 0.02em;vertical-align:-0.04em;"><path d="M28.127 1.055 L34.919 2.748 L19.647 64 L16.040 64 L12.644 63.153 Z"/><path d="M35.873 1.055 L29.081 2.748 L44.353 64 L47.960 64 L51.356 63.153 Z"/></svg>teshift
-        <span style="color:var(--tx3);font-weight:400;">- the firewall migration tool</span>
+        <span style="color:var(--tx3);font-weight:400;">&middot; migrate &amp; optimize firewalls</span>
       </p>
       <p class="ab-row" style="color:var(--tx);">
         Version {{ app_version }} &middot; {{ app_edition }}

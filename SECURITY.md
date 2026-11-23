@@ -1,7 +1,7 @@
 # Security Policy
 
 Gateshift stores credentials for your firewalls and writes configuration to
-connected devices. Security reports get looked at with corresponding
+connected Devices. Security reports get looked at with corresponding
 seriousness.
 
 ## Reporting a vulnerability
@@ -24,7 +24,7 @@ release rather than as backports.
 | Version | Supported |
 |---|---|
 | latest release | yes |
-| anything older | no - upgrade |
+| anything older | no, upgrade |
 
 ## Scope notes for operators
 
@@ -35,10 +35,22 @@ These properties matter more than any single patch:
   over a management network you trust, or restrict it with `WEBUI_BIND` in
   `.env`. Exposing it to untrusted networks is a deployment decision, not a
   product property (docs/install.md, Network exposure).
-- Set `GATESHIFT_SECRET_KEY`. It encrypts stored device credentials
-  (API keys, Gaia passwords, VPN pre-shared keys) at rest. Without it, those
-  sit in the database unencrypted. The key itself lives in the environment,
-  not the database: protect the `.env` file accordingly.
+- The automation API at `/api/v1` and the MCP endpoint at `/mcp`
+  authenticate with bearer tokens, never with the login session. A signed-in
+  user creates a token on the Automation page and sees it once, Gateshift
+  keeps only its hash. A token carries a scope: `read` for the reads,
+  `project` to curate a project and build it, `full` to also push, publish
+  and discard and to manage Devices, projects and the tunnels' keys. A token
+  may expire and may be bound to one tenant, which is then the only tenant
+  it sees. Give an AI client a `project` token and revoke a token nobody
+  uses any more (docs/API.md, docs/MCP.md).
+- Set `GATESHIFT_SECRET_KEY`. It encrypts the stored Device credentials
+  (API keys and passwords), the VPN pre-shared keys and the private keys of
+  VPN identity certificates at rest. Without it, Device credentials sit in
+  the database in clear text, and pre-shared keys and certificate keys
+  cannot be stored at all. A value that is set but no Fernet key stops the
+  start. The key itself lives in the environment, not the database: protect
+  the `.env` file accordingly.
 - **Connections to firewalls do not verify the management TLS certificate.**
   Firewall management interfaces almost always ship a self-signed certificate,
   so Gateshift connects without certificate validation, which means it does

@@ -5,8 +5,7 @@ import os
 
 from sqlalchemy import text
 
-# The schema comes from /sql/init, baked into this image (docker-compose.yml,
-# docs/DEVICE_IDENTITY_PLAN.md D7). A second loader that read a
+# The schema comes from /sql/init, baked into this image (docker-compose.yml). A second loader that read a
 # sql/fw_flows.sql file which did not exist on disk was removed in phase 4;
 # it had no caller.
 

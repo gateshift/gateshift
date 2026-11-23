@@ -25,8 +25,8 @@ USE gateshift;
 -- Firewall-only Layers (CP refuses them without App-Control etc.);
 -- everything else passes through as-is.
 --
--- See feedback_rule_identity_hash memory: override tables key on rule_hash,
--- not the legacy (device_host, action, proto, dst_port) natkey.
+-- Override tables key on rule_hash, not the legacy (device_host, action,
+-- proto, dst_port) natkey.
 
 CREATE TABLE IF NOT EXISTS fw_rule_track_overrides (
   project_id  INT                   NOT NULL DEFAULT 0,

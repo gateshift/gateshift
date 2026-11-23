@@ -19,7 +19,7 @@ import json as _json
 
 from sqlalchemy import text
 
-import hitcounts as _hits   # the box's own rule counters on the scope rows (docs/HIT_COUNTS_PLAN.md)
+import hitcounts as _hits   # the box's own rule counters on the scope rows
 from scopeidentity import host_name_for, plan_scope_sync, vendor_id_of
 
 
@@ -29,7 +29,7 @@ def persist_policy_scope(conn, sdid: int, ts, objs: list, rules: list, nats: lis
     in fw_imported_objects and, for addresses and services, in the unified
     object tables; rules, NAT, policy routing and decryption rules in their
     tables with their hashes; tags in fw_tags."""
-    from main import (_upsert_object_tables, _write_nat_hash, _write_pbf_hash,
+    from main import (_reappend_nat_additions, _upsert_object_tables, _write_nat_hash, _write_pbf_hash,
                       _write_ssl_hash)
     if objs:
         conn.execute(text(
@@ -100,6 +100,7 @@ def persist_policy_scope(conn, sdid: int, ts, objs: list, rules: list, nats: lis
              **_hits.params(n)}
             for n in nats])
         _write_nat_hash(conn, "n.device_id = :did", {"did": sdid})
+    _reappend_nat_additions(conn, sdid)     # the additions follow the facts (D12)
     if pbfs:
         conn.execute(text("""
             INSERT INTO fw_pbf_rules
@@ -240,8 +241,7 @@ def sync_scope_devices(conn, manager_id: int, platform: str, scopes: list, *, cl
     of a prior import when the vendor id (or, for a row that never learned
     its id, the name) matches, a new row otherwise. Scopes the manager no
     longer has are retired. A kept Device's content tables are cleared so the
-    caller writes the scope fresh; its curation stays (scopeidentity,
-    docs/DEVICE_IDENTITY_PLAN.md phase 3). Returns the counts."""
+    caller writes the scope fresh; its curation stays (scopeidentity). Returns the counts."""
     existing = [tuple(r) for r in conn.execute(text(
         "SELECT scope_device_id, scope_type, scope_name, vendor_id FROM fw_scopes "
         "WHERE manager_device_id = :m"), {"m": manager_id}).fetchall()]
@@ -270,7 +270,9 @@ def sync_scope_devices(conn, manager_id: int, platform: str, scopes: list, *, cl
             {"n": sc["name"], "v": learned, "m": manager_id, "s": sid})
         if clear_content:        # a collect keeps the instance's imported content (instancesource)
             for tbl in SCOPE_CONTENT_TABLES:
-                conn.execute(text(f"DELETE FROM {tbl} WHERE device_id = :id"), {"id": sid})
+                # the project's NAT additions ride the import
+                clause = " AND project_id IS NULL" if tbl == "fw_nat_rules" else ""
+                conn.execute(text(f"DELETE FROM {tbl} WHERE device_id = :id{clause}"), {"id": sid})
             conn.execute(text("DELETE FROM fw_tags WHERE device_id = :id AND source = 'import'"),
                          {"id": sid})
         sc["_sdid"] = sid

@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BUSL-1.1
 --
 -- The senders of the rows in fw_flows: the ONE place a sender string is
--- resolved to a Device (docs/DEVICE_IDENTITY_PLAN.md, phase 4, D1/D2/D9).
+-- resolved to a Device.
 --
 -- A syslog sender is what the receiver observed, three fields together
 -- (decision D9): the hostname in the syslog header, the address the packet

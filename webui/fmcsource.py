@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
-"""Cisco Secure Firewall Management Center as a migration source
-(docs/FMC_SOURCE_PLAN.md). The Community Edition reads the whole manager
+"""Cisco Secure Firewall Management Center as a migration source. The Community Edition reads the whole manager
 and fans it into scope Devices through the scope rails (scopepersist):
 
 - a `domain` scope per domain (role root for Global, policy below) holding
@@ -36,7 +35,7 @@ import re
 from deploy import _fmc_common as _fmc
 from deploy import _ftd_common as _ftd
 
-SPEC_DATE = "2026-11-04"            # the documentation the reader follows (section 10 of the memo)
+SPEC_DATE = "2026-11-04"            # the vendor documentation the reader follows
 SCOPE_ROLE = {"domain": "policy", "access-policy": "rulebase", "device": "network"}
 _ANY_NAMES = {"any", "any-ipv4", "any-ipv6"}
 _ACTIONS = {"ALLOW": "allow", "TRUST": "allow", "BLOCK": "deny", "BLOCK_INTERACTIVE": "deny",
@@ -640,7 +639,7 @@ class PolicyReader:
                                          tolerate=(404, 400)):
                 bp = s.get("basePolicy") if isinstance(s, dict) else None
                 if not (isinstance(bp, dict) and bp.get("id")) and isinstance(s, dict) and s.get("id"):
-                    # the list carries only ids (lab 2026-11-04), the item names the base
+                    # the list carries only ids, the item names the base
                     item = self.client.get(self.client.cfg(self.uid, f"/policy/accesspolicies/{pid}/inheritancesettings/{s['id']}"),
                                            tolerate=(404, 400)) or {}
                     bp = item.get("basePolicy")
@@ -681,7 +680,7 @@ class PolicyReader:
             if r:
                 rules.append(r)
                 seq += 1
-        # The policy's own list IS the effective rulebase (lab 2026-11-04): the base chain's
+        # The policy's own list IS the effective rulebase: the base chain's
         # rules sit in it in evaluation order (base Mandatory, own Mandatory, own Default,
         # base Default, over every level), each rule naming its owner in metadata.accessPolicy.
         own = str(pol.get("id") or "")
@@ -780,7 +779,7 @@ def fill_interface_nat(nats: list[dict], net: dict | None) -> None:
     interface's IPv4 as the `iface|ip` literal the PAN-OS and FortiOS imports
     write, when the destination zone holds exactly one addressed interface of
     the device. The Check Point renderer materialises the address from it,
-    PAN-OS and FortiOS keep the interface form (lab 2026-11-04, fmc2cp)."""
+    PAN-OS and FortiOS keep the interface form."""
     by_zone: dict[str, list[tuple[str, str]]] = {}
     for i in (net or {}).get("interfaces") or []:
         v4 = [ip for ip in (i.get("ips") or []) if ":" not in ip]
@@ -808,7 +807,7 @@ def read_device_network(client, uid: str, dev: dict, d: Dictionary, drops: Drops
 
     def _zone_of(e: dict) -> str | None:
         """The interface's zone: the record's securityZone carries only id and type
-        (lab 2026-11-04), the zone's interfaces[] list the record ids."""
+        while the zone's interfaces[] list the record ids."""
         sz = e.get("securityZone") if isinstance(e.get("securityZone"), dict) else {}
         return (_name(sz) or zone_by_id.get(str(sz.get("id") or ""))
                 or d.zone_of_iface_id.get(str(e.get("id") or "")) or None)
@@ -925,8 +924,7 @@ def read_device_network(client, uid: str, dev: dict, d: Dictionary, drops: Drops
 
 def read_hit_counts(client, uid: str, policy_id: str, device_id: str, prefilter_id: str | None = None):
     """The Center's hit counts of one access policy, and of its prefilter
-    policy, for one device (docs/HIT_COUNTS_PLAN.md, D1, D4, D5, the
-    reference): hitCount, firstHitTimeStamp, lastHitTimeStamp and
+    policy, for one device: hitCount, firstHitTimeStamp, lastHitTimeStamp and
     lastFetchTimeStamp per rule reference. The first GET for a device fetches
     from the device by the Center's own rule, later GETs answer the stored
     values; nothing here orders a fetch (PUT) or a reset (DELETE), D9."""
@@ -978,9 +976,9 @@ def discover_fmc_scopes(client) -> dict:
     skipped: list[str] = []
     seen_devices: set[str] = set()
     cfg = client.cfg
-    # An assignment is listed in the domain of its POLICY, not of its device (lab
-    # 2026-11-04: a Global policy assigned to a child-domain device shows in Global's
-    # list only), so the map is built once over every domain.
+    # An assignment is listed in the domain of its POLICY, not of its device (a
+    # Global policy assigned to a child-domain device shows in Global's list
+    # only), so the map is built once over every domain.
     assignments: dict = {}
     for dom in domains:
         for a in client.get_all(cfg(dom["uuid"], "/assignment/policyassignments"), tolerate=(404,)):
@@ -1027,7 +1025,7 @@ def discover_fmc_scopes(client) -> dict:
                 refs |= d.closure(r["sources"] + r["destinations"] + r["services"] + ([r["schedule"]] if r.get("schedule") else []))
             members = [t.get("name") for t in assignments.get(("AccessPolicy", p["id"]), []) if t.get("name")]
             dom_scope["_referenced"] |= refs
-            # Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D3, D5, D10): the policy's
+            # Hit counts from the box: the policy's
             # counters for its one device; several devices or none declare, a failed read too
             import hitcounts as _hits
             _dev_id, _why = hits_device_of(assignments.get(("AccessPolicy", p["id"]), []), pair_primary)
@@ -1155,7 +1153,7 @@ def import_fmc_source(device: dict) -> dict:
                     "VALUES (:did, :ts, :field, :cnt, :samples)"),
                     [{"did": sdid, "ts": ts, "field": f[:64], "cnt": len(names), "samples": json.dumps(names[:5])}
                      for f, names in drops.items()])
-            # the declaration of a policy scope whose counters were not read (docs/HIT_COUNTS_PLAN.md, D8)
+            # the declaration of a policy scope whose counters were not read
             import hitcounts as _hits
             _box_row = _hits.declaration_params(sdid, ts, sc.get("box_declared"), sc["rules"])
             if _box_row:

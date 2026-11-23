@@ -82,7 +82,7 @@ def find_unused_objects(conn, device_id, project_id=None):
         so refmodel can't see an object used only in a VPN domain. Services unaffected."""
     platform = conn.execute(text(
         "SELECT platform FROM fw_devices WHERE id = :d"), {"d": device_id}).scalar()
-    # the project view (docs/PROJECT_VIEW_DESIGN.md): what the project deleted
+    # the project view: what the project deleted
     # is handled already - neither a candidate nor a referrer
     _excl = None
     if project_id:

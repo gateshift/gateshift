@@ -4,13 +4,11 @@
 """Vendor-specific schemas for `fw_nat_rules.properties`.
 
 Single source of truth for the keys/types/UI labels of NAT-rule properties
-per target platform. Mirrors `webui/zone_schemas.py` - see
-[[feedback_vendor_properties_schema_driven]].
+per target platform. Mirrors `webui/zone_schemas.py`.
 
 Phase C ships an empty SCHEMA per platform so the endpoints can already
 be schema-driven; Phase D fills in the real vendor-specific slots
-(pa_bi_directional, cp_method, forti_fixedport, etc.) - see
-[[project_nat_full_scope_plan]] decisions table.
+(pa_bi_directional, cp_method, forti_fixedport, etc.).
 
 Catalog-typed fields (if any in Phase D) resolve their options from
 `fw_target_discover` at render-time via the configured `catalog_kind`.

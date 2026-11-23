@@ -13,8 +13,7 @@ DELETE FROM fw_rule_candidates WHERE generated_at < @run_ts;
 --
 -- Quality-filter semantic preserved via hit_count_quality_passed counter
 -- (set per-row at ingest time by the same CASE predicate the original
--- WHERE clause used). api_import bypass via seen_api_import per
--- project_qf_api_import_bypass.
+-- WHERE clause used). api_import bypass via seen_api_import.
 --
 -- days_back is now obsolete (all-time aggregate state by design);
 -- the @since_ts / @until_ts engine bindings are accepted but unused.

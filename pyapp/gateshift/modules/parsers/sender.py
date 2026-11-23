@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
 """The sender of a syslog line: what the receiver can observe about who sent
-it (docs/DEVICE_IDENTITY_PLAN.md, phase 4, decision D9).
+it.
 
 A sender is three observed fields together: the hostname the box writes
 into the syslog header, the address the packet came from, and the vendor's

@@ -21,8 +21,8 @@ USE gateshift;
 -- backfilled by the column-add migration behave identically to PA's
 -- implicit defaults.
 --
--- See feedback_rule_identity_hash memory: override tables key on rule_hash,
--- not the legacy (device_host, action, proto, dst_port) natkey.
+-- Override tables key on rule_hash, not the legacy (device_host, action,
+-- proto, dst_port) natkey.
 
 -- log_forwarding is the PA-specific column; nullable so Forti-only override
 -- rows (log_traffic / capture_packet set, no PA profile) can exist. Same

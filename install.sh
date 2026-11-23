@@ -5,8 +5,8 @@
 # Gateshift installer: checks the prerequisites, generates a .env with
 # strong random credentials (never overwriting an existing one), writes a
 # self-signed TLS certificate (never overwriting an existing one) and starts
-# the stack. Safe to run again - an existing installation is simply
-# restarted with its current settings.
+# the stack. Safe to run again: an existing installation keeps its .env,
+# its certificate and its data.
 #
 #   ./install.sh                UI on https://<this server's address>/ - every
 #                               address, HTTPS on 443, HTTP on 80 redirects
@@ -53,8 +53,8 @@ command -v openssl >/dev/null 2>&1 \
 if command -v ss >/dev/null 2>&1; then
     for p in 443 80; do
         if ss -tln 2>/dev/null | grep -qE ":$p "; then
-            echo "WARNING: something on this host already listens on TCP $p;"
-            echo "         the web container will fail to start until it is freed."
+            echo "WARNING: something on this host already listens on TCP $p."
+            echo "         The web container will fail to start until it is freed."
         fi
     done
 fi
@@ -63,12 +63,21 @@ fi
 # there makes the stack fail late, so say it early. Warning only - the port
 # may legitimately be free by the time the container starts.
 if command -v ss >/dev/null 2>&1 && ss -uln 2>/dev/null | grep -q ':514 '; then
-    echo "WARNING: something on this host already listens on UDP 514;"
-    echo "         the syslog container will fail to start until it is freed."
+    echo "WARNING: something on this host already listens on UDP 514."
+    echo "         The syslog container will fail to start until it is freed."
 fi
 
 if [ -f .env ]; then
     echo "keeping existing .env"
+    # A set but invalid key stops the web server at its start (since 0.9.6):
+    # say it here instead of leaving a container that restarts in a loop.
+    KEY="$(grep -E '^GATESHIFT_SECRET_KEY=' .env | tail -n 1 | cut -d= -f2- | tr -d '"'"'"' ')"
+    if [ -n "$KEY" ] && { [ "${#KEY}" -ne 44 ] || \
+            [ "$(printf '%s' "$KEY" | tr -- '-_' '+/' | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; }; then
+        fail "GATESHIFT_SECRET_KEY in .env is not a Fernet key (44 characters, 32 random
+       bytes as url-safe base64), and Gateshift does not start with it. Replace it
+       with the output of: openssl rand 32 | base64 | tr '+/' '-_'"
+    fi
 else
     # A database volume from a previous installation holds the credentials
     # of the .env it was first started with - generating a fresh .env next
@@ -96,10 +105,15 @@ else
 fi
 
 # --build: an image from an earlier installation of this directory would
-# otherwise be reused and the freshly cloned code never run (found on the
-# 0.9.3 re-install test, 2026-10-07). With nothing changed the build is a
-# cache hit and costs seconds.
+# otherwise be reused and the freshly cloned code never run. With nothing
+# changed the build is a cache hit and costs seconds.
 docker compose up -d --build
+
+# The web server reads the certificate when it starts, and up -d leaves an
+# unchanged container running: a renewed certificate needs the restart.
+if [ "$RENEW_CERT" -eq 1 ]; then
+    docker compose restart webapp
+fi
 
 ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "$ADDR" ] || ADDR="<this server's address>"
@@ -108,3 +122,4 @@ echo "Gateshift is starting: the first boot builds images and initializes"
 echo "the database, which takes a few minutes."
 echo "UI: https://$ADDR/   (the browser warns once about the self-signed"
 echo "    certificate. The first visit sets the admin password)"
+echo "Back up .env: its GATESHIFT_SECRET_KEY decrypts the stored credentials."

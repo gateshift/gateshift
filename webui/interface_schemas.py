@@ -5,8 +5,7 @@
 
 Single source of truth for the keys/types/UI labels of per-interface
 vendor knobs that don't fit into a top-level column. Mirrors
-`webui/nat_schemas.py` and `webui/zone_schemas.py` - see
-[[feedback_vendor_properties_schema_driven]].
+`webui/nat_schemas.py` and `webui/zone_schemas.py`.
 
 The infrastructure (properties JSON column, schema_for / coerce_value
 helpers, JSON_MERGE_PATCH in /interfaces/<id>/update, toggleIfaceProperty

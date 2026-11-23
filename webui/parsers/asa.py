@@ -308,7 +308,7 @@ def _parse_network_object(children: list[str], name: str,
             value = {"type": "ip-netmask",
                      "value": f"{toks[1]}/{128 if _looks_like_ip6(toks[1]) else 32}"}
         elif kw == "subnet" and len(toks) == 2 and _prefix6(toks[1]):
-            # the IPv6 prefix form: one token (docs/IPV6_PLAN.md, phase 4)
+            # the IPv6 prefix form: one token
             p6 = _prefix6(toks[1])
             value = {"type": "ip-netmask", "value": f"{p6[0]}/{p6[1]}"}
         elif kw == "subnet" and len(toks) >= 3:
@@ -323,7 +323,7 @@ def _parse_network_object(children: list[str], name: str,
             # `fqdn [v4|v6] <name>`: an address object every target resolves
             # itself (PAN-OS fqdn, FortiOS fqdn, Check Point domain). Left
             # out, the rules naming it referenced nothing and the build
-            # blocked (matrix 0.9.4 rerun 2026-10-11, asa2fgt: 41 rules).
+            # blocked.
             value = {"type": "fqdn", "value": toks[-1]}
             if len(toks) >= 3 and toks[1].lower() == "v6":
                 description = (description + " (ASA: resolved to IPv6 only)").strip()
@@ -673,7 +673,7 @@ def _looks_like_ip(tok: str) -> bool:
 
 
 def _looks_like_ip6(tok: str) -> bool:
-    """A bare IPv6 address (docs/IPV6_PLAN.md, phase 4)."""
+    """A bare IPv6 address."""
     if ":" not in (tok or ""):
         return False
     try:
@@ -716,7 +716,7 @@ def _read_addr_spec(toks: list[str], pos: int, name_to_type: dict,
     if t == "any":
         return ["any"], pos + 1, []
     if t in ("any4", "any6"):
-        # one family's catch-all (D5 of docs/IPV6_PLAN.md): ASA 9.x reads
+        # one family's catch-all: ASA 9.x reads
         # `any` as both families, `any4` and `any6` as one
         return [t], pos + 1, []
     if t == "host" and pos + 1 < len(toks):
@@ -751,7 +751,7 @@ def _read_addr_spec(toks: list[str], pos: int, name_to_type: dict,
         # `interface <nameif>` matches the interface's OWN address: an
         # inline host of that address (parse_rules hands the map in). A
         # nameif without an address stays the declared `iface:` reference,
-        # which the build blocks (matrix 0.9.4 rerun 2026-10-11, asa2fgt).
+        # which the build blocks.
         nameif = toks[pos + 1]
         ip = (iface_ips or {}).get(nameif)
         if ip:
@@ -1200,7 +1200,7 @@ def parse_interfaces(text: str) -> dict:
                     if prefix is not None:
                         ips.append(f"{ip}/{prefix}")
 
-        # `ipv6 address <prefix>/<len> [eui-64]` (docs/IPV6_PLAN.md, phase 4);
+        # `ipv6 address <prefix>/<len> [eui-64]`;
         # `ipv6 enable`, link-local and autoconfig carry no address to migrate
         for c in children:
             ctoks = c.split()
@@ -1353,7 +1353,7 @@ def _parse_twice_nat_line(toks: list[str], drops: dict) -> dict | None:
     if toks[i].isdigit():
         i += 1
 
-    # The plan's grammar requires `source`. If something else, treat as
+    # The grammar requires `source`. If something else, treat as
     # unknown/legacy.
     if i >= len(toks) or toks[i] != "source":
         drops.setdefault("legacy_dialect", []).append(" ".join(toks[:4]))

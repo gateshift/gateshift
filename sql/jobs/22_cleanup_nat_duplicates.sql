@@ -16,7 +16,7 @@ ALTER TABLE tmp_nat_covered ADD INDEX idx (device_id, proto(16), dst_port_from, 
 
 -- Remove NatCache-miss candidates: internal dst_ip without dst_nat,
 -- where a correct candidate with dst_nat=dst_ip already exists. Matched
--- by the Device (docs/DEVICE_IDENTITY_PLAN.md, phase 5), not by its name.
+-- by the Device, not by its name.
 DELETE c FROM fw_rule_candidates c
 JOIN tmp_nat_covered t
   ON t.device_id    <=> c.device_id

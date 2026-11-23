@@ -7,7 +7,7 @@ USE gateshift;
 --
 -- A snapshot freezes a project's decisions: the manual rows of the rule
 -- override tables plus its TP-layer config and deploy settings, as JSON
--- (payload, see docs/CURATION_OWNERSHIP_DESIGN.md section 5.6). Auto rows
+-- (payload, see the curation ownership design section 5.6). Auto rows
 -- are not part of it - generate re-derives them. Secrets never are: the
 -- VPN secret and certificate tables are keyed on the device.
 -- kind 'original' is the empty decision set every project starts from; it

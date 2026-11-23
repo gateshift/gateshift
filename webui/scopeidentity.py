@@ -8,7 +8,7 @@ new rows, so the auto-increment id churned on every import and everything
 keyed on it (the VPN secrets, the deploy settings, the project exclusions,
 and through the rule hashes the overrides) was orphaned each time. A scope
 Device is now matched on the id the vendor gives the scope and kept across
-imports (docs/DEVICE_IDENTITY_PLAN.md, phase 3, decision D3).
+imports.
 
 The vendor ids: a FortiManager ADOM's uuid (or oid), a package's oid, a
 managed device's serial number; a Check Point domain's, package's and

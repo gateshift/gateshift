@@ -6,7 +6,7 @@ they attach to, read from a subscription (ARM REST) or from an uploaded
 bundle of the same JSON, parsed into the shapes the Gateshift import and
 collect handlers store.
 
-Model (docs/CLOUD_SOURCES_PLAN.md, D2/D3): one device row = one
+Model: one device row = one
 subscription (optionally filtered to resource groups or VNets). Zones are
 topological: every subnet is a zone and a pseudo-interface without an
 address. Application security groups, IP groups and explicit prefix lists
@@ -47,8 +47,7 @@ LOGIN = "https://login.microsoftonline.com"
 # rule collection groups under `ruleCollectionGroups` (read per policy).
 # A firewall in a Virtual WAN hub (SKU AZFW_Hub) lists like a VNet firewall
 # and is read through its policy the same way; its rules are marked with
-# the hub firewall's name. Verified live 2026-10-09 against a secured hub
-# in the lab subscription (`_seed_estate.py` with GS_AZURE_HUB=1).
+# the hub firewall's name. Verified live against a secured hub.
 BUNDLE_TYPES = ("virtualNetworks", "networkSecurityGroups", "applicationSecurityGroups",
                 "networkInterfaces", "routeTables", "ipGroups", "firewallPolicies", "azureFirewalls")
 
@@ -181,7 +180,7 @@ def bundle_for_device(device: dict) -> dict:
 # ── Parse ──────────────────────────────────────────────────────────────
 
 def _cidr(value: str):
-    """A prefix of either family (docs/IPV6_PLAN.md, phase 4), or None."""
+    """A prefix of either family, or None."""
     try:
         return ipaddress.ip_network(value, strict=False)
     except Exception:

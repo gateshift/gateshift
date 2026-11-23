@@ -10,8 +10,7 @@ driver subclasses here at startup (when a valid licence loads it, see the lifesp
 `import enterprise` hook). The CE keeps only this thin registry + push-time
 resolution + a gate for manager configs whose handler isn't loaded.
 
-Design: config-driven, mirroring the CP manager-vs-gateway split. See
-[[manager-deploy-scope]] + [[ce-ee-split-plan]].
+Design: config-driven, mirroring the CP manager-vs-gateway split.
 """
 from __future__ import annotations
 
@@ -102,7 +101,7 @@ _MANAGER_CONFIG_BUILDERS: dict[str, object] = {}
 # Panorama and FortiManager forms). The cloud package registers builders the
 # same way for its account forms, and those must not switch the manager UI
 # on: the CE showed "Check Point (SMS / MDS)" and the managed-target
-# fieldsets because of them (0.9.4 matrix, 2026-10-18).
+# fieldsets because of them.
 _MANAGER_PLATFORMS: set[str] = set()
 
 

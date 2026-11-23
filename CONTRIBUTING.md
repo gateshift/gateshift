@@ -11,11 +11,11 @@ fields and change response schemas between firmware releases, and no lab
 covers every version of every supported vendor. A good report contains:
 
 1. the **vendor and exact firmware/management version**,
-2. the **verbatim** error or drop-report line, and
+2. the **verbatim** error or push report line, and
 3. what the documentation led you to expect instead.
 
 A bug is when Gateshift does not do what the documentation says. Deliberate
-boundaries live in `KNOWN_LIMITATIONS.md` - anything beyond those is a
+boundaries live in `KNOWN_LIMITATIONS.md`, anything beyond those is a
 feature request.
 
 **Feature requests are welcome from anyone.** They are read and labeled,

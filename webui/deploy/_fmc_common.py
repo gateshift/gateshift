@@ -3,8 +3,7 @@
 """Cisco Secure Firewall Management Center: the REST transport.
 
 One client for the on-premises Management Center and for the
-cloud-delivered one in Security Cloud Control (docs/FMC_SOURCE_PLAN.md,
-D3). The two differ in authentication and in the path prefix, nothing
+cloud-delivered one in Security Cloud Control. The two differ in authentication and in the path prefix, nothing
 else: the configuration API is the same.
 
 - On-premises: `POST /api/fmc_platform/v1/auth/generatetoken` with HTTP
@@ -302,7 +301,7 @@ class FmcClient:
 def fmc_client_for(device: dict) -> FmcClient:
     """The client of a registered Management Center row: `config.fmc`
     carries the username (on-premises) or the cloud region, the secret
-    sits in api_key, the address in mgmt_ip (docs/FMC_SOURCE_PLAN.md D2)."""
+    sits in api_key, the address in mgmt_ip."""
     from deploy.base import management_host
     try:
         cfg = json.loads(device.get("config") or "{}").get("fmc") or {}

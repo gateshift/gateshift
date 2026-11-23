@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "gateshift",
-      "version": "0.9.0"
+      "version": "0.9.6"
     },
     "tools": [
       {
@@ -18,8 +18,8 @@
     {
       "type": "library",
       "name": "annotated-doc",
-      "version": "0.0.5",
-      "purl": "pkg:pypi/annotated-doc@0.0.5",
+      "version": "0.0.7",
+      "purl": "pkg:pypi/annotated-doc@0.0.7",
       "licenses": [
         {
           "license": {
@@ -44,8 +44,21 @@
     {
       "type": "library",
       "name": "anyio",
-      "version": "4.15.1",
-      "purl": "pkg:pypi/anyio@4.15.1",
+      "version": "4.16.0",
+      "purl": "pkg:pypi/anyio@4.16.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "attrs",
+      "version": "26.1.0",
+      "purl": "pkg:pypi/attrs@26.1.0",
       "licenses": [
         {
           "license": {
@@ -57,8 +70,8 @@
     {
       "type": "library",
       "name": "certifi",
-      "version": "2026.10.19",
-      "purl": "pkg:pypi/certifi@2026.10.19",
+      "version": "2026.10.23",
+      "purl": "pkg:pypi/certifi@2026.10.23",
       "licenses": [
         {
           "license": {
@@ -96,8 +109,8 @@
     {
       "type": "library",
       "name": "click",
-      "version": "8.5.0",
-      "purl": "pkg:pypi/click@8.5.0",
+      "version": "8.5.1",
+      "purl": "pkg:pypi/click@8.5.1",
       "licenses": [
         {
           "license": {
@@ -135,8 +148,8 @@
     {
       "type": "library",
       "name": "fastapi",
-      "version": "0.161.0",
-      "purl": "pkg:pypi/fastapi@0.161.0",
+      "version": "0.165.0",
+      "purl": "pkg:pypi/fastapi@0.165.0",
       "licenses": [
         {
           "license": {
@@ -160,6 +173,19 @@
     },
     {
       "type": "library",
+      "name": "httpcore2",
+      "version": "2.16.2",
+      "purl": "pkg:pypi/httpcore2@2.16.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "httptools",
       "version": "0.9.0",
       "purl": "pkg:pypi/httptools@0.9.0",
@@ -167,6 +193,19 @@
         {
           "license": {
             "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "httpx2",
+      "version": "2.16.2",
+      "purl": "pkg:pypi/httpx2@2.16.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
           }
         }
       ]
@@ -199,6 +238,32 @@
     },
     {
       "type": "library",
+      "name": "jsonschema",
+      "version": "4.26.0",
+      "purl": "pkg:pypi/jsonschema@4.26.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "purl": "pkg:pypi/jsonschema-specifications@2025.9.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "MarkupSafe",
       "version": "3.0.4",
       "purl": "pkg:pypi/markupsafe@3.0.4",
@@ -212,9 +277,35 @@
     },
     {
       "type": "library",
+      "name": "mcp",
+      "version": "2.3.0",
+      "purl": "pkg:pypi/mcp@2.3.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "mcp-types",
+      "version": "2.3.0",
+      "purl": "pkg:pypi/mcp-types@2.3.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "opentelemetry-api",
-      "version": "1.45.1",
-      "purl": "pkg:pypi/opentelemetry-api@1.45.1",
+      "version": "1.45.2",
+      "purl": "pkg:pypi/opentelemetry-api@1.45.2",
       "licenses": [
         {
           "license": {
@@ -239,8 +330,8 @@
     {
       "type": "library",
       "name": "pydantic",
-      "version": "2.14.1",
-      "purl": "pkg:pypi/pydantic@2.14.1",
+      "version": "2.14.4",
+      "purl": "pkg:pypi/pydantic@2.14.4",
       "licenses": [
         {
           "license": {
@@ -252,8 +343,21 @@
     {
       "type": "library",
       "name": "pydantic_core",
-      "version": "2.50.1",
-      "purl": "pkg:pypi/pydantic_core@2.50.1",
+      "version": "2.50.5",
+      "purl": "pkg:pypi/pydantic_core@2.50.5",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "PyJWT",
+      "version": "2.15.1",
+      "purl": "pkg:pypi/pyjwt@2.15.1",
       "licenses": [
         {
           "license": {
@@ -265,8 +369,8 @@
     {
       "type": "library",
       "name": "PyMySQL",
-      "version": "1.2.3",
-      "purl": "pkg:pypi/pymysql@1.2.3",
+      "version": "1.2.4",
+      "purl": "pkg:pypi/pymysql@1.2.4",
       "licenses": [
         {
           "license": {
@@ -291,8 +395,8 @@
     {
       "type": "library",
       "name": "python-multipart",
-      "version": "0.0.32",
-      "purl": "pkg:pypi/python-multipart@0.0.32",
+      "version": "0.0.34",
+      "purl": "pkg:pypi/python-multipart@0.0.34",
       "licenses": [
         {
           "license": {
@@ -316,6 +420,19 @@
     },
     {
       "type": "library",
+      "name": "referencing",
+      "version": "0.37.0",
+      "purl": "pkg:pypi/referencing@0.37.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "requests",
       "version": "2.34.2",
       "purl": "pkg:pypi/requests@2.34.2",
@@ -329,9 +446,9 @@
     },
     {
       "type": "library",
-      "name": "SQLAlchemy",
-      "version": "2.1.6",
-      "purl": "pkg:pypi/sqlalchemy@2.1.6",
+      "name": "rpds-py",
+      "version": "2026.9.1",
+      "purl": "pkg:pypi/rpds-py@2026.9.1",
       "licenses": [
         {
           "license": {
@@ -342,9 +459,22 @@
     },
     {
       "type": "library",
-      "name": "starlette",
-      "version": "1.9.0",
-      "purl": "pkg:pypi/starlette@1.9.0",
+      "name": "SQLAlchemy",
+      "version": "2.1.9",
+      "purl": "pkg:pypi/sqlalchemy@2.1.9",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "sse-starlette",
+      "version": "3.7.0",
+      "purl": "pkg:pypi/sse-starlette@3.7.0",
       "licenses": [
         {
           "license": {
@@ -355,9 +485,35 @@
     },
     {
       "type": "library",
+      "name": "starlette",
+      "version": "1.10.0",
+      "purl": "pkg:pypi/starlette@1.10.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "truststore",
+      "version": "0.10.5",
+      "purl": "pkg:pypi/truststore@0.10.5",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "typing-inspection",
-      "version": "0.4.4",
-      "purl": "pkg:pypi/typing-inspection@0.4.4",
+      "version": "0.4.5",
+      "purl": "pkg:pypi/typing-inspection@0.4.5",
       "licenses": [
         {
           "license": {
@@ -434,8 +590,8 @@
     {
       "type": "library",
       "name": "websockets",
-      "version": "17.3",
-      "purl": "pkg:pypi/websockets@17.3",
+      "version": "17.4",
+      "purl": "pkg:pypi/websockets@17.4",
       "licenses": [
         {
           "license": {
@@ -471,6 +627,20 @@
         }
       ],
       "description": "webui/static/fonts/archivo-*.woff2 - license in fonts/Archivo-OFL.txt"
+    },
+    {
+      "type": "library",
+      "name": "Reddit Mono",
+      "version": "Google Fonts, 2026-08",
+      "purl": "pkg:generic/reddit-mono",
+      "licenses": [
+        {
+          "license": {
+            "name": "OFL-1.1"
+          }
+        }
+      ],
+      "description": "webui/static/fonts/redditmono-*.woff2 - license in fonts/RedditMono-OFL.txt"
     },
     {
       "type": "library",

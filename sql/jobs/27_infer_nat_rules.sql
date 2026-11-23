@@ -13,8 +13,7 @@
 --                   * private dst + inbound  from external interface → DNAT
 --                 The translated address is the external interface's IP.
 --
--- Rows are attributed by the Device's id the evidence carries (phase 5 of
--- docs/DEVICE_IDENTITY_PLAN.md), never by its name.
+-- Rows are attributed by the Device's id the evidence carries, never by its name.
 -- Source of truth is `fw_nat_evidence` - the ingest-maintained, NAT-faithful
 -- aggregate (one row per distinct flow shape; original + translated dst_port
 -- kept separate, zones in the key, private/public IP class precomputed).  This
@@ -31,8 +30,6 @@
 -- Rows written here carry `properties.inferred = true` and an
 -- `inference_path` tag so re-runs can distinguish them from
 -- config-imported NAT rules and rewrite only the inferred set.
---
--- Plan: project_nat_evidence_aggregate_active_plan (P3).
 -- ═══════════════════════════════════════════════════════════════════════════
 
 SET @nat_hit_threshold = 5;

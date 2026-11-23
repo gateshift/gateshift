@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1
-"""Set a new password for the UI's admin account (docs/ACCESS_DESIGN.md, D6).
+"""Set a new password for the UI's admin account.
 
 A forgotten password is never a data loss: run this inside the webapp
 container, then log in with the new password.

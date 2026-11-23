@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
-"""Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md).
+"""Manager discovery.
 
 The Community Edition connects a central manager with the credentials the
 operator types, reads its structure and shows the scope tree with counts:
@@ -26,7 +26,7 @@ Every reader returns one shape:
      "skipped":   ["..."],         # what the reader left out, in words
      "truncated": ["..."]}         # bounds hit (MAX_DOMAINS and the like)
 
-The calls are bounded (section 3, M5 of the plan): a manager with hundreds
+The calls are bounded: a manager with hundreds
 of domains or folders answers within the dialog's patience, and the panel
 says what was not read.
 """
@@ -748,7 +748,7 @@ def discover_scm(tsg_id: str, client_id: str, client_secret: str, *, client=None
 
 
 # ── Cisco Secure Firewall Management Center (on-premises, cloud-delivered) ─
-# (docs/FMC_SOURCE_PLAN.md, D12: the transport lives in deploy._fmc_common,
+# (the Management Center design, D12: the transport lives in deploy._fmc_common,
 # the Enterprise collector imports it from there)
 
 def discover_fmc(host_text: str, username: str, password: str, *, _client=None) -> dict:

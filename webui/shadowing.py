@@ -31,7 +31,7 @@ Conservatism contract (no false positives over missed findings):
     wildcard object, a service whose port form it cannot compare) is an
     identity, not a hole: it is the same set wherever the same object is
     named, so it is covered by itself or by 'any' and by nothing else, and it
-    covers nothing but itself (docs/SHADOWING_OBJECT_IDENTITY_PLAN.md).
+    covers nothing but itself.
 
 What the static view can NOT see: render-time transformations (e.g. a
 schedule the target cannot represent gets dropped declared, widening the
@@ -49,7 +49,7 @@ import re
 from sqlalchemy import text
 
 _INT_MAX = 0xFFFFFFFF
-# both families on one integer axis (docs/IPV6_PLAN.md, phase 4): IPv4 as is,
+# both families on one integer axis: IPv4 as is,
 # IPv6 offset past it; the whole of each family as a range
 _V6_OFFSET = 1 << 32
 _FULL4 = (0, _INT_MAX)
@@ -63,7 +63,7 @@ class ShadowProfile:
     """Per-target match-space semantics, supplied declaratively.
 
     `apps_in_match` says whether a rule's applications narrow it ON THE
-    TARGET (docs/SHADOWING_TARGET_SEMANTICS_PLAN.md): `all` where the target
+    TARGET: `all` where the target
     matches them (PA, a FortiGate in policy-based NGFW mode, no target),
     `override` where only an App-Site override is bound and the source's
     applications are declared drops (Check Point), `none` where nothing
@@ -149,7 +149,7 @@ class _AddrResolver:
                                                     "wildcard"):
                         self.objects[name] = _OPAQUE
                     else:
-                        # a dual-stack object carries both halves (docs/IPV6_PLAN.md, D1)
+                        # a dual-stack object carries both halves
                         self.objects[name] = f"{value}|{value6}" if value6 else value
         except Exception:
             pass
@@ -171,7 +171,7 @@ class _AddrResolver:
     @staticmethod
     def _literal(entry: str):
         """A literal as integer ranges. Both families live on one axis: IPv4
-        as is, IPv6 offset by 2^32 (docs/IPV6_PLAN.md, phase 4), so a range
+        as is, IPv6 offset by 2^32, so a range
         of one family never contains one of the other and the subset test
         stays a range test. A dual-stack value ('v4|v6') is both."""
         entry = entry.strip()

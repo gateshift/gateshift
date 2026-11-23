@@ -3,7 +3,7 @@
 {# ── The app's navigation tree (U13/U14), shared by the workspace (rules.html,
    nav_mode='workspace') and the project list (projects.html,
    nav_mode='landing'). The top entry "Projects" is the one global item, the
-   project picker sits under it (docs/UI_USABILITY_PLAN.md, D3), a project's
+   project picker sits under it, a project's
    tree follows. The entries that map to a step of the step model carry its
    marker (D2, ov_progress.marks), groups are folded unless opened (D4). The
    fold, rail and hint helpers live here; wsNav()/_wsNavSync() stay in the
@@ -12,11 +12,11 @@
        strips. Every item keeps the id and the switch function of the strip
        button it replaces (primary-btn-*, main-btn-*, enr-rb-btn-*,
        obj-btn-*): the JS, the saved tab state, the deep links and the
-       harness are untouched. wsNav() chains the switches from any item,
+       tests are untouched. wsNav() chains the switches from any item,
        _wsNavSync() marks the active path and unfolds it. The old strips
        stay only where they carry actions (fetch bar, re-generate). ── #}
   <style>
-    /* The panel's type grid (docs/UI_USABILITY_PLAN.md, D32, 2026-11-10): one size
+    /* The panel's type grid: one size
        (fs-small, the counts fs-caption as meta), the weights 400 and 500 only (the
        panel's bold is 500 by design, the typeface carries the whole axis since the
        declaration of 2026-11-10, D34), no letter-spacing
@@ -52,10 +52,11 @@
     /* the brand at the top of the column (D33): the wordmark on the text column with the claim in
        one line below it, no rule under it since the evening of 2026-11-10. The rail shows
        the mark alone. Both use the symbol gs-brand-mark of the sprite (base.html). */
-    #ws-nav .ws-brand { grid-row:1; display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:16px 14px 12px 30px; text-decoration:none; }   /* no line under the brand (operator, 2026-11-10) */
+    #ws-nav .ws-brand { grid-row:1; display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:16px 6px 12px 30px; text-decoration:none; }   /* no line under the brand (operator, 2026-11-10) */
     #ws-nav .ws-brand .brand-claim { white-space:nowrap; }
     /* the lockup a fifth larger in the tree (operator, 2026-11-13, D64): the wordmark 31px, the
-       claim 10.8px, which still ends inside the column's right edge (measured 233 of 234 px);
+       claim 10.8px, which still ends inside the column's right edge (the claim "Migrate & optimize
+       firewalls" of 2026-11-23 ends 7px before it, the brand's right padding is 6px for it);
        the lockup of the pages without the tree keeps the token sizes */
     #ws-nav .ws-brand .brand { font-size:31px; }
     #ws-nav .ws-brand .brand-claim { font-size:10.8px; }
@@ -71,7 +72,7 @@
     #ws-nav .ws-item .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     #ws-nav .ws-item .lk { color:var(--tx3); }
     #ws-nav .ws-item .c { margin-left:auto; color:var(--tx3); font-size:var(--fs-caption); font-variant-numeric:tabular-nums; padding-right:4px; }
-    /* the gutter column (docs/UI_USABILITY_PLAN.md, D13): a 14px slot before every
+    /* the gutter column: a 14px slot before every
        label. A done entry shows the check, the next entry the arrow with an accent
        label and the Hint tag at the right edge, the home entry its back arrow. The
        marks are the SVG symbols of the sprite at the top of the aside, so they
@@ -206,7 +207,8 @@
       <a class="ws-rail-brand" href="/projects" onclick="showNavOverlay()" title="Gateshift: back to the projects"><svg aria-hidden="true"><use href="#gs-brand-mark"/></svg></a>
       {# Devices before Projects (D35): the operator registers Devices first, a project pairs a source and a target Device (one Device for an optimization) #}
       <a class="ws-rail-btn{% if _np == 'devices' %} active{% endif %}{% if landing_next and landing_next.href == '/devices' %} next{% endif %}" href="/devices" onclick="showNavOverlay()" title="Devices">Dv</a>
-      <a class="ws-rail-btn{% if nav_mode == 'landing' and _np != 'devices' %} active{% endif %}{% if landing_next and landing_next.href == '/projects' %} next{% endif %}" href="/projects" onclick="showNavOverlay()" title="Projects">Pr</a>
+      <a class="ws-rail-btn{% if nav_mode == 'landing' and _np not in ('devices', 'automation') %} active{% endif %}{% if landing_next and landing_next.href == '/projects' %} next{% endif %}" href="/projects" onclick="showNavOverlay()" title="Projects">Pr</a>
+      <a class="ws-rail-btn{% if _np == 'automation' %} active{% endif %}" href="/automation" onclick="showNavOverlay()" title="Automation">Au</a>
       {% if _show_tree %}
       {# one pair of letters per area (D26), the active one follows the primary view #}
       {% if ov_project %}<button type="button" class="ws-rail-btn" data-rail="overview" onclick="wsNav('overview')" title="Dashboard">Da</button>{% endif %}
@@ -222,7 +224,7 @@
     {# the brand lockup (D33): the wordmark with the Lambda mark, the claim in one line #}
     <a class="ws-brand" href="/projects" onclick="showNavOverlay()" title="Gateshift: back to the projects">
       <span class="brand">g<svg class="brand-a" aria-hidden="true"><use href="#gs-brand-mark"/></svg>teshift</span>
-      <span class="brand-claim">The firewall migration tool</span>
+      <span class="brand-claim">Migrate &amp; optimize firewalls</span>
     </a>
     {# the three menus as one stack (operator, 2026-11-10): Manage, Active Project and
        Migrate & Optimize directly under each other, centred on the column #}
@@ -236,9 +238,14 @@
       <li class="l1 dev{% if _np == 'devices' %} ws-cur{% endif %}{% if landing_next and landing_next.href == '/devices' %} ws-next{% endif %}"><div class="ws-row">
         <a id="ws-nav-devices" class="ws-item" href="/devices" onclick="showNavOverlay()" title="The tenant's Devices: register, import, API keys"><span class="mk" aria-hidden="true"><svg class="ic ic-next"><use href="#gs-ic-arrow"/></svg></span><span class="lbl">Devices</span><span class="nx gs-info">&#128161;</span></a>
       </div></li>
-      <li class="l1 home{% if nav_mode == 'landing' and _np != 'devices' %} ws-cur{% endif %}{% if landing_next and landing_next.href == '/projects' %} ws-next{% endif %}"><div class="ws-row">
+      <li class="l1 home{% if nav_mode == 'landing' and _np not in ('devices', 'automation') %} ws-cur{% endif %}{% if landing_next and landing_next.href == '/projects' %} ws-next{% endif %}"><div class="ws-row">
         <a id="ws-nav-home" class="ws-item" href="/projects" onclick="showNavOverlay()"
            title="{% if nav_mode == 'landing' %}The tenant's projects{% else %}Leave this project: back to the Projects page{% endif %}"><span class="mk" aria-hidden="true"><svg class="ic ic-next"><use href="#gs-ic-arrow"/></svg></span><span class="lbl">Projects</span><span class="nx gs-info">&#128161;</span></a>
+      </div></li>
+      {# Automation: the API and the MCP endpoint, their tokens and
+         their audit. Optional work, so never the tenant's next step: no arrow, no light bulb #}
+      <li class="l1 auto{% if _np == 'automation' %} ws-cur{% endif %}"><div class="ws-row">
+        <a id="ws-nav-automation" class="ws-item" href="/automation" onclick="showNavOverlay()" title="Automation: the API, the MCP endpoint, their tokens"><span class="mk" aria-hidden="true"></span><span class="lbl">Automation</span></a>
       </div></li>
     </ul>
       {# the tenant picker (D66): the estate the landing shows, a menu of its own once a
@@ -251,7 +258,7 @@
       </div></li>
       </ul>
       {% endif %}
-      {# the project picker (docs/UI_USABILITY_PLAN.md, D3): every tenant's projects,
+      {# the project picker: every tenant's projects,
          grouped, a menu of its own above the tree since 2026-11-10; picking one switches the tenant cookie and
          opens the project's Overview (wsProjectPick, base.html). Pages that pass
          no nav_projects show no picker. #}
@@ -337,7 +344,7 @@
           {% if _tp == 'panw' %}{{ ws_leaf('main-btn-security-profiles', "wsNav('enrichment', 'access', 'security-profiles')", 'Security Profiles', 2, mark=_mk.get('main-btn-security-profiles')) }}{% endif %}
           {% if _tp == 'fortigate' %}{{ ws_leaf('main-btn-utm-profiles', "wsNav('enrichment', 'access', 'utm-profiles')", 'UTM Profiles', 2, mark=_mk.get('main-btn-utm-profiles')) }}{% endif %}
           {# a FortiGate matches applications per policy only in NGFW policy-based
-             mode (docs/FGT_POLICY_MODE_PLAN.md): the leaf follows the target's mode #}
+             mode: the leaf follows the target's mode #}
           {% if _tp in ('panw', 'checkpoint') or (_tp == 'fortigate' and selected_target and selected_target.get('ngfw_mode') == 'policy-based') %}{{ ws_leaf('main-btn-applications', "wsNav('enrichment', 'access', 'applications')", 'Applications', 2, mark=_mk.get('main-btn-applications')) }}{% endif %}
           {{ ws_leaf('main-btn-logging', "wsNav('enrichment', 'access', 'logging')", 'Logging', 2, mark=_mk.get('main-btn-logging')) }}
           {{ ws_leaf('main-btn-schedule-enrichment', "wsNav('enrichment', 'access', 'schedule-enrichment')", 'Schedule', 2, mark=_mk.get('main-btn-schedule-enrichment')) }}
@@ -375,7 +382,9 @@
     </div>
     <div class="ws-bottom">
     <button type="button" class="ws-rail-toggle" onclick="wsRail()" title="Collapse or expand the navigation"><span class="mk" aria-hidden="true"><span class="bk">&#8249;</span></span><span class="lbl">Collapse</span></button>
-    {# the foot: version chip (About dialog) and Logout, same controls as the header had (user decision 2026-10-04) #}
+    {# the foot: version chip (About dialog) and Logout, same controls as the header had (user decision 2026-10-04).
+       A Help link to the operating guide on gateshift.org sat here on 2026-11-19 and waits in the backlog
+       (CE backlog 22) until the site carries the page. #}
     <div class="ws-foot">
       <button type="button" id="about-open" title="About Gateshift"
               onclick="document.getElementById('about-modal').classList.remove('hidden')">v{{ app_version }}</button>
@@ -387,6 +396,22 @@
     </div>
     </div>
   </aside>
+  {% if nav_mode == 'landing' %}
+  <script>
+    // U16: on a landing page (Projects, Devices, Automation) the tree items open
+    // the picked project at that view, the workspace consumes the one-shot key
+    // (rules.html tab-once). One definition for every landing page: the
+    // Automation page had the tree and no handler, its clicks went nowhere.
+    var _NAV_PROJECT_URL = {{ (('/projects/' ~ ov_project.id) if ov_project else '') | tojson }};
+    function _wsGo(key) {
+      if (!_NAV_PROJECT_URL) return;
+      try { if (key) sessionStorage.setItem('tab-once', key); } catch (e) { /* non-fatal */ }
+      showNavOverlay(); window.location.href = _NAV_PROJECT_URL;
+    }
+    function wsNav(primary, rb, sub, obj) { _wsGo([primary, rb, sub, obj].filter(Boolean).join(':')); }
+    function switchOrgSub() { /* the navigation above already left this page */ }
+  </script>
+  {% endif %}
   <script>
     // Every group folds unless the view is inside it (D12, D23): the folds are
     // derived from the active view and the next step, nothing folds by hand,

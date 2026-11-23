@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         **A bug is when Gateshift does not do what the documentation says.**
-        Deliberate boundaries live in `KNOWN_LIMITATIONS.md` - anything beyond
+        Deliberate boundaries live in `KNOWN_LIMITATIONS.md`, anything beyond
         those is a feature request. Vendor/version/verbatim-error are required
         because most defects are vendor-schema drift, and those three fields
         are what makes them reproducible.
@@ -29,7 +29,7 @@ body:
     id: gateshift-version
     attributes:
       label: Gateshift release
-      placeholder: "0.9.5"
+      placeholder: "0.9.6"
     validations:
       required: true
   - type: textarea
@@ -53,7 +53,7 @@ body:
       label: Steps to reproduce
       placeholder: |
         1. Import from ...
-        2. Enrich / Generate ...
-        3. Push to ...
+        2. Edit under Network, Policies or Profiles & Settings ...
+        3. Build and push on Review & Deploy to ...
     validations:
       required: false

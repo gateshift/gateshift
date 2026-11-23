@@ -75,7 +75,7 @@
       <div id="ws-hint" class="ws-hint">
         <div class="ws-hint-body"><span class="ws-hint-cap" title="What you can do here">&#8505;&#65039;</span><span id="ws-hint-text"></span></div>
       </div>
-      {# +Add Snapshot sits on the Overview's snapshot card (docs/UI_USABILITY_PLAN.md, D3) #}
+      {# +Add Snapshot sits on the Overview's snapshot card #}
     </div>
 
 <div id="agg-panel">
@@ -233,299 +233,7 @@
             </tr>
           </thead>
           <tbody id="iface-tbody">
-            {% for iz in iface_zones %}
-            {% set zcls = zone_color_map.get(iz.zone_name, 'bg-blue-900/50 border-blue-700/60 text-blue-300') if iz.zone_name else '' %}
-            {% set needs_ip = not iz.ip_addresses %}
-            {% set needs_zone = _src_is_zone_native and not iz.zone_name %}
-            {% set iface_renamed = iz.import_interface_name and iz.import_interface_name != iz.interface_name %}
-            {% set _is_vlan_sub = (iz.iface_type or '') == 'vlan' and iz.parent_iface_name %}
-            {% set _bond_owner = bond_member_to_parent.get(iz.interface_name) if bond_member_to_parent else None %}
-            {% set _is_ae_member = _bond_owner is not none %}
-            {% set _inherited = iz.editable is defined and not iz.editable %}
-            <tr class="hover:bg-gray-800/30 {% if _is_vlan_sub %}bg-gray-900/20{% endif %} {% if _is_ae_member %}iface-ae-member bg-gray-900/20{% endif %} {% if iz.deploy_skip %}opacity-60{% elif _inherited %}opacity-70{% endif %}" id="iface-row-{{ iz.id }}"
-                data-iface-name="{{ iz.interface_name }}"
-                data-import-iface-name="{{ iz.import_interface_name or '' }}"
-                data-deploy-skip="{{ '1' if iz.deploy_skip else '0' }}"
-                data-inherited="{{ '1' if _inherited else '0' }}"
-                {% if iz.src_scope %}data-src-scope="{{ iz.src_scope }}"{% endif %}
-                {% if _is_ae_member %}data-bond-parent="{{ _bond_owner }}"{% endif %}>
-              <td class="py-1.5 pr-4">
-                {# Any interface is selectable for delete (source or manual).
-                   A deleted source interface returns on the next re-import;
-                   the backend reference-guard 409s if a referrer would dangle.
-                   Skip stays the in-place, push-only exclude (name dropdown). #}
-                <input type="checkbox" class="iface-row-sel cursor-pointer accent-blue-500"
-                       data-iface-id="{{ iz.id }}" data-iface-name="{{ iz.interface_name }}"
-                       onchange="ifaceRowToggle({{ iz.id }}, this.checked)"
-                       aria-label="Select {{ iz.interface_name }}">
-              </td>
-              <td data-field="interface" class="py-1.5 pr-4 {% if _is_vlan_sub or _is_ae_member %}pl-6{% endif %}">
-                {% set _is_bond = (iz.iface_type or '') == 'bond' %}
-                <div class="flex flex-col gap-0.5">
-                  {% if _is_bond %}
-                  <div class="text-[10px] text-gray-500 font-mono">[aggregate]</div>
-                  {% endif %}
-                  {% if _is_ae_member %}
-                  {% set _bond_id = (iface_zones | selectattr('interface_name', 'equalto', _bond_owner) | map(attribute='id') | first) %}
-                  {% endif %}
-                  <div class="flex items-center gap-2">
-                  <select data-iface-id="{{ iz.id }}"
-                          onchange="changeIfaceMapping({{ iz.id }}, this)"
-                          class="iface-name-select flex-1 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-xs py-0.5 px-0 transition-colors
-                                 {% if iz.deploy_skip %}text-gray-500{% elif iface_renamed %}text-amber-300{% else %}text-gray-200{% endif %}">
-                    {# The name this project shows (the source name unless the project
-                       maps it) - selected unless the interface is excluded from the
-                       push (skip). Renaming writes a row of the project's name map. #}
-                    <option value="src:{{ iz.interface_name }}"
-                            {% if not iz.deploy_skip %}selected{% endif %}>{{ iz.interface_name }}</option>
-                    {% if target_ifaces %}
-                    {# Discovered target interfaces - pick one to RENAME to it. #}
-                    <optgroup label="── Rename to target ──">
-                      {% for tgt in target_ifaces %}
-                      <option value="tgt:{{ tgt }}">{{ tgt }}</option>
-                      {% endfor %}
-                    </optgroup>
-                    {% endif %}
-                    <option value="__rename__">+ Rename…</option>
-                    {# Skip - exclude this source interface from the push (only
-                       legal when unreferenced; backend guards + 409s otherwise). #}
-                    <option value="__skip__"
-                            {% if iz.deploy_skip %}selected{% endif %}>- Don't deploy (skip) -</option>
-                  </select>
-                  {% if _is_ae_member and _bond_id %}
-                  {# Aggregate member stays mappable (select above) - keep the
-                     detach button so the user can still pull it out of the bond. #}
-                  <button type="button" class="bond-remove-btn inline-flex items-center justify-center w-5 h-5 rounded border border-gray-700 hover:border-gray-500 flex-shrink-0"
-                          onclick="bondRemoveMember({{ _bond_id }}, '{{ iz.interface_name }}')"
-                          title="Detach {{ iz.interface_name }} from {{ _bond_owner }}">
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="white"><rect x="0" y="4" width="10" height="2" rx="1"/></svg>
-                  </button>
-                  {% endif %}
-                  </div>
-                  {% if iface_renamed %}
-                  <span class="text-[10px] text-gray-500 font-mono"
-                        title="Original collector name (immutable audit anchor)">
-                    import: {{ iz.import_interface_name }}
-                  </span>
-                  {% endif %}
-                  {% if _inherited %}
-                  {# P2: inherited from a member template of the effective stack - read-only here.
-                     Switch the network scope to {{ iz.src_scope }} (header dropdown) to edit it. #}
-                  <span class="text-[10px] font-mono text-indigo-300/80 inline-flex items-center gap-1"
-                        title="Inherited from template {{ iz.src_scope }}: read-only in this effective (stack) view. Switch the network scope to {{ iz.src_scope }} to edit.">
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-                    ↳ {{ iz.src_scope }}
-                  </span>
-                  {% endif %}
-                  {# `needs IP / needs zone` marker dropped - false-positive
-                     for layer-2 / bond-member / loopback ifaces and noisy on
-                     vendors without iface-tier zones. The deploy validator
-                     surfaces real gaps at push time. #}
-                </div>
-              </td>
-              <td class="py-1.5 pr-4" data-field="type">
-                {% set _type_labels = {'physical': 'Layer 3', 'vlan': 'VLAN', 'bond': 'Aggregate', 'loopback': 'Loopback', 'tunnel': 'Tunnel'} %}
-                {% set _type_label = _type_labels.get(iz.iface_type or 'physical', iz.iface_type) %}
-                {% set _cur_type = iz.iface_type or 'physical' %}
-                {% if _is_ae_member %}
-                {# Structural - the bond owns its members; type is fixed. #}
-                <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono bg-gray-800 border border-gray-700 text-gray-400">{{ _type_label }}</span>
-                {% else %}
-                {# Reclassifiable: a source tunnel can be migrated to a VLAN/L3
-                   on the target. Changing it reloads the row so the VLAN
-                   parent/tag cell appears and the push pre-flight re-evaluates. #}
-                <select onchange="updateIface({{ iz.id }}, 'iface_type', this.value)"
-                        class="bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-[10px] text-gray-300 py-0.5 px-0 transition-colors
-                               {% if _cur_type == 'tunnel' %}text-amber-300{% endif %}">
-                  <option value="physical" {% if _cur_type == 'physical' %}selected{% endif %}>Layer 3</option>
-                  <option value="vlan"     {% if _cur_type == 'vlan' %}selected{% endif %}>VLAN</option>
-                  <option value="bond"     {% if _cur_type == 'bond' %}selected{% endif %}>Aggregate</option>
-                  <option value="loopback" {% if _cur_type == 'loopback' %}selected{% endif %}>Loopback</option>
-                  <option value="tunnel"   {% if _cur_type == 'tunnel' %}selected{% endif %}>Tunnel</option>
-                </select>
-                {% endif %}
-                {% set _plm = (iz.properties or {}).get('pa_link_mode') %}
-                {% if _plm and _plm != 'layer3' %}
-                {# PAN-OS link mode (tap/layer2/vwire/...) - collected source
-                   truth; muted grey (read-only informational, not an action
-                   item) so it doesn't read as a warning. Shown so a non-L3
-                   port doesn't masquerade as the 'Layer 3' type label above. #}
-                <span class="ml-1 inline-block px-1 py-0.5 rounded text-[9px] font-mono bg-gray-800 border border-gray-700 text-gray-500"
-                      title="PAN-OS link mode as configured on the source">{{ _plm }}</span>
-                {% endif %}
-              </td>
-              <td class="py-1.5 pr-4" data-field="vlan">
-                {% if _is_ae_member %}{# bond owns layer3; member has no VLAN #}
-                {% elif (iz.iface_type or '') == 'vlan' %}
-                {# Trailing-numeric heuristic: pull digits from after the last
-                   '.' (PA/CP `eth1.100`) or the whole name (Forti bare-tag
-                   `100`). Mismatch = the embedded number is set but != tag. #}
-                {% set _name_tail = iz.interface_name.rsplit('.', 1)[-1] if iz.interface_name else '' %}
-                {% set _name_digits = _name_tail if _name_tail.isdigit() else '' %}
-                {% set _tag_mismatch = iz.vlan_tag and _name_digits and (_name_digits|int) != iz.vlan_tag %}
-                {# Parent options = physical/bond ifaces by the name this project
-                   shows (the endpoint turns the pick back into the source name);
-                   a later parent rename carries its VLAN children along. #}
-                {% set _par_ifaces = (iface_zones | selectattr('iface_type', 'in', ['physical', 'bond']) | list) if iface_zones else [] %}
-                {% set _par_names = _par_ifaces | map(attribute='interface_name') | list %}
-                <div class="flex items-center gap-2 text-xs">
-                  <select onchange="updateIface({{ iz.id }}, 'parent', this.value)"
-                          title="Parent interface (VLAN rides on this L3/aggregate iface). A parent rename carries its VLAN children along."
-                          class="w-24 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-300 py-0.5 px-0 transition-colors">
-                    <option value="" {% if not iz.parent_iface_name %}selected{% endif %}>Parent…</option>
-                    {% for p in _par_ifaces %}
-                    <option value="{{ p.interface_name }}" {% if iz.parent_iface_name == p.interface_name %}selected{% endif %}>{{ p.interface_name }}</option>
-                    {% endfor %}
-                    {% if iz.parent_iface_name and iz.parent_iface_name not in _par_names %}
-                    <option value="{{ iz.parent_iface_name }}" selected>{{ iz.parent_iface_name }}</option>
-                    {% endif %}
-                  </select>
-                  <input type="text" inputmode="numeric" pattern="[0-9]*"
-                         value="{{ iz.vlan_tag or '' }}"
-                         placeholder="Tag"
-                         onchange="updateIface({{ iz.id }}, 'vlan_tag', this.value)"
-                         class="w-14 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-300 py-0.5 px-0 transition-colors">
-                  {% if _tag_mismatch %}
-                  <span class="text-amber-400" title="VLAN tag {{ iz.vlan_tag }} doesn't match the trailing number in '{{ iz.interface_name }}': push uses interface_name literally. Rename manually if needed">(!)</span>
-                  {% endif %}
-                </div>
-                {% else %}
-                <span class="text-gray-700">-</span>
-                {% endif %}
-              </td>
-              <td class="py-1.5 pr-4" data-field="ip">
-                {% if not _is_ae_member %}
-                <div class="flex items-center gap-2 flex-wrap">
-                  <label class="text-[10px] text-gray-500 flex items-center gap-1 cursor-pointer flex-shrink-0"
-                         title="Configure this interface as a DHCP client. Static IPs are cleared and the renderer emits a vendor-appropriate dhcp-client block on push.">
-                    <input type="checkbox" class="iface-dhcp-toggle accent-blue-500"
-                           data-iface-id="{{ iz.id }}"
-                           {% if iz.dhcp_enabled %}checked{% endif %}
-                           onchange="toggleIfaceDhcp({{ iz.id }}, this.checked)">
-                    DHCP
-                  </label>
-                  <input type="text" value="{{ iz.ip_addresses | join(', ') if iz.ip_addresses and not iz.dhcp_enabled else '' }}"
-                         {% if iz.dhcp_enabled %}disabled placeholder="(DHCP)"{% else %}placeholder="e.g. 192.168.1.1/24, 10.0.0.1/24"{% endif %}
-                         onchange="updateIface({{ iz.id }}, 'ip', this.value)"
-                         class="iface-ip-input flex-1 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-400 text-xs py-0.5 px-0 transition-colors disabled:opacity-40">
-                </div>
-                {% endif %}
-              </td>
-              <td class="py-1.5 pr-4 network-zone-col" data-field="zone">
-                {% if not _is_ae_member %}
-                <div class="flex items-center gap-1.5">
-                  {# Color swatch - clicking opens color picker popover. The
-                     .chip.<tone> token class gives the dot its zone tint;
-                     we override .chip padding/size to make it a 14px circle.
-                     `zcls` carries the tone name (trust/wan/dmz/pub/any/red/
-                     amber/teal/pink/purple) per V2/3.1 ZONE_PALETTE.tone. #}
-                  <div style="position:relative;">
-                    <button type="button"
-                            data-color-key="{{ zone_name_color.get(iz.zone_name, 'blue') if iz.zone_name else 'blue' }}"
-                            data-iface-id="{{ iz.id }}"
-                            onclick="openColorPicker(this)"
-                            title="Change zone color"
-                            class="zone-swatch chip {% if iz.zone_name %}{{ zcls or 'dmz' }}{% else %}any{% endif %}"
-                            style="width:14px;height:14px;border-radius:50%;padding:0;flex-shrink:0;cursor:pointer;transition:transform .12s;"
-                            onmouseover="this.style.transform='scale(1.1)';" onmouseout="this.style.transform='scale(1)';">
-                    </button>
-                  </div>
-                  {% set _cur_zone = iz.zone_name or '' %}
-                  {% set _zone_names = (zones_list | map(attribute='name') | list) if zones_list else [] %}
-                  <select data-iface-id="{{ iz.id }}"
-                          onchange="updateIface({{ iz.id }}, 'zone', this.value)"
-                          class="zone-name-input flex-1 bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none text-xs py-0.5 px-0 transition-colors
-                                 {% if iz.zone_name %}text-gray-200{% else %}text-gray-600{% endif %}">
-                    <option value="" {% if not _cur_zone %}selected{% endif %}>- None -</option>
-                    {% if _cur_zone and _cur_zone not in _zone_names %}
-                    <option value="{{ _cur_zone }}" selected>{{ _cur_zone }}</option>
-                    {% endif %}
-                    {% for zn in _zone_names %}
-                    <option value="{{ zn }}" {% if zn == _cur_zone %}selected{% endif %}>{{ zn }}</option>
-                    {% endfor %}
-                  </select>
-                </div>
-                {% endif %}
-              </td>
-              <td class="py-1.5 pr-4" data-field="vr_name">
-                {% if not _is_ae_member %}
-                <div class="flex flex-col gap-0.5">
-                  <select onchange="updateIface({{ iz.id }}, 'vr_name', this.value)"
-                          class="w-full bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none font-mono text-gray-300 text-xs py-0.5 px-0 transition-colors">
-                    {% set _cur_vr = iz.vr_name or 'default' %}
-                    {% set _vr_names = (vrfs_list | map(attribute='name') | list) if vrfs_list else ['default'] %}
-                    {% if _cur_vr not in _vr_names %}
-                    <option value="{{ _cur_vr }}" selected>{{ _cur_vr }}</option>
-                    {% endif %}
-                    {% for vn in _vr_names %}
-                    <option value="{{ vn }}" {% if vn == _cur_vr %}selected{% endif %}>{{ vn }}</option>
-                    {% endfor %}
-                  </select>
-                  {% if _show_role %}
-                  {% set _cur_role = iz.role or '' %}
-                  <select onchange="updateIface({{ iz.id }}, 'role', this.value)"
-                          title="Interface role: 'wan' marks the external/untrusted side (feeds NAT inference + the NAT to-zone fallback). Push-emitted on FortiGate targets"
-                          class="w-full bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none text-[10px] text-gray-500 py-0.5 px-0 transition-colors">
-                    <option value="" {% if not _cur_role %}selected{% endif %}>- Role -</option>
-                    {% for r in ['lan','wan','dmz','undefined'] %}
-                    <option value="{{ r }}" {% if r == _cur_role %}selected{% endif %}>{{ r }}</option>
-                    {% endfor %}
-                  </select>
-                  {% endif %}
-                </div>
-                {% endif %}
-              </td>
-              <td class="py-1.5 pr-4" data-field="enabled">
-                {% set _en = iz.enabled if iz.enabled is not none else 1 %}
-                <input type="checkbox" class="iface-enabled-toggle accent-blue-500 cursor-pointer"
-                       data-iface-id="{{ iz.id }}"
-                       {% if _en %}checked{% endif %}
-                       onchange="toggleIfaceEnabled({{ iz.id }}, this.checked)"
-                       title="Admin state. Unchecking marks the iface admin-down: push emits the vendor-specific down marker (PA <link-state>down</link-state>, Forti set status down, CP Gaia enabled=false, ASA shutdown).">
-              </td>
-              <td class="py-1.5 pr-4" data-field="description">
-                <input type="text" value="{{ iz.description or '' }}"
-                       placeholder="-"
-                       data-ae-editable
-                       onchange="updateIface({{ iz.id }}, 'description', this.value)"
-                       class="w-full bg-transparent border-b border-transparent hover:border-gray-600 focus:border-blue-500 focus:outline-none text-xs text-gray-400 py-0.5 px-0 transition-colors">
-              </td>
-            </tr>
-            {% if _is_bond %}
-            {# Bond add-member control - slim sub-row right under the bond
-               parent for adding a new member. Dropdown aligns with the
-               iface-name column (no pl-6 indent); + button sits to its
-               right. Existing members render as their own indented rows. #}
-            {% set _members = iz.member_iface_names or [] %}
-            {% set _avail = free_phys_ifaces or [] %}
-            <tr id="bond-expand-{{ iz.id }}" class="bg-gray-900/30">
-              <td class="py-1"></td>
-              <td class="py-1 pl-6 pr-4">
-                <div class="flex items-center gap-2">
-                  {% if _avail %}
-                  <select class="bond-add-select flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 font-mono"
-                          data-iface-id="{{ iz.id }}">
-                    <option value="">Add member…</option>
-                    {% for f in _avail %}
-                    <option value="{{ f }}">{{ f }}</option>
-                    {% endfor %}
-                  </select>
-                  <button type="button"
-                          onclick="bondAddMember({{ iz.id }})"
-                          class="inline-flex items-center justify-center w-5 h-5 rounded border border-gray-700 hover:border-gray-500 flex-shrink-0">
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="white"><rect x="0" y="4" width="10" height="2" rx="1"/><rect x="4" y="0" width="2" height="10" rx="1"/></svg>
-                  </button>
-                  {% elif not _members %}
-                  <span class="text-[10px] text-amber-400 italic">empty bond</span>
-                  {% else %}
-                  <span class="text-[10px] text-gray-600 italic">no free physical IFs</span>
-                  {% endif %}
-                </div>
-              </td>
-              <td colspan="7" class="py-1"></td>
-            </tr>
-            {% endif %}
-            {% endfor %}
+            {% include "_iface_rows.html" %}
           </tbody>
           <tfoot>
             {# Inline-add row - hidden until `+ Add interface` clicked.
@@ -1095,8 +803,7 @@
             <button onclick="vpnBulk('remove')" class="btn danger">Remove</button>
             <span id="vpn-sel-count" class="mut" style="font-size:var(--fs-body);margin-left:4px;">0 selected</span>
           </div>
-          {# Keys stored under a name no tunnel carries any more (docs/DEVICE_IDENTITY_PLAN.md,
-             one-way door 2): left behind by a rename on the source and a re-import under the
+          {# Keys stored under a name no tunnel carries any more: left behind by a rename on the source and a re-import under the
              new name. A network push with a tunnel without a key is refused while one exists,
              so they are listed here, each with its Discard. #}
           {% if vpn_orphan_keys %}
@@ -1163,7 +870,7 @@
                   {# VTI binding - editable so the operator can re-point or
                      RELEASE it (a set tunnel-IF blocks deleting that
                      interface via the reference guard; without an editor
-                     the reference was permanent - pa2fgt finding). Offers
+                     the reference was permanent). Offers
                      tunnel-type interfaces; empty = unbound. #}
                   {% set _tun_ifn = (iface_zones | selectattr('iface_type', 'equalto', 'tunnel') | map(attribute='interface_name') | list) if iface_zones else [] %}
                   {# FortiGate targets: the VTI is implicit (named after the
@@ -1257,7 +964,7 @@
       <div id="ruleset-hero">{{ empty_hero(empty_state, 'Firewall rules and NAT') }}</div>
     {% else %}
 
-    {# ── NAT - editable list fragment (Phase C, project_nat_full_scope_plan).
+    {# ── NAT, editable list fragment (Phase C).
          JS-glue (natStartRename, natToggleDisabled, natDelete, natBulkApply, …)
          lives further down in the script block. ── #}
     <div id="main-nat" class="hidden">
@@ -1555,7 +1262,7 @@
           {# the intro paragraph went on 2026-10-05 (user request) - the view hint
              above the page already says what this view is for #}
           {% if selected_target.platform == 'checkpoint' %}
-          {# URL-category mapping (project_cp_url_category_map_plan, P3): a
+          {# URL-category mapping: a
              predefined source category (e.g. PA financial-services) must
              REFERENCE a Check Point predefined category (Financial Services) -
              taxonomies differ, so only reliable name-matches auto-map; the
@@ -2457,6 +2164,7 @@
                     title="The target's application catalog. A custom application you create on the target becomes selectable here after re-entering this view.">
               <option value="any">any</option>
               <option value="auto">Auto-assign</option>
+              <option value="pick">Pick from the target catalogue</option>
             </select>
             <span class="hdr-cap" style="white-space:nowrap;margin-left:6px;">Set Service/Port</span>
             <select id="apps-apply-service" class="inp" style="font-size:var(--fs-body);padding:6px 10px;">
@@ -2471,7 +2179,7 @@
         </div>
       {% elif selected_target.platform == 'fortigate' and selected_target.ngfw_mode == 'policy-based' %}
         {# FortiOS NGFW policy-based mode: applications per policy, matched by name
-           against the FortiGuard catalog, never translated (docs/FGT_POLICY_MODE_PLAN.md). #}
+           against the FortiGuard catalog, never translated. #}
         <div style="padding:16px 20px;">
           <span class="dash" style="display:block;font-size:var(--fs-body);margin-bottom:10px;">
             Policy-based NGFW mode on the target: applications are matched per policy.
@@ -2484,6 +2192,7 @@
                     title="The target's application catalog (FortiGuard signatures, custom applications, groups).">
               <option value="any">any</option>
               <option value="auto">Auto-assign by name</option>
+              <option value="pick">Pick from the target catalogue</option>
             </select>
             <span class="hdr-cap" style="white-space:nowrap;margin-left:6px;">Set Service/Port</span>
             <select id="apps-apply-service" class="inp" style="font-size:var(--fs-body);padding:6px 10px;"
@@ -2523,6 +2232,31 @@
       {% endif %}
     </div>
 
+    {# ── Application picker (CE backlog 23): the
+         target's stored catalogue, searched by name, picked names applied to the
+         selected rules as their application list ── #}
+    <div id="apps-pick-modal" class="hidden" style="position:fixed;inset:0;z-index:70;background:rgba(4,7,11,0.6);"
+         onclick="if (event.target === this) appsPickClose();">
+      <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:640px;width:100%;margin:12vh auto 0;box-shadow:var(--shadow-pop);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+          <h2 style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);">Pick applications from the target catalogue</h2>
+          <button type="button" onclick="appsPickClose()" class="x" aria-label="Close">&times;</button>
+        </div>
+        <div class="field" style="margin-bottom:10px;">
+          <input type="text" id="apps-pick-search" class="inp" placeholder="Search by name" autocomplete="off"
+                 oninput="appsPickFilter()" onkeydown="if (event.key === 'Escape') { event.preventDefault(); appsPickClose(); }">
+        </div>
+        <div id="apps-pick-count" class="mut" style="font-size:var(--fs-body);margin-bottom:6px;"></div>
+        <div id="apps-pick-results" style="max-height:40vh;overflow:auto;border:1px solid var(--line);padding:6px 10px;"></div>
+        <div id="apps-pick-selected" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:10px;min-height:22px;"></div>
+        <div id="apps-pick-status" class="mut" style="font-size:var(--fs-body);margin-top:6px;"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+          <button type="button" onclick="appsPickClose()" class="btn">Cancel</button>
+          <button type="button" id="apps-pick-apply" onclick="appsPickApply()" class="btn">Apply to Selection</button>
+        </div>
+      </div>
+    </div>
+    <style>#apps-pick-modal:not(.hidden) { display: block; }</style>
     {# ── UTM Profiles - Forti-only per-rule UTM slot overrides ── #}
     <div id="main-utm-profiles" class="hidden">
       {% if not selected_device %}
@@ -2758,7 +2492,7 @@
     </div>
 
     {# ── NAT Enrichment - schema-driven vendor-properties bulk-form
-         (Phase D of project_nat_full_scope_plan). Rule state lives in
+         (Phase D). Rule state lives in
          Ruleset > NAT; this tab is about decorating rules with
          pa_* / cp_* / forti_* properties for push. ── #}
     <div id="main-nat-enrichment" class="hidden">
@@ -3111,7 +2845,7 @@
         #review-kinds .gap-mark { font-weight:600; }
         tr.group-row.gs-flash td { background: var(--selection); }
         #deploy-preview-tabs button.on { color: var(--tx); border-bottom-color: var(--accent); }
-        /* the target configuration state line (docs/DEPLOY_PAGE_DESIGN.md, E5) */
+        /* the target configuration state line */
         .tc-state { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; }
         .tc-state .tc-text { color:var(--tx); font-size:var(--fs-body); }
         .tc-state .tc-text.building { color:var(--accent); }
@@ -3124,7 +2858,7 @@
       </style>
       <div style="padding:16px 20px;display:flex;flex-direction:column;gap:36px;">
         {# ── push, on top across both columns (user request 2026-10-04): the target configuration's
-           state line (docs/DEPLOY_PAGE_DESIGN.md - it builds by itself, Rebuild is the escape hatch),
+           state line (the deploy page design - it builds by itself, Rebuild is the escape hatch),
            then the destination settings and the two strands. The history lives in the Logs view (D31). ── #}
         <div>
           {# the section is named after the thing, the buttons are the acts on it;
@@ -3546,6 +3280,29 @@
   var _ifaceDirty = false;
   function _markIfaceDirty() { _ifaceDirty = true; }
 
+  // Re-render the interface rows from the server after an edit (CE backlog 27): the table body comes back from the include
+  // the page renders, the page itself stays, scroll and tab kept. The deferred
+  // reload on leaving the tab (_ifaceDirty) still refreshes the derived state
+  // of the other tabs, as before.
+  function ifaceRowsRefresh() {
+    var tbody = document.getElementById('iface-tbody');
+    if (!tbody || !window._deviceId) { location.reload(); return Promise.resolve(); }
+    var q = 'device=' + encodeURIComponent(window._deviceId);
+    if (window._targetId) q += '&target=' + encodeURIComponent(window._targetId);
+    return fetch('/network/interfaces/rows-fragment?' + q)
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(function (html) {
+        tbody.innerHTML = html;
+        _ifaceSel.clear();
+        var all = document.getElementById('iface-sel-all');
+        if (all) all.checked = false;
+        _ifaceUpdateBulkUI();
+        if (typeof gsProgressRefresh === 'function') gsProgressRefresh();
+      })
+      .catch(function () { location.reload(); });
+  }
+  window.ifaceRowsRefresh = ifaceRowsRefresh;
+
   // ── Validation helpers ──
   var _cidrRe = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$/;
   var _ipRe   = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
@@ -3634,7 +3391,7 @@
       // A type change flips which dependent cells render (VLAN parent/tag) and
       // re-evaluates the push pre-flight - reload so the row reflects server
       // state authoritatively, like the mapping dropdown does.
-      if (field === 'iface_type') { window.location.reload(); return; }
+      if (field === 'iface_type') { ifaceRowsRefresh(); return; }
       _refreshIfaceRowStatus(id);
       // Iface→Zone binding changes affect derived rule zones (via
       // _resolve_zones_from_routes at render time). Trigger the rules
@@ -3673,7 +3430,7 @@
     var sourceName = (row && row.getAttribute('data-iface-name')) || '';
     var wasSkipped = (row && row.getAttribute('data-deploy-skip')) === '1';
 
-    function reload() { window.location.reload(); }
+    function reload() { ifaceRowsRefresh(); }
     function revert() { selectEl.value = wasSkipped ? '__skip__' : ('src:' + sourceName); }
     function rename(newName) {
       fetch('/interfaces/' + ifaceId + '/update', {
@@ -3840,8 +3597,10 @@
         showToast(msg, 'error');
         return;
       }
-      queueToast('Interface "' + name + '" added', 'success');
-      _reload();
+      showToast('Interface "' + name + '" added', 'success');
+      ifaceHideAddRow();
+      _markIfaceDirty();
+      ifaceRowsRefresh();
     }).catch(function() { showToast('Add interface failed', 'error'); });
   }
 
@@ -3855,7 +3614,7 @@
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.error) { showToast(data.error, 'error'); return; }
       _markIfaceDirty();
-      _reload();
+      ifaceRowsRefresh();
     }).catch(function() { showToast('DHCP toggle failed', 'error'); });
   }
   window.toggleIfaceDhcp = toggleIfaceDhcp;
@@ -3868,7 +3627,7 @@
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.error) { showToast(data.error, 'error'); return; }
       _markIfaceDirty();
-      _reload();
+      ifaceRowsRefresh();
     }).catch(function() { showToast('Admin-state toggle failed', 'error'); });
   }
   window.toggleIfaceEnabled = toggleIfaceEnabled;
@@ -3923,7 +3682,7 @@
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.error) { showToast(data.error, 'error'); return; }
       _markIfaceDirty();
-      _reload();
+      ifaceRowsRefresh();
     }).catch(function() { showToast('Bond add failed', 'error'); });
   }
   window.bondAddMember = bondAddMember;
@@ -3937,7 +3696,7 @@
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.error) { showToast(data.error, 'error'); return; }
       _markIfaceDirty();
-      _reload();
+      ifaceRowsRefresh();
     }).catch(function() { showToast('Bond remove failed', 'error'); });
   }
   window.bondRemoveMember = bondRemoveMember;
@@ -4429,9 +4188,9 @@
   const filterState = { fname: '', fsrcz: '', fsrc: '', fiden: '', fdstz: '', fdst: '', fsvc: '', faction: '', fapp: '', flog: '', fprof: '', fsched: '', ftag: '', fgtag: '', fusage: '' };
 
   // ── Rule selection (generic primitive for bulk actions) ─────────
-  // Keyed on rhash (hex SHA1 of rule identity, see feedback_rule_identity_hash
-  // memory). Stable across Generate as long as the rule's traffic-defining
-  // fields are unchanged; transient rule.id is intentionally not used.
+  // Keyed on rhash (hex SHA1 of rule identity). Stable across Generate as
+  // long as the rule's traffic-defining fields are unchanged. The transient
+  // rule.id is intentionally not used.
   window._ruleSelection = window._ruleSelection || new Set();
 
   function applyFilters() {
@@ -4463,7 +4222,7 @@
         (!s.fsched  || (d.fsched || '').includes(s.fsched)) &&
         (!s.ftag    || (d.ftag || '').includes(s.ftag)) &&
         (!s.fgtag   || (d.fgtag || '').includes(s.fgtag)) &&
-        (!s.fusage  || (d.fusage || '').split(' ').indexOf(s.fusage) !== -1);   // the box counters' usage filter (docs/HIT_COUNTS_PLAN.md, D7)
+        (!s.fusage  || (d.fusage || '').split(' ').indexOf(s.fusage) !== -1);   // the box counters' usage filter
       const isSelected = !!d.rid && sel.has(d.rid);
       const collapsed = row.classList.contains('group-collapsed');
 
@@ -4575,7 +4334,7 @@
         if (status) status.textContent = '';
         queueToast((res.body && res.body.deleted) + ' rule(s) deleted in this project', 'success');
         sel.clear();
-        // The project view leaves the rules out server-side (docs/PROJECT_VIEW_DESIGN.md):
+        // The project view leaves the rules out server-side:
         // a reload shows the view; the build on Review & Deploy follows by itself.
         if (typeof _reload === 'function') { _reload(); } else { location.reload(); }
       }).catch(function() {
@@ -4928,8 +4687,8 @@
 
   // ── Main tab switching ──────────────────────────────────────────
   const _PRIMARY_TABS      = ['overview', 'network', 'ruleset', 'objects', 'enrichment', 'deploy', 'log'];   // 'log' since D31
-  // the Review tab merged into Deploy (docs/DEPLOY_PAGE_DESIGN.md): old links, stored tabs and the
-  // harness still say 'review' and land on the one page
+  // the Review tab merged into Deploy: old links, stored tabs and the
+  // tests still say 'review' and land on the one page
   function _normTab(n) { return (n === 'review') ? 'deploy' : n; }
   // The members of the Configuration main tab (U11) - primaries that live in its strip.
   const _NETWORK_SUBS      = ['interfaces', 'routing', 'policy-routing', 'vpn'];
@@ -5155,7 +4914,7 @@
     'primary-btn-enrichment': "Attach what the target needs beyond the source to selected rules: profiles, applications, logging, schedules, source users and tags. Zones sit under Network, NAT and policy routing settings with their rulesets. 'Refresh Profiles' reads the target's catalogues again.",
     'main-btn-zones-enrichment': "Manage zones and attach or detach interfaces under 'Zones & Interfaces'. Under 'Rule Mapping' assign zones or interfaces to the rules, by 'Auto-derive' or manually.",
     'main-btn-security-profiles': "Attach profile groups or single profiles to selected rules. New profiles and groups can be created on the target and fetched with 'Refresh Profiles'.",
-    'main-btn-applications': "'Auto-assign' matches the target's applications to selected rules.{% if _fallback_ruleset_target %} A fallback ruleset without applications can be appended under Review & Deploy.{% endif %}",
+    'main-btn-applications': "'Auto-assign' matches the target's applications to selected rules, 'Pick from the target catalogue' lets you choose them by name.{% if _fallback_ruleset_target %} A fallback ruleset without applications can be appended under Review & Deploy.{% endif %}",
     'main-btn-utm-profiles': "Attach UTM profiles to selected rules: antivirus, IPS, web filter, DNS filter, application control and SSL/SSH inspection. New profiles created on the FortiGate appear after a page reload, 'Clear' removes the profiles from selected rules.",
     'main-btn-logging': "Add logging profiles and settings to selected rules. New profiles can be created on the target and fetched with 'Refresh Profiles'. 'Clear' resets selected rules to the target's default.",
     'main-btn-schedule-enrichment': "Add schedules to selected rules. The schedules come with the source's import, the push creates them on the target. 'Clear' restores the imported schedule, 'none' removes it.",
@@ -5167,7 +4926,7 @@
     'main-btn-decryption': "Review and adjust the decryption rules, HTTPS forward proxy only. On a Check Point target map the predefined URL categories to the target's. Forward-trust certificates have to be imported on the target Device.",
     'main-btn-vpn': "Review and adjust site-to-site VPN tunnels. Set each tunnel's pre-shared key or upload its certificate, the import does not carry secrets. A tunnel without a key is pushed with a placeholder key and a warning, a certificate tunnel without its certificate stays declared, Review & Deploy lists both.",
     'primary-btn-log': "Every import, build, push and collect of this project, newest first. Open a row for the record with its steps, a failed push shows which step failed and what the Device said. 'Refresh' reads the log again.",
-    'primary-btn-deploy': "Build the target configuration, review stats and configs, fix blocking issues and check the warnings and notes.{% if _fallback_ruleset_target %} Append a fallback ruleset for a smoother transition to application matching.{% endif %}",
+    'primary-btn-deploy': "Build the target configuration, review stats and configs, fix blocking issues and check the warnings and notes.{% if _fallback_ruleset_target %} A fallback ruleset without zones and applications can be appended for a smoother transition.{% endif %}",
   };
   // The guide link at the end of the view hint (D10) went on 2026-11-10 (operator
   // decision, CE backlog 22: help links deserve a place of their own, not the hint line).
@@ -5200,7 +4959,7 @@
     if (_wsTargetMode() && parts.length) parts.push('Target Settings');
     el.textContent = '';
     el.style.display = parts.length ? '' : 'none';
-    // the browser tab names the view and the project (docs/UI_USABILITY_PLAN.md, D5)
+    // the browser tab names the view and the project
     try {
       document.title = (titleLeaf ? titleLeaf + ' - ' : '')
         + (window._projectName ? window._projectName + ' - ' : '') + 'Gateshift';
@@ -5394,7 +5153,7 @@
     }
 
     // Objects primary: lint endpoint fills badge column + powers chip filters.
-    // Read-only, see feedback_no_page_render_side_effects memory.
+    // Read-only.
     if (name === 'objects' && typeof loadObjLint === 'function') {
       loadObjLint(false);
     }
@@ -9221,7 +8980,8 @@
     if (!psk) { showToast('Empty PSK: use Clear to remove', 'error'); return; }
     fetch('/enrichment/vpn/psk', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({device_id: _vpnPskDeviceId, vpn_hash: hash, psk: psk}),
+      body: JSON.stringify({device_id: _vpnPskDeviceId, vpn_hash: hash, psk: psk,
+                            target_platform: window._targetPlatform || null}),
     }).then(function(r) {
       if (!r.ok) { r.json().then(function(d) { showToast((d && d.error) || 'PSK save failed', 'error'); }).catch(function(){ showToast('PSK save failed', 'error'); }); return; }
       document.getElementById('vpn-psk-modal').style.display = 'none';
@@ -9242,7 +9002,7 @@
       else showToast('PSK clear failed', 'error');
     }).catch(function() { showToast('PSK clear failed', 'error'); });
   }
-  // An orphan key (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2): stored under
+  // An orphan key: stored under
   // a name no tunnel carries any more, so it is addressed by that name, which
   // the button carries. Discarded only, never set.
   function vpnDiscardOrphanKey(btn) {
@@ -10150,6 +9910,7 @@
       if (status) { status.textContent = 'Auto-assign needs a target Device.'; status.className = 'text-xs text-amber-400 ml-2'; }
       return;
     }
+    if (app === 'pick') { appsPickOpen(); return; }
     var hashes = Array.from(_getSelectedRhashes());
     var nRules = hashes.length;
     var calls = [];
@@ -10205,6 +9966,120 @@
         if (busy) _setOverlay(false, busyTok);
       });
   }
+
+  // ── Application picker (CE backlog 23) ──
+  // The target's stored catalogue, searched by name; the picked names become
+  // the application list of the selected rules, by name, never translated.
+  var _appsPick = {names: [], items: []};
+  function _appsCatalogItems(cat) {
+    var out = [];
+    Object.keys(cat || {}).sort().forEach(function(bucket) {
+      (cat[bucket] || []).forEach(function(it) {
+        var name = (it && typeof it === 'object') ? (it.name || '') : String(it || '');
+        if (name) out.push({name: name, bucket: bucket === 'application' ? 'custom' : bucket.replace('application-', '')});
+      });
+    });
+    return out;
+  }
+  function appsPickOpen() {
+    var status = document.getElementById('apps-apply-status');
+    if (!_targetId) {
+      if (status) { status.textContent = 'The picker needs a target Device.'; status.className = 'text-xs text-amber-400 ml-2'; }
+      return;
+    }
+    var m = document.getElementById('apps-pick-modal');
+    _appsPick.names = [];
+    _appsPickRenderSelected();
+    document.getElementById('apps-pick-search').value = '';
+    document.getElementById('apps-pick-status').textContent = '';
+    m.classList.remove('hidden');
+    setTimeout(function() { document.getElementById('apps-pick-search').focus(); }, 0);
+    window._PANW_CATALOGS = window._PANW_CATALOGS || {};
+    var cache = (window._PANW_CATALOGS.applications || {})[_targetId];
+    if (cache) { _appsPick.items = _appsCatalogItems(cache); appsPickFilter(); return; }
+    document.getElementById('apps-pick-results').innerHTML = '<p class="mut">Reading the target catalogue…</p>';
+    fetchWithTimeout('/enrichment/applications/' + _targetId)
+      .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+      .then(function(res) {
+        if (!res.ok) {
+          document.getElementById('apps-pick-results').innerHTML = '<p class="text-red-400">' + ((res.data && res.data.error) || 'Could not read the catalogue') + '</p>';
+          return;
+        }
+        window._PANW_CATALOGS.applications = window._PANW_CATALOGS.applications || {};
+        window._PANW_CATALOGS.applications[_targetId] = res.data.catalog || {};
+        _appsPick.items = _appsCatalogItems(res.data.catalog || {});
+        appsPickFilter();
+      })
+      .catch(function(e) {
+        document.getElementById('apps-pick-results').innerHTML = '<p class="text-red-400">Could not read the catalogue: ' + e + '</p>';
+      });
+  }
+  function appsPickFilter() {
+    var q = ((document.getElementById('apps-pick-search') || {}).value || '').trim().toLowerCase();
+    var box = document.getElementById('apps-pick-results');
+    var hits = _appsPick.items.filter(function(it) { return !q || it.name.toLowerCase().indexOf(q) !== -1; });
+    var shown = hits.slice(0, 200);
+    document.getElementById('apps-pick-count').textContent =
+      hits.length + ' of ' + _appsPick.items.length + ' application(s)' + (hits.length > shown.length ? ', the first ' + shown.length + ' shown, narrow the search' : '');
+    box.innerHTML = '';
+    if (!shown.length) { box.innerHTML = '<p class="mut">No application of that name in the catalogue.</p>'; return; }
+    shown.forEach(function(it) {
+      var row = document.createElement('label');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:2px 0;cursor:pointer;font-size:var(--fs-body);';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = _appsPick.names.indexOf(it.name) !== -1;
+      cb.onchange = function() { appsPickToggle(it.name, cb.checked); };
+      var nm = document.createElement('span'); nm.textContent = it.name; nm.style.color = 'var(--tx)';
+      var bk = document.createElement('span'); bk.textContent = it.bucket; bk.className = 'mut';
+      row.appendChild(cb); row.appendChild(nm); row.appendChild(bk);
+      box.appendChild(row);
+    });
+  }
+  function appsPickToggle(name, on) {
+    var i = _appsPick.names.indexOf(name);
+    if (on && i === -1) _appsPick.names.push(name);
+    if (!on && i !== -1) _appsPick.names.splice(i, 1);
+    _appsPickRenderSelected();
+  }
+  function _appsPickRenderSelected() {
+    var box = document.getElementById('apps-pick-selected');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!_appsPick.names.length) { box.innerHTML = '<span class="mut" style="font-size:var(--fs-body);">Nothing picked yet.</span>'; return; }
+    _appsPick.names.forEach(function(n) {
+      var chip = document.createElement('span');
+      chip.className = 'appchip';
+      chip.textContent = n + ' ';
+      var x = document.createElement('a'); x.href = '#'; x.textContent = '×'; x.title = 'Remove';
+      x.onclick = function(ev) { ev.preventDefault(); appsPickToggle(n, false); appsPickFilter(); };
+      chip.appendChild(x);
+      box.appendChild(chip);
+    });
+  }
+  function appsPickClose() { document.getElementById('apps-pick-modal').classList.add('hidden'); }
+  function appsPickApply() {
+    var st = document.getElementById('apps-pick-status');
+    var hashes = Array.from(_getSelectedRhashes());
+    if (!_appsPick.names.length) { st.textContent = 'Pick at least one application.'; return; }
+    if (!hashes.length) { st.textContent = 'No rules selected.'; return; }
+    var btn = document.getElementById('apps-pick-apply');
+    btn.disabled = true; st.textContent = 'Applying…';
+    fetch('/enrichment/applications/apply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rule_hashes: hashes, applications: _appsPick.names.slice(), target_id: _targetId}),
+    }).then(_jsonRes).then(function(res) {
+      btn.disabled = false;
+      if (!res.ok) { st.textContent = (res.data && res.data.error) || 'Apply failed'; return; }
+      var status = document.getElementById('apps-apply-status');
+      if (status) {
+        status.textContent = hashes.length + ' rule(s) updated · app: ' + _appsPick.names.join(', ');
+        status.className = 'text-xs text-emerald-400 ml-2';
+      }
+      appsPickClose();
+      if (typeof htmx !== 'undefined') htmx.trigger(document.body, 'configSaved');
+    }).catch(function(e) { btn.disabled = false; st.textContent = 'Apply failed: ' + e; });
+  }
+  window.appsPickOpen = appsPickOpen;
 
   // Wipe both app and service overrides for the current selection.
   function clearEnrichment() {
@@ -10749,7 +10624,7 @@
   }
 
   // ── Cross-vendor URL-category mapping (Decryption tab, CP target) ──────────
-  // project_cp_url_category_map_plan, P3: list the predefined URL categories
+  // List the predefined URL categories
   // the source's decryption rules reference, classified auto/manual/orphaned/
   // unmapped vs the target's fetched catalog; the operator attaches the rest.
   var _cpUrlCatalog = [];   // the target's fetched CP category catalog
@@ -11039,7 +10914,7 @@
     });
   }
 
-  // ── Review & Deploy (docs/DEPLOY_PAGE_DESIGN.md) ──────────────
+  // ── Review & Deploy ──────────────
   // The target configuration is a server-side artefact per project. The page
   // holds its state (_tc, from /deploy/config) and its report (_reviewReport);
   // section payloads are fetched by name when the preview or the before/after
@@ -11056,9 +10931,11 @@
   var _reviewStale = {policy: false, network: false};
   var _blockingKinds = ['no_interfaces', 'bond_unsupported', 'vlan_no_parent', 'vlan_no_tag',
                         'vlan_orphan_parent', 'cp_multi_vr', 'vr_orphan', 'forti_loopback_in_zone',
-                        'reserved_target_iface', 'unresolved_reference', 'ipv6_deny_loss', 'appdef_widened'];
+                        'reserved_target_iface', 'cp_iface_unmatched', 'target_iface_unmatched',
+                        'unresolved_reference', 'ipv6_deny_loss', 'appdef_widened', 'pa_forward_trust_missing'];
   // which kinds hold back which push: the generate hands the split over, these are the seeds
-  var _blockingKindsPolicy = ['excluded_leak', 'unresolved_reference', 'ipv6_deny_loss', 'appdef_widened'];
+  var _blockingKindsPolicy = ['excluded_leak', 'unresolved_reference', 'ipv6_deny_loss', 'appdef_widened',
+                              'pa_forward_trust_missing'];
   var _blockingKindsNetwork = _blockingKinds.filter(function (k) { return _blockingKindsPolicy.indexOf(k) === -1 || k === 'excluded_leak'; });
 
   // Initialize deploy pane on first reveal. Target comes from the header
@@ -11225,7 +11102,7 @@
     }).catch(function() { showToast('Could not save setting', 'error'); });
   }
 
-  // ── The target configuration: state, build job, preview (docs/DEPLOY_PAGE_DESIGN.md) ──
+  // ── The target configuration: state, build job, preview ──
   // loadTargetConfig reads state + report; refreshTargetConfig reads the state only and
   // fetches the report when the build id changed. Both end in _applyTargetConfig, which
   // starts a build when the artefact is missing or outdated and watches a running one.
@@ -11263,7 +11140,7 @@
       renderPreviewTabs();
     }
     renderTcState(); renderPushButtons();
-    // the step model follows the artefact (docs/UI_USABILITY_PLAN.md, D1 step 6)
+    // the step model follows the artefact
     var _dep = document.getElementById('primary-btn-deploy');
     if (d.state === 'current' && d.job_id && _reviewReport && _dep && _dep.classList.contains('active')) gsReviewed(d.job_id);
     else if (typeof gsProgressRefresh === 'function') gsProgressRefresh();
@@ -11375,7 +11252,7 @@
       text = 'Built ' + (_tc.built_at || '');
     }
     // a strand the target lacks (a virtual system's network): declared on the
-    // line, the driver's reason as its tooltip (docs/VSX_TARGET_PLAN.md, D2)
+    // line, the driver's reason as its tooltip
     var decl = (_tc && _tc.built_at && _tc.summary && _tc.summary.declared_strands) || null;
     if (decl && decl.network && !building) {
       detail = (detail ? detail + ' - ' : '') + 'Network: provisioned on the VSX, not pushed';
@@ -11398,7 +11275,7 @@
     else if (_tcFailed) reason = 'The push waits for a successful build.';
     else if (!_tc || !_tc.built_at) reason = 'The push waits for the target configuration.';
     else if (_tc.state === 'outdated') reason = 'The target configuration is outdated: it is rebuilt first.';
-    // each push waits for the blockers of its own strand (docs/APPDEF_WIDENING_PLAN.md, D4):
+    // each push waits for the blockers of its own strand:
     // a rule-level finding holds the policy push, an interface-level one the network push
     var nBlockP = (_deployValidationIssues || []).filter(function (i) { return _blockingKindsPolicy.indexOf(i.kind) !== -1; }).length;
     var nBlockN = (_deployValidationIssues || []).filter(function (i) { return _blockingKindsNetwork.indexOf(i.kind) !== -1; }).length;
@@ -11513,7 +11390,7 @@
   // The generate report rendered as findings (blocker / warning / note),
   // a kind table (source vs generated) and the generate line on both tabs.
   // title, go-to tab, go-to sub-tab, and the remedy in one sentence (R3)
-  // the one table of finding kinds lives in progress.py (docs/UI_USABILITY_PLAN.md, D18):
+  // the one table of finding kinds lives in progress.py:
   // title, go-to tab, go-to sub-tab, the remedy in one sentence, the view inside a rulebase
   var _RV_KIND_TITLES = {{ (rv_kinds or {}) | tojson }};
   // Readable names for the drivers' field keys, and what one item of the
@@ -11588,7 +11465,7 @@
       g.rules.push(String(d.rule_id || '?'));
       g.fallbacks.push(String(d.fallback || ''));
     });
-    // the drivers' fallback vocabulary (docs/REVIEW_TAB_DESIGN.md): "not pushed[ - remedy]" = gone;
+    // the drivers' fallback vocabulary: "not pushed[ - remedy]" = gone;
     // "replaced by X", "pushed without X", "only ... pushed", "placeholder pushed" = still there, changed
     var _isDrop = function (fb) { fb = (fb || '').trim().toLowerCase(); return fb === '' || /^(dropped|not pushed|skipped|manage via)/.test(fb); };
     Object.keys(drops).forEach(function (key) {
@@ -11627,7 +11504,7 @@
                 count: rep.skipped_interfaces.length, detail: 'Marked "skip" on the Interfaces tab. Nothing of them reaches the target.',
                 items: rep.skipped_interfaces.map(String), go: {tab: 'network', sub: 'interfaces'}});
     }
-    // hit counts from the box (docs/HIT_COUNTS_PLAN.md, D7): the source's own counters as a decision
+    // hit counts from the box: the source's own counters as a decision
     // aid, one note per source; a source whose counters were not read says why (D8)
     var bu = rep.box_usage;
     if (bu && bu.rules_total) {
@@ -11967,7 +11844,7 @@
         _shadowApply(found, _RV_LOG.shadowed.length);
       } else if (typeof toggleShadowFilter === 'function') toggleShadowFilter();
     }
-    if (opts.usage && typeof filterState !== 'undefined') {   // the Review's usage note lands on the usage filter (docs/HIT_COUNTS_PLAN.md, D7)
+    if (opts.usage && typeof filterState !== 'undefined') {   // the Review's usage note lands on the usage filter
       filterState.fusage = opts.usage;
       var us = document.querySelector('[data-fkey="fusage"]'); if (us) us.value = opts.usage;
       if (typeof applyFilters === 'function') applyFilters();
@@ -11983,7 +11860,7 @@
     }
   }
   window.gsGoTo = gsGoTo;
-  // The step model (docs/UI_USABILITY_PLAN.md, D1): one fetch refreshes the
+  // The step model: one fetch refreshes the
   // header sentence, the navigation markers and the Overview's step strip
   // without a reload. Called after a build, a push, a review and a
   // verification.
@@ -12258,7 +12135,7 @@
     return skip;
   }
 
-  // P4 gate (project_cp_url_category_map_plan): a CP policy push must have
+  // Push gate: a CP policy push must have
   // every referenced predefined URL category mapped to a Check Point category,
   // else the Decryption section is force-skipped + greyed (a decryption
   // rulebase is order-sensitive - never push it partial). Populated fresh from
@@ -12349,8 +12226,8 @@
     var d1 = document.createElement('div');
     // Management-interface override - per-push opt-in via a typed "confirm".
     // Renders ONLY when this push would actually touch a management
-    // interface (mgmt_target_iface issue from generate; matrix finding M-5
-    // - on CP it used to render unconditionally). FGT: an unconfirmed push
+    // interface (the mgmt_target_iface issue from generate). On CP it used
+    // to render unconditionally. FGT: an unconfirmed push
     // is refused server-side, so Continue locks until confirm is typed.
     // CP: an unconfirmed push safely defers/skips the mgmt interface, so
     // the confirm stays optional (opt-in to include it). PA has a
@@ -12377,7 +12254,7 @@
         + 'class="w-full text-xs px-2 py-1.5 rounded border border-red-700/60 bg-gray-900 text-red-200 placeholder-gray-600">'
         + '</div>';
     }
-    // Push options (docs/PUSH_OPTIONS_PLAN.md): the opt-ins that reach beyond
+    // Push options: the opt-ins that reach beyond
     // the estate. Rendered when the generate found a reason for one; the
     // project's persisted choice pre-ticks the box.
     var optionsHtml = '';
@@ -12401,7 +12278,7 @@
           + '</div>';
       }
     }
-    // PAN-OS rescue point (docs/PUSH_OPTIONS_PLAN.md): the generate probed
+    // PAN-OS rescue point: the generate probed
     // whether the firewall saves a rescue point; when it refuses, the push
     // stops before writing unless the operator continues without a rollback.
     if (window._targetPlatform === 'panw') {
@@ -12467,7 +12344,7 @@
       // policy push never touches interfaces, but the mgmt issue is part
       // of the shared generate result - without the strand check the lock
       // engaged on the POLICY dialog too, where no confirm input exists
-      // to unlock it (FGT->FGT matrix finding).
+      // to unlock it.
       d1.dataset.mgmtRequired = '1';
       var _cbtn = d1.querySelector('[data-pushcontinue]');
       if (_cbtn) _cbtn.disabled = true;
@@ -12496,8 +12373,13 @@
       + '<p class="text-red-400 text-sm font-medium mb-1">Are you sure?</p>'
       + '<p class="text-gray-500 text-xs mb-3">Existing ' + _pushStrand + ' sections will be deleted and replaced. ' + _applyNote + '</p>'
       + skipNote
+      {# the live demo: the last button is off and says
+         why, the server refuses the push as well (demo_mode.blocked) #}
+      {% if demo_mode %}
+      + '<p class="text-amber-300/90 text-xs mb-3">' + {{ demo_refusal|tojson }} + '</p>'
+      {% endif %}
       + '<div class="flex justify-center gap-3">'
-      + '<button class="btn danger" onclick="this.closest(\'.fixed\').remove(); executePush()">Yes, Push Now</button>'
+      + '<button class="btn danger"{% if demo_mode %} disabled title="Off in the live demo"{% endif %} onclick="this.closest(\'.fixed\').remove(); executePush()">Yes, Push Now</button>'
       + '<button class="btn" onclick="this.closest(\'.fixed\').remove()">Cancel</button>'
       + '</div></div>';
     document.body.appendChild(d2);
@@ -12808,7 +12690,7 @@
       return resp.json().then(function(j) { return {ok: resp.ok, status: resp.status, body: j}; });
     }).then(function(r) {
       if (!r.ok || !r.body.job_id) {
-        // The artefact is outdated or was rebuilt since the review (docs/DEPLOY_PAGE_DESIGN.md, E3):
+        // The artefact is outdated or was rebuilt since the review:
         // nothing is pushed unseen - the page refreshes it (and rebuilds when needed), the
         // operator looks at the findings and pushes again.
         if (r.status === 409 && r.body && (r.body.needs_build || r.body.changed)) {
@@ -12904,11 +12786,10 @@
   window._applyInheritedReadonly = _applyInheritedReadonly;
   document.addEventListener('DOMContentLoaded', function() { _applyInheritedReadonly(document); });
 
-  // ── Network-Strang Discover (Slice 1 fetch + Slice 4 save) ─────
-  // Target reads (interfaces / zones / routes). Verarbeitung-stage input:
+  // ── Network strand Discover (Slice 1 fetch + Slice 4 save) ─────
+  // Target reads (interfaces / zones / routes) as processing-stage input:
   // user fetches target config → blue overlay → Save persists into source's
-  // fw_interfaces/fw_zones/fw_routes. See project_network_strand.md
-  // "Target-read: Discover as Verarbeitung-input".
+  // fw_interfaces/fw_zones/fw_routes.
 
   function _escapeHtml(s) {
     if (s === null || s === undefined) return '';

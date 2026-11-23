@@ -3,7 +3,7 @@
 
 USE gateshift;
 
--- Project name map (rename model A, docs/CURATION_OWNERSHIP_DESIGN.md 5).
+-- Project name map (rename model A, the curation ownership design 5).
 --
 -- The imported data keeps its source names for good. A rename made in a
 -- project - an interface to the target's naming scheme, a zone, a VRF, an

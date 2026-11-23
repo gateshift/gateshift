@@ -60,8 +60,7 @@ def service_ref(literal: str, synth: dict[str, dict]) -> str:
     'tcp/8000-8100', 'icmp', 'esp') as the service object the rule
     references instead ('svc-tcp-443'). The FortiGate renderer hands rule
     services to the box by name, so a literal arrives as an unknown
-    service and the policy push fails (found on the first real push of a
-    cloud leg, 2026-10-09). 'any' stays 'any'."""
+    service and the policy push fails. 'any' stays 'any'."""
     lit = (literal or "").strip().lower()
     if not lit or lit == "any":
         return "any"
@@ -78,6 +77,5 @@ def literal_ref(cidr: str, owner: str, synth: dict[str, dict]) -> str:
     references instead. A rule side must hold names, not literals: the
     generate's auto-object pass reads the pipeline's bare addresses and
     loses the prefix length, so a subnet literal became a host object and
-    the renderers, unable to match the literal, replaced the side by any
-    (found on the first bundle-upload leg, 2026-10-09)."""
+    the renderers, unable to match the literal, replaced the side by any."""
     return member_objects([cidr], owner, synth, what="address named by")[0]

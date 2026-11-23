@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
-"""Hit counts from the box (docs/HIT_COUNTS_PLAN.md).
+"""Hit counts from the box.
 
 The vendors' own per-rule counters, read in the import's session beside the
 rules and again on demand by the refresh, kept on the imported rows in five

@@ -10,11 +10,11 @@ USE gateshift;
 -- holds user-decided negate flags per rule, keyed by content_hash so they
 -- survive across runs. rules_query LEFT JOINs and COALESCEs over the
 -- consolidated negate columns, so overrides win whenever present
--- (respecting source='manual' marker per feedback_override_marker_in_postprocessors).
+-- (respecting the source='manual' marker).
 --
--- Three independent boolean flags - negate_source, negate_destination,
--- negate_service - match the PA / Forti / CP per-rule semantics
--- (see project_rule_negation_plan). Each can be overridden independently.
+-- Three independent boolean flags (negate_source, negate_destination,
+-- negate_service) match the PA / Forti / CP per-rule semantics. Each can
+-- be overridden independently.
 -- NULL = no override; falls back to consolidated value via COALESCE.
 
 CREATE TABLE IF NOT EXISTS fw_rule_negate_overrides (

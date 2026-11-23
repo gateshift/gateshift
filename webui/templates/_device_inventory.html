@@ -1,6 +1,6 @@
 {# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
-{# The device inventory (U7, docs/PROJECTS_UI_DESIGN.md): the Devices page
-   (/devices, D30 of docs/UI_USABILITY_PLAN.md). One row per device with import / edit / delete; the edit
+{# The device inventory (U7): the Devices page
+   (/devices). One row per device with import / edit / delete; the edit
    dialog carries the former inline edit form, the reset and (hidden R1) the
    restore. Expects the inventory context: devices, platform_labels,
    manager_ui, has_logs, tenant_id and the flash values form_error /
@@ -70,7 +70,7 @@
           data-text="{{ ((d.display_name or d.host_name) ~ ' ' ~ d.host_name ~ ' ' ~ _pl_label ~ ' ' ~ (d.mgmt_ip or '') ~ ' ' ~ (d.role or '') ~ ' ' ~ (d.notes or '')) | lower }}">
         <td style="max-width:280px;white-space:normal;overflow-wrap:anywhere;">
           {% if (d.device_kind == 'manager-source' and d.pano_default_scope) or (d.has_instances and d.pano_default_scope) %}
-          {# A manager: the name enters the Manager workbench (EE) or the read-only scope page (CE, docs/FMC_SOURCE_PLAN.md D17). #}
+          {# A manager: the name enters the Manager workbench (EE) or the read-only scope page (CE). #}
           <a href="{{ '/manager/' if (manager_ui and not d.has_instances) else '/scopes/' }}{{ d.id }}" onclick="showNavOverlay()" class="pl-dev-link" title="{{ 'The box\'s instances' if d.has_instances else ('Manager view: scopes and cross-scope analysis' if manager_ui else 'The manager\'s scopes') }}">{{ d.display_name or d.host_name }}</a>
           {% else %}
           <button type="button" class="pl-dev-link" style="background:none;border:0;border-bottom:1px dotted var(--line2);padding:0;font:inherit;cursor:pointer;text-align:left;white-space:normal;overflow-wrap:anywhere;" onclick="openEditDevice({{ d.id }})" title="Details and settings">{{ d.display_name or d.host_name }}</button>
@@ -275,7 +275,7 @@
         <select name="nat_mode" id="nat-mode-{{ d.id }}" data-pinned="{{ '1' if d.nat_mode_pinned else '0' }}" class="inp" style="font-size:var(--fs-body);padding:7px 10px;">
           {# 'auto' is the unpinned state - the push probes the box. Without
              the option the dialog pre-selected Central, and merely saving a
-             device's details pinned it (found 2026-10-07 on a lab row). #}
+             device's details pinned it. #}
           {% set _nm = d.nat_mode or 'auto' %}
           <option value="auto"    {% if _nm == 'auto' %}selected{% endif %}>Auto (read from the device at push time)</option>
           <option value="central" {% if _nm == 'central' %}selected{% endif %}>Central (central-snat-map)</option>

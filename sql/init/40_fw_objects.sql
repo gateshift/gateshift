@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS fw_objects (
   port_to SMALLINT UNSIGNED NULL,
 
   vendor VARCHAR(64) NULL,
-  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  -- the Device, the key once phase 7 drops the name
   device_id INT NULL,
   external_id VARCHAR(255) NULL,
 

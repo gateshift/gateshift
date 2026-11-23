@@ -14,7 +14,7 @@ A tag is the program name, optionally with a bracketed pid, and nothing else.
 The text before the first ": " used to be taken as the tag unconditionally,
 which left an EMPTY payload for every vendor whose lines carry no tag at all
 (FortiOS and Check Point write key=value from the first byte) and discarded
-them in silence (docs/DEVICE_IDENTITY_PLAN.md, section 3a). Now the tag is
+them in silence. Now the tag is
 taken only when it looks like one, and otherwise the whole rest is payload.
 """
 import re

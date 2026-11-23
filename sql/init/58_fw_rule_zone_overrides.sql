@@ -17,7 +17,7 @@ USE gateshift;
 -- overrides would need a different shape and aren't needed yet.
 --
 -- Replaced the legacy (device_host, action, proto, dst_port) "natkey" PK
--- (Slice C, see feedback_rule_identity_hash memory). Existing deployments
+-- (Slice C). Existing deployments
 -- are migrated cartesian-explode style by main.py on first start.
 
 CREATE TABLE IF NOT EXISTS fw_rule_zone_overrides (

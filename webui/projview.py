@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Timo Duttine
 # SPDX-License-Identifier: BUSL-1.1
-"""The project view (docs/PROJECT_VIEW_DESIGN.md).
+"""The project view.
 
 Imported facts are immutable; everything the user does in a workspace is
 an edit of the project, applied when the project's view of its devices is
@@ -110,9 +110,21 @@ class ProjectView:
                 out.append(r)
         return out
 
-    def excluded_names(self) -> dict:
-        """kind -> set of labels (the integrity net's input)."""
-        return {kind: {lbl for lbl in m.values() if lbl} for kind, m in self.labels.items()}
+    def excluded_names(self, device_ids=None) -> dict:
+        """kind -> set of labels (the integrity net's input). With `device_ids`
+        only the exclusions on those Devices: the net's names carry no Device,
+        and another project's zone added on the target (a cp2x project on the
+        Check Point) read as a leak of a zone of the same name the build renders
+        from the source."""
+        if device_ids is None:
+            return {kind: {lbl for lbl in m.values() if lbl} for kind, m in self.labels.items()}
+        ids = {int(d) for d in device_ids if d is not None}
+        out: dict = {}
+        for (did, kind), keys in self.exclusions.items():
+            if did in ids:
+                lab = self.labels.get(kind, {})
+                out.setdefault(kind, set()).update(lab.get(k, k) for k in keys if lab.get(k, k))
+        return out
 
     def excluded_dict(self, device_id) -> dict:
         """kind -> set of names excluded on one device (the reference model's
@@ -475,19 +487,26 @@ def load(conn, project_id) -> ProjectView:
         exclusions.setdefault((int(did), kind), set()).add(str(key))
         labels.setdefault(kind, {})[str(key)] = label or str(key)
     # another project's additions are not this project's facts (D5): they
-    # leave the view like exclusions and may not come out of its build
+    # leave the view like exclusions and may not come out of its build. Only
+    # the additions on this project's own Devices: the names of the integrity
+    # net carry no Device, and a zone another pair's project added under the
+    # same name would otherwise read as a leak of this build
     try:
+        own = {int(x) for x in (conn.execute(text(
+            "SELECT source_ref_id, target_ref_id FROM fw_projects WHERE id = :p"),
+            {"p": pid}).fetchone() or ()) if x is not None}
         for table, kind, col in ADDITION_TABLES:
             for did, name in conn.execute(text(
                     f"SELECT device_id, {col} FROM {table} "
                     "WHERE project_id IS NOT NULL AND project_id <> :p"), {"p": pid}).fetchall():
-                if name:
+                if name and int(did) in own:
                     exclusions.setdefault((int(did), kind), set()).add(str(name))
                     labels.setdefault(kind, {}).setdefault(str(name), str(name))
         for did, prefix, vr in conn.execute(text(
                 "SELECT device_id, prefix, vr_name FROM fw_routes "
                 "WHERE project_id IS NOT NULL AND project_id <> :p"), {"p": pid}).fetchall():
-            exclusions.setdefault((int(did), "route"), set()).add(route_key(prefix, vr))
+            if int(did) in own:
+                exclusions.setdefault((int(did), "route"), set()).add(route_key(prefix, vr))
     except Exception:
         pass        # before the P3b schema exists there are no additions
     iface_edits: dict = {}
@@ -557,6 +576,49 @@ def exclude(conn, project_id: int, device_id: int, kind: str, key, label=None,
         "ON DUPLICATE KEY UPDATE label = VALUES(label), reason = VALUES(reason)"
     ), {"p": int(project_id), "d": int(device_id), "k": kind, "key": str(key)[:255],
         "l": (str(label)[:255] if label else None), "r": reason[:32]})
+
+
+# kind -> (the fact table, the SQL expression that is the exclusion key) for
+# the sweep after a re-import. Rules are not here: their key is the content
+# hash of fw_rules_consolidated_1, which the pipeline rebuilds after the
+# import, so right after the facts land that table says nothing yet.
+_FACT_KEYS = {
+    "interface": ("fw_interfaces", "interface_name"),
+    "zone": ("fw_zones", "name"),
+    "vrf": ("fw_vrfs", "name"),
+    "route": ("fw_routes", "CONCAT(prefix, '|', COALESCE(vr_name, 'default'))"),
+    "tag": ("fw_tags", "name"),
+    "nat_rule": ("fw_nat_rules", "LOWER(HEX(nat_hash))"),
+    # the object kinds share one table; a name still present under any type
+    # keeps its exclusion (conservative: never swept while the name exists)
+    "object": ("fw_imported_objects", "name"),
+    "group": ("fw_imported_objects", "name"),
+    "service": ("fw_imported_objects", "name"),
+    "service_group": ("fw_imported_objects", "name"),
+    "schedule": ("fw_imported_objects", "name"),
+}
+
+
+def sweep_orphans(conn, device_id: int) -> list[dict]:
+    """After a re-import replaced the Device's facts: drop the exclusions of
+    every project whose item is no longer among them (a VRF left out by one
+    project vanished with the next import of the box and the exclusion
+    pointed at nothing). An exclusion hides an
+    imported row; with the row gone it has nothing to do and the Overview
+    would list a ghost. Returns the rows removed, for the import's log."""
+    out: list[dict] = []
+    for kind, (table, expr) in _FACT_KEYS.items():
+        rows = conn.execute(text(
+            f"SELECT x.project_id, x.kind, x.item_key, x.label FROM fw_project_exclusions x "
+            f"WHERE x.device_id = :d AND x.kind = :k "
+            f"  AND NOT EXISTS (SELECT 1 FROM {table} t "
+            f"                  WHERE t.device_id = x.device_id AND {expr} = x.item_key)"
+        ), {"d": int(device_id), "k": kind}).mappings().all()
+        for r in rows:
+            restore(conn, r["project_id"], device_id, kind, r["item_key"])
+            out.append({"project_id": r["project_id"], "kind": kind,
+                        "item_key": r["item_key"], "label": r["label"] or r["item_key"]})
+    return out
 
 
 def restore(conn, project_id: int, device_id: int, kind: str, key) -> int:

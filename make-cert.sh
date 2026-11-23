@@ -11,7 +11,8 @@
 # The certificate carries localhost and this host's names and addresses, so
 # the browser warns once about the unknown issuer and is otherwise content.
 # To use a certificate from your own CA, put its certificate and key into
-# the two files at any time and restart the stack (docker compose up -d).
+# the two files at any time and restart the web server
+# (docker compose restart webapp), which reads them when it starts.
 
 set -euo pipefail
 cd "$(dirname "$0")"

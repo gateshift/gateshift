@@ -3,7 +3,7 @@
 --
 -- The rule's identity hash (content_hash on the four rule stage tables), as
 -- ONE function in the database, the way gs_nat_hash is (47_fn_nat_hash.sql).
--- Phase 6 of docs/DEVICE_IDENTITY_PLAN.md: the Device's row id is term 1,
+-- Phase 6 of the Device identity rework: the Device's row id is term 1,
 -- where the Device's name used to be, so a rename moves no override and two
 -- Devices with one name hash apart. The route-derived zone stays excluded
 -- (a network edit must not orphan the overrides), and config (api_import)

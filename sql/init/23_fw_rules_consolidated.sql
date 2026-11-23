@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS fw_rules_consolidated_1 (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor VARCHAR(64) NULL,
-  -- the Device (docs/DEVICE_IDENTITY_PLAN.md, phases 5 and 7)
+  -- the Device
   device_id INT NULL,
   action ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',

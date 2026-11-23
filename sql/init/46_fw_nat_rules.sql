@@ -38,8 +38,7 @@ CREATE TABLE IF NOT EXISTS fw_nat_rules (
   properties      JSON NULL,
   -- Content-hash identity. SHA1 over the traffic-defining fields so
   -- overrides bind to a stable rule regardless of position/name edits.
-  -- See feedback_rule_identity_hash (rules) - same pattern, NAT-specific
-  -- field set documented in project_nat_phase_a_audit.
+  -- Same pattern as the rule content hash, with a NAT-specific field set.
   nat_hash        BINARY(20) NULL,
   created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

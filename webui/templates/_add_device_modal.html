@@ -1,5 +1,5 @@
 {# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
-{# Shared add-device modal (inventory page + project list, docs/PROJECTS_UI_DESIGN.md D7/D8).
+{# Shared add-device modal (inventory page + project list).
    Expects `tenant_id`, `platform_labels`, `manager_ui`. Opens via openAddModal();
    Esc + backdrop click cancel. The script below defines everything the modal
    needs - include it once per page. #}
@@ -20,7 +20,7 @@
 
       <div class="field">
         <label>Platform</label>
-        {# what the platform needs before it can be read or pushed (docs/UI_USABILITY_PLAN.md, D10) #}
+        {# what the platform needs before it can be read or pushed #}
         <a id="add-device-prereq" class="mut" href="#" target="_blank" rel="noopener" style="display:none;font-size:var(--fs-small);margin-bottom:4px;" title="The platform's prerequisites: accounts, permissions, API access">Prerequisites for this platform</a>
         <select name="platform" id="add-device-platform" onchange="onAddPlatformChange(this.value)" class="inp" required>
           <option value="" selected disabled>Select a platform</option>
@@ -60,7 +60,7 @@
             {% endfor %}
           </optgroup>
           {% endif %}
-          {# A box that enters from the LOG STREAM (docs/DEVICE_IDENTITY_PLAN.md, phase 4):
+          {# A box that enters from the LOG STREAM:
              the real platform, and the senders the receiver has heard as the candidates.
              Only OPNsense is offered: its sender is verified live. The FortiOS and
              Check Point log parsers read recorded lines only so far, their entries
@@ -69,12 +69,11 @@
           <optgroup label="Log Sources">
             <option value="opnsense_logs">OPNsense</option>
           </optgroup>
-          {# Managers registered as rows, one entry each like the discovery group below
-             (docs/UI_USABILITY_PLAN.md, D69): the add route maps the entry to the platform
+          {# Managers registered as rows, one entry each like the discovery group below: the add route maps the entry to the platform
              whose reader serves it (a Panorama or a FortiManager is a PAN-OS or FortiOS row
              the import recognises, the cloud managers carry their flag). The Enterprise
              Edition's managers show with the manager UI; the Cisco Management Center is
-             read by the CE itself (docs/FMC_SOURCE_PLAN.md, D1). #}
+             read by the CE itself. #}
           <optgroup label="Manager">
             {% if manager_ui %}
             <option value="panw_panorama">Panorama</option>
@@ -85,7 +84,7 @@
             {% endif %}
             <option value="firepower_fmc">Cisco Secure Firewall Management Center</option>
           </optgroup>
-          {# Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): the manager is read with
+          {# Manager discovery: the manager is read with
              the credentials typed into its block and its scopes are shown with counts.
              Nothing is stored. Importing the scopes is the Enterprise Edition. #}
           <optgroup label="Manager (Discovery)">
@@ -109,8 +108,7 @@
           <input type="text" name="ftd_username" class="inp" autocomplete="off">
         </div>
       </div>
-      {# Cisco Secure Firewall Management Center as a manager row (docs/FMC_SOURCE_PLAN.md,
-         D2): on premises the address below, a user and its password; cloud-delivered the
+      {# Cisco Secure Firewall Management Center as a manager row: on premises the address below, a user and its password; cloud-delivered the
          Security Cloud Control region and the tenant's API token. The import fans the
          manager into domain, access-policy and device scopes. #}
       <div id="fmc-fields" style="display:none;flex-direction:column;gap:12px;">
@@ -214,7 +212,7 @@
         </div>
       </div>
 
-      {# Strata Cloud Manager tenant as a SOURCE (EE, docs/CLOUD_MANAGERS_PLAN.md C4), the
+      {# Strata Cloud Manager tenant as a SOURCE (EE, the cloud managers design C4), the
          Manager entry panw_scm (D69): no management address, the service account's secret
          is the row's secret, TSG and client id go to config.scm, the row is named here. #}
       <div id="panw-scm-block" style="display:none;flex-direction:column;gap:12px;">
@@ -235,7 +233,7 @@
       {% endif %}
 
       {% if manager_ui %}
-      {# FortiGate reached through FortiGate Cloud (docs/CLOUD_SOURCES_PLAN.md, C1):
+      {# FortiGate reached through FortiGate Cloud:
          the same FortiOS API, proxied per serial number; the IAM API user's
          password takes the API key's place, id, region and serial go to config. #}
       <div id="fgt-cloud-block" style="display:none;flex-direction:column;gap:12px;">
@@ -317,7 +315,7 @@
       <div id="wizard-content"></div>
     </div>
 
-    {# From the log stream (docs/DEVICE_IDENTITY_PLAN.md, phase 4): the candidate
+    {# From the log stream: the candidate
        list of senders the receiver has heard and no Device is mapped to. One
        submit creates the Device and the mappings in one transaction; a sender
        string never creates a Device by itself. A SIBLING of the main form. #}
@@ -434,7 +432,7 @@
       </form>
     </div>
 
-    {# Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): a SIBLING of the main form,
+    {# Manager discovery: a SIBLING of the main form,
        its inputs carry data-field names instead of form names, so nothing here is ever
        submitted; the credentials travel in the one fetch and are stored nowhere. #}
     <div id="discover-inline" style="display:none;flex-direction:column;gap:12px;">
@@ -472,7 +470,7 @@
         <div class="field"><label>Client secret</label>
           <input type="password" data-field="client_secret" class="inp" autocomplete="new-password"></div>
       </div>
-      {# Cisco Secure Firewall Management Center (docs/FMC_SOURCE_PLAN.md): the
+      {# Cisco Secure Firewall Management Center: the
          on-premises one through a user with REST API access, the cloud-delivered
          one through the Security Cloud Control tenant's API token. #}
       <div class="discover-kind" data-kind="fmc" style="display:none;flex-direction:column;gap:12px;">
@@ -917,7 +915,7 @@ function fmgDiscover() {
     .catch(function(e){ if (status) status.textContent = 'Error: ' + e; });
 }
 
-// Manager discovery (docs/MANAGER_DISCOVERY_PLAN.md): the block's inputs go into one
+// Manager discovery: the block's inputs go into one
 // fetch, the answer is rendered as the scope tree with counts. No form, no row.
 function managerDiscover() {
   const sel = document.getElementById('add-device-platform');
@@ -988,7 +986,7 @@ function renderDiscovery(d) {
   const fwHead = '<div style="margin-top:6px;"><b>Firewalls</b> <span class="dash">' + fws.length + '</span></div>';
   const notes = [].concat(d.skipped || [], d.truncated || []).map(function (t) {
     return '<div class="mut">' + esc(t) + '</div>'; }).join('');
-  // A Management Center is imported by the CE itself (docs/FMC_SOURCE_PLAN.md, D1):
+  // A Management Center is imported by the CE itself:
   // its footer points at the registration entry, not at the Enterprise Edition.
   const isFmc = (m.kind === 'fmc' || m.kind === 'cdfmc');
   const footText = isFmc

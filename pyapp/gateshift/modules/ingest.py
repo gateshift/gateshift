@@ -17,7 +17,7 @@ from modules.parsers.syslog import (BSD_RE as _BSD_RE, rfc3339_to_naive_utc,
                                     bsd_ts_to_naive_utc as _bsd_ts_to_naive_utc,
                                     split_line)
 # The sender identity (header host, source address, vendor serial) and the
-# flow hash over sender plus line (docs/DEVICE_IDENTITY_PLAN.md, phase 4).
+# flow hash over sender plus line.
 from modules.parsers.sender import (raw_hash as _sender_raw_hash, sender_key,
                                     source_addr_from_path, vendor_serial)
 
@@ -227,7 +227,7 @@ class SenderResolver:
 # only a mapped sender's rows reach the aggregates, and they land under the
 # Device (its platform as the vendor, its row id in device_id), never under
 # the sender string. The name column left the tables in phase 7 of
-# docs/DEVICE_IDENTITY_PLAN.md.
+# the Device identity rework.
 _FLOW_SOURCE = """
     FROM fw_flows f
     JOIN fw_log_senders s ON s.id = f.sender_id
@@ -351,8 +351,6 @@ def _upsert_rule_aggregates_for_hashes(conn, raw_hashes):
     that before the write). Each stored row fires exactly one ON DUPLICATE
     KEY UPDATE that increments hit_count_total by 1. Rows of an unmapped
     sender are not reached (the join), they wait in fw_flows.
-
-    Plan: project_rule_aggregate_persistence_active_plan (Phase 2 step 2).
     """
     if not raw_hashes:
         return
@@ -365,7 +363,7 @@ def _upsert_rule_aggregates_for_hashes(conn, raw_hashes):
     )
 
 
-# fw_nat_evidence write-through (project_nat_evidence_aggregate_active_plan P1).
+# fw_nat_evidence write-through.
 # Same exactly-once mechanics as _UPSERT_AGGREGATE_SQL, but with the
 # NAT-faithful key: zones IN the key (no flatten) and the original + translated
 # dst_port kept SEPARATE (no effective_port collapse → port-forwarding
@@ -417,8 +415,6 @@ def _upsert_nat_evidence_for_hashes(conn, raw_hashes):
     """Incremental write-through into fw_nat_evidence for a batch of
     just-inserted fw_flows raw_hashes - same exactly-once-per-row mechanics as
     _upsert_rule_aggregates_for_hashes.
-
-    Plan: project_nat_evidence_aggregate_active_plan (P1).
     """
     if not raw_hashes:
         return

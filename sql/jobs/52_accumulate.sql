@@ -3,7 +3,7 @@
 
 -- Module: Accumulate (destination-centric)
 -- Groups consolidated_1 by (vendor, device_id, action, direction, proto, dst_port, effective_dst_ip);
--- the rows match by the Device's id (docs/DEVICE_IDENTITY_PLAN.md, phases 5 and 7).
+-- the rows match by the Device's id.
 -- internet_public_dst / internet_public_src collapse public IPs independently per side.
 
 SET @ip_dst_on = IFNULL(
@@ -139,8 +139,7 @@ FROM tmp_c1_effective
 GROUP BY vendor, device_id, action, direction, proto, dst_port, effective_dst_ip,
   CASE WHEN source_type = 'api_import' THEN rule_name ELSE NULL END,
   -- Negate flags split: rules with disagreeing negate-flags on the same
-  -- (proto, port, dst_ip) tuple stay separate after aggregation. Per
-  -- project_rule_negation_plan conflict-policy.
+  -- (proto, port, dst_ip) tuple stay separate after aggregation.
   negate_source, negate_destination, negate_service;
 
 -- ============================================================

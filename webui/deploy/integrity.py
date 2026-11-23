@@ -126,7 +126,7 @@ def toposort_by_members(
     return out
 
 
-# ── I4 the project view (docs/PROJECT_VIEW_DESIGN.md, D9) ─────────────────────
+# ── I4 the project view ─────────────────────
 # What a project excluded ("deleted in this project") must never come out of
 # a render. The loaders apply the view; this is the net under them: the
 # generated sections are searched for the excluded names, and a hit is a

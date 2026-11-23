@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS fw_rules_endpoint_pairs (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   generated_at TIMESTAMP NOT NULL,
   vendor       VARCHAR(64) NULL,
-  -- the Device, the key once phase 7 drops the name (docs/DEVICE_IDENTITY_PLAN.md)
+  -- the Device, the key once phase 7 drops the name
   device_id  INT NULL,
   action       ENUM('allow','deny','drop','reject','unknown') NOT NULL DEFAULT 'unknown',
   direction    ENUM('in','out','forward','unknown') NOT NULL DEFAULT 'unknown',

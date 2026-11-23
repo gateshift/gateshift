@@ -266,7 +266,7 @@ def outbound_nat_mode(sess, device) -> tuple[str | None, str]:
     so a real firewall's configuration never arrives complete - which left
     this preflight permanently blind on every box with a real configuration
     while it insisted on parsing the whole file. But the block it needs sits
-    EARLY: measured at bytes 7329-7400 on a seeded lab box, the block itself
+    EARLY: measured at bytes 7329-7400 on OPNsense 26.7, the block itself
     being 71 bytes. The readable prefix carries it.
 
     Returns (mode, note). `mode` is None when it could not be determined -

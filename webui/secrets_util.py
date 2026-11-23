@@ -41,6 +41,39 @@ def is_configured() -> bool:
     return _fernet() is not None
 
 
+class SecretKeyError(RuntimeError):
+    """GATESHIFT_SECRET_KEY is set but is not a Fernet key."""
+
+
+def key_problem() -> str | None:
+    """One sentence when GATESHIFT_SECRET_KEY is set but unusable, else None.
+
+    Unset is the documented degraded mode and no problem here. A value that is
+    set but no Fernet key used to pass silently (2026-11-17, the demo seats):
+    protect() then stored every credential in clear text and the VPN key store
+    answered "not configured" although the variable was there. The start
+    refuses such a value instead, see check_key().
+    """
+    raw = (os.environ.get(_ENV_KEY) or "").strip()
+    if not raw:
+        return None
+    try:
+        Fernet(raw.encode())
+    except Exception:
+        return (f"{_ENV_KEY} is set but is not a Fernet key (32 random bytes as "
+                "url-safe base64, 44 characters). With it the stored credentials would "
+                "sit in clear text and the VPN key store would be off, so Gateshift does "
+                "not start. Generate a key with: openssl rand 32 | base64 | tr '+/' '-_'")
+    return None
+
+
+def check_key() -> None:
+    """Refuse to start on a set but unusable GATESHIFT_SECRET_KEY."""
+    problem = key_problem()
+    if problem:
+        raise SecretKeyError(problem)
+
+
 def encrypt(plaintext: str) -> str:
     """Encrypt a plaintext secret → storable token. Raises if unconfigured."""
     f = _fernet()
@@ -146,14 +179,13 @@ def detached_tokens(values, stored_hashes, orphan_keys=()) -> list[str]:
     Device carries any more (an orphan key, `orphan_keys` are those names) was
     left behind by a rename on the source and a re-import under the new name,
     and substituting the placeholder for the renamed tunnel, which is what the
-    push did, installs a tunnel that never comes up and says nothing
-    (docs/DEVICE_IDENTITY_PLAN.md, one-way door 2). With an orphan key stored,
+    push did, installs a tunnel that never comes up and says nothing. With an orphan key stored,
     every tunnel without a key is returned, because which of them was renamed
     is not knowable. Without one, the tunnels without a key never got one,
     whether the Device holds keys for other tunnels or none at all, and the
     push keeps the placeholder path (`unkeyed_tokens`). Until 2026-11-11 any
     stored key made every tunnel without one a detachment, which refused a
-    push with the keys of some tunnels entered (the 0.9.5 rc matrix, cp2cp).
+    push with the keys of some tunnels entered.
     Returns the detached hashes, sorted, empty when the push is clean.
     """
     if not orphan_keys:

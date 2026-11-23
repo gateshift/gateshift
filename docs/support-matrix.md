@@ -7,9 +7,9 @@ Every platform Gateshift reads or writes, in which form, in which direction and 
 | **Firewalls and Clusters** | | | | |
 | Palo Alto Networks (PAN-OS) | standalone, HA pair, each vsys of a multi-vsys firewall as a scope | yes | yes | CE |
 | FortiGate (FortiOS) | standalone, FGCP cluster, direct or through FortiGate Cloud, each VDOM of a multi-VDOM unit as a scope | yes | yes | CE |
-| Check Point | one gateway or ClusterXL cluster at a time, through SmartCenter or Smart-1 Cloud, the virtual systems of a VSX gateway as scopes (sources, and targets of their policy) | yes | yes | CE |
+| Check Point | one gateway or ClusterXL cluster at a time, through SmartCenter, Smart-1 Cloud or a Multi-Domain domain, the virtual systems of a VSX gateway as scopes (sources, and targets of their policy) | yes | yes | CE |
 | Cisco Firepower (FTD, FDM-managed) | standalone | yes | - | CE |
-| Cisco Secure Firewall Management Center | on-premises or cloud-delivered, its domains, access policies and devices (standalone, HA pair) as scopes | yes | - | CE |
+| Cisco Secure Firewall Management Center | on-premises or cloud-delivered, its domains, access policies and devices (standalone, HA pair, each member of a cluster) as scopes | yes | - | CE |
 | Cisco ASA | configuration file | yes | - | CE |
 | OPNsense | configuration file | yes | - | CE |
 | **Cloud Platforms** | | | | |

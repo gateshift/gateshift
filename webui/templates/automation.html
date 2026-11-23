@@ -1,0 +1,178 @@
+{# Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1 #}
+{# The Automation page: the API and the MCP
+   endpoint, the tokens that open them (the automation API design D4: created
+   by name, shown once, revoked here) and the audit of the writes that came
+   through. A landing-mode page: the tree beside it as on Devices and Projects. #}
+{% extends "base.html" %}
+{% block title %}Automation - Gateshift{% endblock %}
+{% block main_class %}{% endblock %}
+{% block content %}
+{% set _source_gate = not has_source_capable %}
+{% set _right_gate  = (not has_target_capable) or (not selected_target) %}
+{% set _gate_locked = _source_gate %}
+{% set _right_locked = _source_gate or _right_gate %}
+<div class="ws-layout">
+{% with nav_mode='landing' %}{% include "_ws_nav.html" %}{% endwith %}
+  <div id="ws-main">
+    <div class="ws-head">
+      <div id="ws-crumb" class="ws-crumb"><span class="cur">Automation</span></div>
+    </div>
+    <div class="ws-top">
+      <div id="ws-hint" class="ws-hint">
+        <div class="ws-hint-body"><span class="ws-hint-cap" title="What you can do here">&#8505;&#65039;</span><span id="ws-hint-text">Programs use the API, AI clients the MCP endpoint. Both need a token from this page.</span></div>
+      </div>
+    </div>
+<div style="padding:14px 20px 24px;">
+
+  {# ── The API and the AI assistance (D3): the addresses and the caution ── #}
+  <h2 style="font-size:var(--fs-body);font-weight:600;color:var(--tx);margin:0 0 6px;">The API</h2>
+  <p class="mut" style="font-size:var(--fs-body);margin:0 0 18px;">
+    A program calls <code id="api-url">{{ api_url }}</code> with the token in the <code>Authorization</code> header.
+    The OpenAPI description: <a href="/api/v1/docs" target="_blank" rel="noopener">/api/v1/docs</a>.
+  </p>
+
+  <h2 style="font-size:var(--fs-body);font-weight:600;color:var(--tx);margin:0 0 6px;">AI assistance (optional)</h2>
+  <p class="mut" style="font-size:var(--fs-body);margin:0 0 6px;">
+    Connect an AI client to <code id="mcp-url">{{ mcp_url }}</code> with a token of scope <code>project</code>.<br>
+    The client can then operate Gateshift but never push: the MCP endpoint has no push, whatever the token. Pushes stay with you on the Review &amp; Deploy page.<br>
+    <strong style="color:var(--danger);">Caution:</strong> <strong>THIS HANDS YOUR FIREWALL DATA TO THE MODEL'S PROVIDER.</strong> A locally hosted model keeps it in house.
+  </p>
+
+  {# ── The tokens: the heading with the opener of the dialog,
+       as the Projects page opens its wizard ── #}
+  <div style="display:flex;align-items:center;gap:12px;margin:26px 0 6px;">
+    <h2 style="font-size:var(--fs-body);font-weight:600;color:var(--tx);margin:0;">API Tokens</h2>
+    <div style="margin-left:auto;"><button type="button" onclick="openTokenModal()" class="btn">+Add API Token</button></div>
+  </div>
+  {% if new_token %}
+  <div class="card" style="margin-bottom:16px;">
+    <div style="margin-bottom:6px;">The token for <strong>{{ new_name }}</strong>, shown once. Copy it now.</div>
+    <code id="new-token" style="display:block;word-break:break-all;font-size:var(--fs-body);padding:8px 10px;background:var(--bg2);border:1px solid var(--line);">{{ new_token }}</code>
+  </div>
+  {% endif %}
+
+  {# ── The add-token dialog: Esc and the backdrop cancel, the name takes the focus ── #}
+  <div id="add-token-modal" class="hidden fixed inset-0 z-50 items-center justify-center"
+       style="background:rgba(4,7,11,0.6);"
+       onclick="if (event.target === this) closeTokenModal();">
+    <div style="background:var(--bg1);border:1px solid var(--line2);border-radius:0;padding:20px;max-width:440px;width:100%;margin:0 16px;box-shadow:var(--shadow-pop);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <h2 style="margin:0;font-size:var(--fs-title);font-weight:600;color:var(--tx);">Add API Token</h2>
+        <button type="button" onclick="closeTokenModal()" class="x" aria-label="Close">&times;</button>
+      </div>
+      {# what each scope allows, one sentence each (operator 2026-11-23) #}
+      <ul id="add-token-scopes" class="mut" style="font-size:var(--fs-body);margin:-6px 0 14px;padding-left:18px;line-height:1.5;list-style:disc;display:flex;flex-direction:column;gap:4px;">
+        <li><code style="color:var(--tx);font-weight:500;">read</code> reads the Devices, projects, rules, findings and jobs and changes nothing.</li>
+        <li><code style="color:var(--tx);font-weight:500;">project</code> also curates and builds a project but never pushes, the scope for an AI client.</li>
+        <li><code style="color:var(--tx);font-weight:500;">full</code> also pushes, publishes and discards and manages Devices, projects and pre-shared keys.</li>
+      </ul>
+      <form method="post" action="/api-tokens" id="add-token-form" style="display:flex;flex-direction:column;gap:12px;">
+        {% if form_error %}
+        <div class="tag warn">{{ form_error }}</div>
+        {% endif %}
+        <div class="field">
+          <label>Name</label>
+          <input type="text" id="add-token-name" name="name" class="inp" maxlength="64" placeholder="The agent or the program that uses it" required autocomplete="off">
+        </div>
+        <div class="field">
+          <label>Scope</label>
+          <select name="scope" class="inp" title="What the installation accepts from this token">
+            {% for sc in scopes %}<option value="{{ sc }}"{% if sc == 'project' %} selected{% endif %}>{{ sc }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Expiry</label>
+          <select name="expires_days" class="inp" title="When the token stops authenticating">
+            <option value="0">none</option><option value="30">30 days</option>
+            <option value="90" selected>90 days</option><option value="365">a year</option>
+          </select>
+        </div>
+        {% if tenants and tenants|length > 1 %}
+        <div class="field">
+          <label>Tenant</label>
+          <select name="tenant_id" class="inp" title="Bind the token to one tenant">
+            <option value="0">every tenant</option>
+            {% for tn in tenants %}<option value="{{ tn.id }}">{{ tn.name }}</option>{% endfor %}
+          </select>
+        </div>
+        {% endif %}
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+          <button type="button" onclick="closeTokenModal()" class="btn">Cancel</button>
+          <button type="submit" class="btn">Add</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+    function openTokenModal() {
+      var m = document.getElementById('add-token-modal');
+      m.classList.remove('hidden'); m.style.display = 'flex';
+      document.addEventListener('keydown', _tokenModalEsc, true);
+      setTimeout(function () { document.getElementById('add-token-name').focus(); }, 0);
+    }
+    function closeTokenModal() {
+      var m = document.getElementById('add-token-modal');
+      m.classList.add('hidden'); m.style.display = '';
+      document.removeEventListener('keydown', _tokenModalEsc, true);
+    }
+    function _tokenModalEsc(e) {
+      if (e.key === 'Escape') { e.preventDefault(); closeTokenModal(); }
+    }
+    {% if form_error %}document.addEventListener('DOMContentLoaded', openTokenModal);{% endif %}
+  </script>
+
+  <div class="twrap">
+  <table>
+    <thead><tr><th>Name</th><th>Scope</th><th>Expires</th><th>Tenant</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for t in tokens %}
+      <tr{% if t.revoked_at or t.expired %} style="opacity:0.55;"{% endif %}>
+        <td>{{ t.name }}</td>
+        <td>{{ t.scope }}</td>
+        <td>{{ t.expires_at or 'never' }}</td>
+        <td>{{ t.tenant_name or 'every' }}</td>
+        <td>{{ t.created_at }}</td>
+        <td>{{ t.last_used_at or '-' }}</td>
+        <td>{% if t.revoked_at %}revoked {{ t.revoked_at }}{% elif t.expired %}expired{% else %}active{% endif %}</td>
+        <td style="text-align:right;">
+          {% if not t.revoked_at %}
+          <form method="post" action="/api-tokens/{{ t.id }}/revoke" style="display:inline;margin:0;">
+            <button type="submit" class="btn danger" title="A revoked token never authenticates again">Revoke</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="mut">No token yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  {# ── The audit (D3): the MCP server calls the API with the connection's token, so one list carries both ── #}
+  <h2 style="font-size:var(--fs-body);font-weight:600;color:var(--tx);margin:26px 0 6px;">Writes through the API and the MCP server</h2>
+  <p class="mut" style="font-size:var(--fs-body);margin:0 0 12px;">
+    The latest {{ writes|length }}{% if n_writes > writes|length %} of {{ n_writes }}{% endif %}, by token.
+  </p>
+  <div class="twrap">
+  <table id="api-writes">
+    <thead><tr><th>When</th><th>Token</th><th>Call</th><th>What</th><th>Why</th></tr></thead>
+    <tbody>
+    {% for w in writes %}
+      <tr>
+        <td style="white-space:nowrap;">{{ w.created_at }}</td>
+        <td>{{ w.token_name }}</td>
+        <td><code>{{ w.method }} {{ w.path }}</code></td>
+        <td>{{ (w.detail or '')[:300] }}{% if w.project_id %} <span class="mut">(project {{ w.project_id }})</span>{% endif %}</td>
+        <td class="mut">{{ w.reason or '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="mut">No write through the API yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+  </div>{# end ws-main #}
+</div>{# end ws-layout #}
+{% endblock %}

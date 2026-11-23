@@ -3,7 +3,7 @@
 
 USE gateshift;
 
--- Network-Strang VRF entity (Slice 5). Promotes the previously-free-string
+-- Network strand VRF entity (Slice 5). Promotes the previously-free-string
 -- fw_routes.vr_name to a first-class entity with per-VR properties + rename
 -- overlay. Mirrors fw_zones shape - symmetric design (zone vs VRF, both
 -- per-device named entities with a render-time rename overlay).

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 """
-Freshness of the target configuration artefact (docs/DEPLOY_PAGE_DESIGN.md, E4).
+Freshness of the target configuration artefact.
 
 One project holds one artefact: the sections a build rendered, the Review
 report and the summary the page shows. The push sends that stored artefact and

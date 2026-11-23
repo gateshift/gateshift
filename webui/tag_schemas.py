@@ -5,15 +5,14 @@
 
 Single source of truth for the keys/types/UI labels of Tag-object
 properties per target platform. Mirrors `webui/zone_schemas.py` and
-`webui/nat_schemas.py` - see
-[[feedback_vendor_properties_schema_driven]].
+`webui/nat_schemas.py`.
 
 Forti is intentionally absent from SCHEMA: FortiGate policies have no
 general-purpose tag concept (live-API schema-verified 2026-06-03), so the
 Tags Sub-Tab hides itself on Forti-target via the existing
 target-driven Sub-Tab gating in rules.html.
 
-Cross-vendor Color-mapping is user-driven (`feedback_user_owns_migration_decisions`):
+Cross-vendor Color-mapping is user-driven:
 if a PA-source-tag with `pa_color="color5"` is mapped onto a CP-target,
 the user picks the CP color explicitly in Enrichment > Tags. Default
 fallback when unmapped at push-time: vendor-default ("color1" for PA,

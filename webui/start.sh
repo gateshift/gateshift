@@ -1,7 +1,7 @@
 #!/bin/sh
 # Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1
 #
-# Web container entry (docs/ACCESS_DESIGN.md, L3): builds the stylesheet,
+# Web container entry: builds the stylesheet,
 # then serves HTTPS on 8443 from the certificate mounted at /certs and
 # answers plain HTTP on 8080 with a redirect to HTTPS. Compose publishes
 # the two as 443 and 80. Extra arguments go to uvicorn (the development

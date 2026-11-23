@@ -146,7 +146,7 @@ def _get_mgmt_endpoint(device: dict) -> tuple[str, int]:
     # a row whose ip field carries a URL or host/path (typed before the
     # wizard split it) still resolves to its host; an IPv6 literal is
     # refused here, before it is parsed into a bare label (defect 4 of
-    # docs/IPV6_PLAN.md: '2001:db8::5' became the host '2001')
+    # the IPv6 design: '2001:db8::5' became the host '2001')
     host, port, _path = split_mgmt_address(str(ip))
     host = management_host(host or str(ip), "Check Point management")
     return host, int(mgmt.get("port") or port or 443)
@@ -163,8 +163,7 @@ def split_mgmt_address(text: str) -> tuple[str, int | None, str]:
     host_port, _, path = s.partition("/")
     # an IPv6 literal, bracketed (with or without a port) or bare, comes back
     # whole, so management_host can refuse it by what it is; the first colon
-    # used to cut '2001:db8::5' down to the host '2001' (docs/IPV6_PLAN.md,
-    # defect 4)
+    # used to cut '2001:db8::5' down to the host '2001'
     if host_port.startswith("["):
         host, _, port_text = host_port[1:].partition("]")
         port_text = port_text.lstrip(":")
@@ -220,7 +219,7 @@ def _cp_cluster_members(gw: dict) -> list[dict]:
     ``gaia_ip`` is the member's OWN management IP (the ``ip-address`` field;
     cpgw1=.111 / cpgw2=.112), which is the per-member Gaia endpoint - the cluster
     VIP is NOT a Gaia endpoint, so a cluster network push must target each member
-    here (see project_cp_cluster_plan F4). ``interfaces`` is the member's iface
+    here. ``interfaces`` is the member's iface
     list (dicts shaped like a simple-gateway's, so the import parse loop reuses
     them). Returns ``[]`` for a non-cluster gateway (no ``cluster-members``).
     Shared by the import collect (CP-1) and the per-member network push (CP-2)."""
@@ -241,8 +240,53 @@ def _cp_cluster_members(gw: dict) -> list[dict]:
 # CP rate-limits ~3 logins in <30s, but the Discover UI fires four kinds
 # back-to-back. Caching the SID lets all four share one login. The cache
 # TTL stays well under CP's session timeout (default ~10 min for read).
-_SID_CACHE: dict[tuple[str, str], tuple[str, float]] = {}
+_SID_CACHE: dict[tuple[str, str, str | None], tuple[str, float]] = {}
 _SID_TTL = 240.0  # seconds
+
+
+def _cache_key(device: dict) -> tuple[str, str, str | None]:
+    """The shared read session's cache key: management URL, API key, domain.
+
+    Multi-Domain (MDS): config.cp.domain scopes the whole session to that domain -
+    every show-/set-/add- call then operates inside it. No domain = MDS level (or a
+    plain SmartCenter). Sessions are PER-DOMAIN, so the domain is part of the key.
+    """
+    base_url = _api_url(device)
+    api_key = device.get("api_key") or ""
+    try:
+        _cfg = device.get("config") or {}
+        if isinstance(_cfg, str):
+            _cfg = json.loads(_cfg or "{}")
+        domain = ((_cfg.get("cp") or {}).get("domain")) or None
+    except Exception:
+        domain = None
+    return base_url, api_key, domain
+
+
+def _close_cached_session(device: dict) -> None:
+    """Log the Device's shared read session out, if one is cached (backlog 33).
+
+    The push stages in a session of its own and starts by closing the
+    sessions an earlier push left behind. Our own shared session would be one
+    of them, so it goes first, in order. The next read opens a fresh one.
+    """
+    try:
+        key = _cache_key(device)
+    except Exception:
+        return          # no management address: _login says so right after
+    cached = _SID_CACHE.pop(key, None)
+    if not cached:
+        return
+    try:
+        requests.post(
+            f"{key[0]}/logout",
+            json={},
+            headers={"X-chkp-sid": cached[0]},
+            verify=False,
+            timeout=30,
+        )
+    except Exception:
+        pass
 
 
 def _login(device: dict, *, fresh: bool = False) -> tuple[str, str]:
@@ -260,20 +304,9 @@ def _login(device: dict, *, fresh: bool = False) -> tuple[str, str]:
     in close succession. We retry up to three times with linear backoff
     (5s, 10s, 15s) before surfacing the error.
     """
-    base_url = _api_url(device)
-    api_key = device.get("api_key") or ""
+    base_url, api_key, domain = _cache_key(device)
     if not api_key:
         raise RuntimeError("No API key configured")
-    # Multi-Domain (MDS): config.cp.domain scopes the whole session to that domain -
-    # every show-/set-/add- call then operates inside it. No domain = MDS level (or a
-    # plain SmartCenter). Sessions are PER-DOMAIN, so the domain is part of the cache key.
-    try:
-        _cfg = device.get("config") or {}
-        if isinstance(_cfg, str):
-            _cfg = json.loads(_cfg or "{}")
-        domain = ((_cfg.get("cp") or {}).get("domain")) or None
-    except Exception:
-        domain = None
     cache_key = (base_url, api_key, domain)
     if not fresh:
         cached = _SID_CACHE.get(cache_key)
@@ -480,6 +513,7 @@ def _verify_policy_in_session(base_url: str, sid: str,
             continue
         seen.add(key)
         fixable.append({"layer": key[0], "rule_number": key[1],
+                        "behind_number": min(int(m.group("a")), int(m.group("b"))),
                         "message": msg})
     status = task.get("status") or ""
     return {"ok": status == "succeeded" and not errors,
@@ -512,13 +546,20 @@ def verify_policy(device: dict, package: str) -> dict:
     sid, base_url = _login(device, fresh=True)
     try:
         res = _verify_policy_in_session(base_url, sid, package)
+        # the names of both rules of a pair, the later one (to disable) and
+        # the earlier one that covers it (CE backlog 29: the operator reads
+        # "behind rule 2 gs-internal-outbound" instead of a bare number),
+        # one paged read of the rulebase per layer
+        names: dict[str, dict[int, tuple[str | None, str | None]]] = {}
         for f in res["fixable"]:
-            try:
-                _uid, _name = _find_rule_by_number(
-                    base_url, sid, f["layer"], f["rule_number"])
-            except Exception:
-                _uid = _name = None
-            f["name"] = _name
+            layer = f["layer"]
+            if layer not in names:
+                try:
+                    names[layer] = _rule_names_by_number(base_url, sid, layer)
+                except Exception:
+                    names[layer] = {}
+            f["name"] = names[layer].get(int(f["rule_number"]), (None, None))[1]
+            f["behind_name"] = names[layer].get(int(f.get("behind_number") or 0), (None, None))[1]
         res["capped"] = len(res["errors"]) >= _VERIFY_ERROR_CAP
         return res
     finally:
@@ -528,11 +569,11 @@ def verify_policy(device: dict, package: str) -> dict:
             pass
 
 
-def _find_rule_by_number(base_url: str, sid: str, layer: str,
-                         rule_number: int) -> tuple[str | None, str | None]:
-    """(uid, name) of the rule at CP rule-number in a layer. Resolution by
-    the API's own rule-number field (sections excluded), paged - never by
-    reconstructing rendered names."""
+def _rule_names_by_number(base_url: str, sid: str, layer: str) -> dict[int, tuple[str | None, str | None]]:
+    """{rule-number: (uid, name)} of a layer, by the API's own rule-number
+    field (sections excluded), paged - never by reconstructing rendered
+    names. One read serves every pair of the verify result."""
+    out: dict[int, tuple[str | None, str | None]] = {}
     offset = 0
     while True:
         rb = _call(base_url, sid, "show-access-rulebase",
@@ -546,11 +587,17 @@ def _find_rule_by_number(base_url: str, sid: str, layer: str,
                 entries.extend(x for x in (e.get("rulebase") or [])
                                if isinstance(x, dict))
         for r in entries:
-            if r.get("rule-number") == rule_number:
-                return r.get("uid"), r.get("name")
+            if isinstance(r.get("rule-number"), int):
+                out[r["rule-number"]] = (r.get("uid"), r.get("name"))
         offset += 100
         if offset >= (rb.get("total") or 0) or not entries:
-            return None, None
+            return out
+
+
+def _find_rule_by_number(base_url: str, sid: str, layer: str,
+                         rule_number: int) -> tuple[str | None, str | None]:
+    """(uid, name) of the rule at CP rule-number in a layer."""
+    return _rule_names_by_number(base_url, sid, layer).get(int(rule_number), (None, None))
 
 
 def _call(base_url: str, sid: str, command: str, payload: dict) -> dict:
@@ -619,6 +666,33 @@ def _gaia_url(device: dict) -> str:
     port = device.get("mgmt_port") or 443
     return f"https://{ip}:{port}/gaia_api"
 
+
+
+def _gaia_reader_device(device: dict) -> dict:
+    """The Device whose Gaia a read goes to: a cluster's first member (the
+    VIP answers no Gaia API, as the network push knows), else the Device
+    itself. Best effort: without a topology the Device stands."""
+    try:
+        cfg = json.loads(device.get("config") or "{}")
+    except Exception:
+        cfg = {}
+    cp = cfg.get("cp") or {}
+    if not _is_cluster_target(cp.get("gateway_type")):
+        return device
+    try:
+        sid, base_url = _login(device)
+        try:
+            gw = _fetch_gateway_topology(base_url, sid, cp.get("gateway_uid"),
+                                         cp.get("gateway_type") or "simple-cluster")
+        finally:
+            try:
+                _logout(base_url, sid)
+            except Exception:
+                pass
+        members = _cp_cluster_members(gw)
+    except Exception:
+        return device
+    return {**device, "mgmt_ip": members[0]["gaia_ip"]} if members else device
 
 def _gaia_login(device: dict, *, retries: int = 2) -> tuple[str, str]:
     """Login to Gaia REST API via user+password. Returns (sid, base_url).
@@ -818,7 +892,7 @@ def _fetch_all_gaia_interfaces_optional(device: dict) -> list[dict]:
     if not (device.get("gaia_user") and device.get("gaia_password")):
         return []
     try:
-        sid, base_url = _gaia_login(device, retries=0)
+        sid, base_url = _gaia_login(_gaia_reader_device(device), retries=0)
     except Exception:
         return []
     try:
@@ -866,7 +940,7 @@ def _fetch_bonds_optional(device: dict) -> dict[str, tuple[list[str], list[str]]
     if not (device.get("gaia_user") and device.get("gaia_password")):
         return {}
     try:
-        sid, base_url = _gaia_login(device, retries=0)
+        sid, base_url = _gaia_login(_gaia_reader_device(device), retries=0)
     except Exception:
         return {}
     try:
@@ -962,7 +1036,7 @@ def _gaia_iface_payload(name: str, ipv4: str, mask_len: int | None,
                         ipv6: str = "", ipv6_mask_len: int | None = None) -> dict:
     """Common shape for add-/set-{physical,loopback,vlan}-interface. The
     IPv6 address rides in the same call (Gaia REST: ipv6-address and
-    ipv6-mask-length on every interface type; phase 3 of docs/IPV6_PLAN.md),
+    ipv6-mask-length on every interface type),
     which the gateway refuses while IPv6 is disabled, hence the preflight
     in the push."""
     p: dict = {"name": name}
@@ -989,7 +1063,8 @@ def _gaia_set_physical(base_url: str, sid: str, *, name: str,
                        comment: str | None = None,
                        enabled: bool | None = None,
                        timeout: int = 120, retries: int = 5,
-                       ipv6: str = "", ipv6_mask_len: int | None = None) -> dict:
+                       ipv6: str = "", ipv6_mask_len: int | None = None,
+                       ipv6_enabled: bool = False) -> dict:
     """Configure an existing physical IF. Cannot create - HW-bound.
 
     Gaia refuses ``ipv4-address`` while the DHCP client is enabled
@@ -999,6 +1074,17 @@ def _gaia_set_physical(base_url: str, sid: str, *, name: str,
     mention DHCP - Gaia treats DHCP as iface state, not a co-set field.
     """
     payload = _gaia_iface_payload(name, ipv4, mask_len, comment, enabled, ipv6, ipv6_mask_len)
+    # A declared physical interface carries exactly the declared address
+    # families: the undeclared
+    # one is written as Gaia's empty value, which clears a stale address an
+    # earlier estate left on the port. Gaia clears on the empty string
+    # without the mask-length field (verified on R81.20). The IPv6 clear
+    # goes out only while the stack is enabled, a disabled one refuses the
+    # field. A VLAN, bond or loopback is created fresh and needs none of it.
+    if "ipv4-address" not in payload:
+        payload["ipv4-address"] = ""
+    if "ipv6-address" not in payload and ipv6_enabled:
+        payload["ipv6-address"] = ""
     try:
         return _gaia_call(base_url, sid, "set-physical-interface", payload,
                           timeout=timeout, retries=retries)
@@ -1030,9 +1116,10 @@ def _gaia_set_physical_dhcp(base_url: str, sid: str, *, name: str,
                       retries=retries)
 
 
-# bond-mode is a vendor-specific knob Gateshift doesn't yet model. Lab uses LACP
-# (8023AD); production rollouts can extend fw_interfaces with a bond_mode
-# JSON sidecar later. Hardcoded default keeps V1 round-trippable on lab.
+# bond-mode is a vendor-specific knob Gateshift doesn't yet model. The
+# hardcoded default is LACP (8023AD), so a bond in that mode round-trips.
+# Production rollouts can extend fw_interfaces with a bond_mode JSON
+# sidecar later.
 _CP_BOND_MODE_DEFAULT = "8023AD"
 
 
@@ -1052,7 +1139,7 @@ def _gaia_clear_physical_ip(base_url: str, sid: str, *, name: str) -> None:
 
     Gaia's REST clears the address when ``ipv4-address`` is an empty
     string *and* the call omits ``ipv4-mask-length`` (which has a
-    mandatory 1..32 range; sending 0 fails validation). Lab-verified
+    mandatory 1..32 range, sending 0 fails validation). Verified
     against R8x: this single call drops ipv4 + mask to Not-Configured.
     Errors propagate so the bond push surfaces the real cause if the
     clear didn't take.
@@ -1229,7 +1316,7 @@ def _gaia_run_script(base_url: str, sid: str, script: str, *, timeout_s: int = 6
     """Run a shell script on the gateway through Gaia's run-script and
     return its output, read back through show-task (the output is base64
     in the task details). The one way to the IPv6 routing table: the REST
-    API has no IPv6 static-route command (docs/IPV6_PLAN.md, U6), clish
+    API has no IPv6 static-route command, clish
     has. A task that did not succeed, or a clish error in the output, is a
     RuntimeError: a script that ran is not a route that exists."""
     resp = _gaia_call(base_url, sid, "run-script", {"script": script}) or {}
@@ -1251,9 +1338,9 @@ def _gaia_run_script(base_url: str, sid: str, script: str, *, timeout_s: int = 6
 
     # A Gaia that answers run-script with the finished task inline needs no
     # show-task; one that registers the task a moment after handing out its
-    # id answers the first show-task with "Task ... doesn't exist" (0.9.4
-    # matrix, 2026-10-18, a fresh gateway): not found is retried for a
-    # while before it counts as a failure.
+    # id answers the first show-task with "Task ... doesn't exist" (seen on
+    # a fresh gateway): not found is retried for a while before it counts
+    # as a failure.
     status, out = _read(tasks_inline)
     not_found = 0
     for _ in range(max(1, timeout_s)):
@@ -1322,6 +1409,7 @@ def _gaia_ipv6_enabled(base_url: str, sid: str) -> bool | None:
     return bool(resp.get("enabled"))
 
 
+_IPV6_PREFLIGHT_STEP = "gaia: ipv6 preflight"   # loud, never fatal: the IPv4 parts go on (seen on ClusterXL)
 _IPV6_PREFLIGHT_DETAIL = (
     "IPv6 is disabled on the gateway (show-ipv6): the IPv6 addresses and routes of "
     "this push are skipped, the IPv4 parts are pushed. Enable IPv6 in Gaia (set-ipv6, "
@@ -1350,8 +1438,7 @@ def _gaia_add_static_route(base_url: str, sid: str, *, prefix: str,
     """
     addr, _, mask = prefix.partition("/")
     if ":" in addr:
-        # IPv6: clish, the REST API has none (docs/IPV6_PLAN.md, U6 and
-        # section 16); a v6 blackhole is declared by the render, never here
+        # IPv6: clish, the REST API has none; a v6 blackhole is declared by the render, never here
         if blackhole:
             raise RuntimeError("an IPv6 blackhole route is not pushed in this version")
         # clish names the IPv6 default route 'default' and refuses '::/0'
@@ -1527,8 +1614,7 @@ def _split_range(rng: str) -> tuple[str, str] | None:
 
 def _split_cidr_any(cidr: str) -> tuple[str, int, int] | None:
     """'10.0.0.0/24' → ('10.0.0.0', 24, 4), '2001:db8::/64' → (..., 64, 6).
-    None if invalid. The object render takes both families (phase 2 of
-    docs/IPV6_PLAN.md); _split_cidr stays the IPv4-only check of the paths
+    None if invalid. The object render takes both families; _split_cidr stays the IPv4-only check of the paths
     that do not (NAT, VPN) until their phase."""
     try:
         net = ipaddress.ip_network(cidr, strict=False)
@@ -1627,7 +1713,7 @@ def _cp_norm_name(name: str) -> str:
 # several, across types). Other vendors ship real objects under these names
 # (FortiGate's factory 'all'/'none' addresses, 'ALL'/'NONE' services), so a
 # cross-vendor push hits them. Always reserved → renamed to FF_<name>.
-# Live-found in QA (Forti→CP leg, FortiOS 7.6.7 factory 'none').
+# Seen live with a FortiOS 7.6.7 source and its factory 'none'.
 _CP_ALWAYS_RESERVED = {"none", "any", "all", "original", "internet"}
 
 
@@ -1668,7 +1754,7 @@ def _fetch_cp_access_roles(base_url: str, sid: str) -> set[str] | None:
     when none exist. Pagination mirrors _fetch_cp_reserved_names. Returns
     None when the call fails: the caller then pushes the identities as
     imported and says so (fail open, 2026-11-10; until then an empty set
-    stripped every identity, docs/UI_USABILITY_PLAN.md 14.4 item 5)."""
+    stripped every identity, the usability review 14.4 item 5)."""
     roles: set[str] = set()
     offset = 0
     for _ in range(60):
@@ -1856,8 +1942,8 @@ def _render_address_objects(
         # _build_addr_lookup) - don't emit it as a concrete object (BUG-020).
         if _is_any_address(otype, v):
             # "replaced by X" is not a reduction in the Review's vocabulary,
-            # so this object vanished from the objects row (-1 on every
-            # Check Point leg with an all-addresses object, matrix 0.9.4).
+            # so this object vanished from the objects row (-1 for every
+            # source with an all-addresses object).
             dropped.append(DroppedField(
                 rule_id=raw_name, field="value",
                 reason="0.0.0.0/0 'any' object: rule references resolve to "
@@ -1866,8 +1952,7 @@ def _render_address_objects(
             continue
 
         if otype == "ip-netmask":
-            # Both families in one object (section 2a; phase 2 of
-            # docs/IPV6_PLAN.md): a host carries ipv4-address and
+            # Both families in one object (section 2a): a host carries ipv4-address and
             # ipv6-address, a network subnet4 and subnet6. The parse failure
             # of the representative keeps the reasons below.
             halves = [(_split_cidr_any(c), c) for c in object_values(val)]
@@ -2113,12 +2198,12 @@ def _render_service_objects(
             # Port LIST ("80,8080" / "1-442,444-65535"): PAN-OS services
             # carry comma lists - both genuine PA port lists and the
             # two-range form a PA target materialized from an ASA 'neq'
-            # (so a PA box seeded via ASA→PA re-imports as a list). CP
+            # (so a PA box that an ASA migration filled re-imports as a list). CP
             # services take ONE port/range → same treatment as 'neq'
             # above: one range member per entry plus a service-group
             # under the REFERENCED name, so rule/group refs resolve
-            # instead of 404ing on a dropped object (matrix finding M-6,
-            # PA→CP - inline_S_tcp_-443).
+            # instead of 404ing on a dropped object (for example
+            # inline_S_tcp_-443).
             if "," in port:
                 pieces = [x.strip() for x in port.split(",") if x.strip()]
                 if len(pieces) >= 2:
@@ -2394,8 +2479,7 @@ def _prune_unpushable(names: list[str], pushable: set[str] | None,
 
     `ipv6_names` are the objects this push declared as IPv6 drops and
     `group_ipv6` the groups that lost such members: a reference to either
-    is declared on the rule by family and action (ipv6_loss, docs/IPV6_PLAN.md
-    D6 and D7) instead of as an unresolved reference; a side that empties
+    is declared on the rule by family and action (ipv6_loss) instead of as an unresolved reference; a side that empties
     stays the unresolved_reference blocker."""
     kept, lost = _integ.prune_refs(names, pushable, keep=("any", *CP_PREDEFINED_OBJECTS))
     v6_lost, other_lost = split_ipv6_loss(lost, ipv6_names)
@@ -2717,7 +2801,7 @@ def _render_schedules(schedules: list[dict],
     Schedule cross-vendor V1: prefers value.intervals (universal LCD).
     Falls back to value.cp_intervals (legacy CP-native) for objects that
     haven't been re-imported since the migrator ran. Objects with neither
-    get a DroppedField warn + skip per [[feedback_user_owns_migration_decisions]].
+    get a DroppedField warn + skip, the operator decides the mapping.
 
     Multi-Interval Quirk (CP only supports ONE start/end/recurrence per
     time-object): picks the first universal interval and warns about the
@@ -2858,8 +2942,7 @@ def _render_url_categories(url_categories: list[dict],
     url-list body. The driver reads its own cp_ slot
     (cp_list, cp_url_defined_as_regex?, cp_description?). Objects
     without cp_list (cross-vendor import from PA/Forti) → DroppedField
-    warn + skip; the user decides the manual mapping on the target per
-    feedback_user_owns_migration_decisions.
+    warn + skip, the user decides the manual mapping on the target.
 
     application-sites require a `primary-category`. We set
     "Custom_URL_Categories" as a generic bucket - the user can
@@ -3050,7 +3133,7 @@ def _render_security_rules(
         port_to = rule.get("port_to")
         _any_svc = any_svc_names or set()
         # The rule's service mode (the PA switch, honoured on every target since
-        # docs/APPDEF_WIDENING_PLAN.md D5): 'any' is the operator accepting every
+        # the application-default design D5): 'any' is the operator accepting every
         # service, so CP's builtin Any, declared by nothing.
         _svc_mode = str(rule.get("service_override") or "").strip().lower()
         if _svc_mode == "any":
@@ -3094,8 +3177,7 @@ def _render_security_rules(
         else:
             services = ["Any"]
 
-        # application-default on a target without App-ID (deploy.base.appdef_result,
-        # docs/APPDEF_WIDENING_PLAN.md): App-IDs the table does not know narrow
+        # application-default on a target without App-ID (deploy.base.appdef_result): App-IDs the table does not know narrow
         # the rule when others resolved, widen it to Any when none did.
         if rule.get("_appdef_unresolved"):
             dropped.append(appdef_result(rule_id, rule.get("action"),
@@ -3254,7 +3336,7 @@ def _render_security_rules(
 
         # Per-rule negate flags (rule.negate_{source,destination,service})
         # come from rules_query COALESCE(novr.*, r.*). CP Mgmt-API only
-        # accepts hyphen-form on POST per V0 lab-probe - emitting
+        # accepts hyphen-form on POST (probed live): emitting
         # negate-source/etc. → HTTP 400 "Unrecognized parameter".
         if rule.get("negate_source"):
             payload["source-negate"] = True
@@ -3316,9 +3398,9 @@ def _render_security_rules(
                     "ignore-warnings": True,
                 },
             })
-        # Tags - the CP Mgmt API on this lab version accepts `tags`
+        # Tags: the CP Mgmt API on the version probed accepts `tags`
         # neither on add-access-rule nor on set-access-rule (HTTP 400
-        # "Unrecognized parameter [tags]", verified live 2026-06-03).
+        # "Unrecognized parameter [tags]", verified live).
         # Until the correct API form is known (possibly tags.add /
         # UID refs / version-specific from R81.10): do not push, surface
         # as DroppedField. SmartConsole can tag afterwards.
@@ -3358,7 +3440,7 @@ def _render_https_rules(
     Inspection is CP's TLS-decryption rulebase: action decrypt|no-decrypt →
     Inspect|Bypass. source/destination resolve via addr_lookup; service goes by
     name (ref-only). URL categories → site-category via ``resolve_category(src,
-    rule_id)`` (cross-vendor mapping, project_cp_url_category_map_plan): custom →
+    rule_id)`` (cross-vendor mapping): custom →
     itself, else operator-map > live name-match vs the target catalog. A category
     that can't resolve drops the WHOLE rule (its category set is its match scope
     - never push an altered/partial match). Order preserved by position
@@ -3512,9 +3594,15 @@ def _render_nat_rules(
         vals = [v for v in (vals or []) if v]
         if pushable_addrs is None or not vals:
             return vals
+        # a family token ('any4' = All_Internet, 'any6' = the range this
+        # push creates) and the management's own
+        # predefined objects resolve here as they do on the access side
+        # (without it, a FortiGate source's NAT rules were dropped over 'any4')
         kept = [v for v in vals
                 if str(v).strip().lower() == "any"
                 or _resolve_addr(v, addr_lookup) in pushable_addrs
+                or _resolve_addr(v, addr_lookup) in CP_PREDEFINED_OBJECTS
+                or (str(v).strip().lower() in ("any4", "any6") and v in addr_lookup)
                 or _is_v4_literal(v)]
         if len(kept) != len(vals):
             lost = [str(v) for v in vals if v not in kept]
@@ -3553,7 +3641,7 @@ def _render_nat_rules(
         if _osrc is None or _odst is None:
             # _prune_nat_refs explains WHY (under orig_src / orig_dst); that the
             # whole rule goes has to be said as well, or the NAT row of the build
-            # statistics is short without a reason (matrix 0.9.4, fgt2cp: -31).
+            # statistics is short without a reason.
             dropped.append(DroppedField(
                 rule_id=rid, field="nat_rule",
                 reason="an original side lost all references this push can "
@@ -3574,7 +3662,7 @@ def _render_nat_rules(
                 ))
 
         # Reduce list-fields to a single item
-        # Consolidated hide rule ([[fgt-nat-hide-plan]]): CP's original-source
+        # Consolidated hide rule: CP's original-source
         # is single-valued - materialize ONE group holding every member
         # (analog _ensure_host) instead of silently narrowing to the first.
         _props_n = n.get("properties") or {}
@@ -3687,7 +3775,7 @@ def _render_nat_rules(
         # rendering it literally pairs a single-port original with a
         # 65535-port translated service and CP verification refuses the
         # install ("range size of Original and Translated columns must be
-        # the same", fgt2cp finding 2026-08-31). No rewrite → Original.
+        # the same"). No rewrite → Original.
         _tp_norm = str(trans_dst_port or "").strip().replace(" ", "")
         if _tp_norm in ("0-65535", "1-65535", "0", "any", "*"):
             trans_dst_port = None
@@ -3911,6 +3999,11 @@ def _render_interfaces(
             "comment": comment,
             "dhcp_enabled": dhcp_on,
             "enabled": bool(iface.get("enabled", True)),
+            # the project's zone of the interface, for the gateway object's
+            # binding after the Gaia push;
+            # 'default' is Gateshift's no-zone placeholder and no CP object
+            "zone": (_safe_name(iface.get("zone_name") or "")
+                     if (iface.get("zone_name") or "").strip().lower() not in ("", "default") else None),
         }
         if itype == "vlan":
             parent = (iface.get("parent_iface_name") or "").strip()
@@ -4247,7 +4340,7 @@ def flatten_cp_vpn(this_uid: str, this_name: str, this_domain_cidrs: list[str],
         seen_tunnel.add(tname)
         ike_name, ips_name = _synth_crypto(comm)
         # pairs within the family: an IPv4 local prefix against an IPv6
-        # remote one is nothing any vendor matches (docs/IPV6_PLAN.md, phase 5)
+        # remote one is nothing any vendor matches
         sels = [{"local": loc, "remote": rem}
                 for loc in (this_domain_cidrs or [])
                 for rem in (peer.get("domain_cidrs") or [])
@@ -4440,7 +4533,7 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
     local_members: list[str] = []   # union → the gateway's one VPN domain
 
     def _net_obj(cidr: str) -> str | None:
-        # a prefix or a first-last range of either family (docs/IPV6_PLAN.md, phase 5)
+        # a prefix or a first-last range of either family
         rng = _split_range_any(cidr)
         if rng:
             first, last, ver = rng
@@ -4625,8 +4718,7 @@ def _render_vpn(vpn_tunnels: list[dict], ike_by_name: dict, ipsec_by_name: dict,
 #  Gaia for static routes - the caller decides whether to fall back.
 
 # The management object classes of a VSX gateway or cluster (the container of
-# virtual systems) and of the virtual systems themselves
-# (docs/VIRTUAL_INSTANCES_PLAN.md, F-4). None of them answers
+# virtual systems) and of the virtual systems themselves. None of them answers
 # show-simple-gateway or show-simple-cluster: the wizard pins them from the
 # gateways-and-servers listing, the network read takes the generic object.
 _VSX_GATEWAY_TYPES = ("CpmiVsxNetobj", "CpmiVsxClusterNetobj")
@@ -4653,7 +4745,7 @@ def _is_cluster_target(gateway_type: str | None) -> bool:
 
 
 # The one sentence every reader of a virtual system's declared network strand
-# shows (docs/VSX_TARGET_PLAN.md, section 5): the build, the deploy tab, the
+# shows: the build, the deploy tab, the
 # push route and push() itself.
 VS_NETWORK_DECLARED = (
     "the network of a virtual system (interfaces, VLANs, routes) is provisioned "
@@ -4722,7 +4814,7 @@ def _vs_interface(iface: dict) -> dict:
     topo = iface.get("topology")
     if isinstance(topo, dict):
         # the gateways-and-servers listing: topology as a dict (leads-to-internet,
-        # ip-address-behind-this-interface, leads-to-dmz), measured on the MDS lab
+        # ip-address-behind-this-interface, leads-to-dmz), measured on an MDS
         behind = str(topo.get("ip-address-behind-this-interface") or "")
         if topo.get("leads-to-internet"):
             out["topology"] = "external"
@@ -4782,12 +4874,12 @@ def _fetch_gateway_topology(base_url: str, sid: str,
         # A VSX gateway, a VSX cluster or a virtual system: the simple-gateway
         # reads refuse the class, and the single-gateway discovery below would
         # hand a virtual system the interfaces of an unrelated gateway. The
-        # generic object answers (R10 of docs/VIRTUAL_INSTANCES_PLAN.md), its
+        # generic object answers (R10 of the virtual instances design), its
         # interface list normalised, its absence declared.
         if not gateway_uid:
             raise RuntimeError(f"{gateway_type}: no gateway uid pinned. Re-add the device via the Add-CP wizard")
         # the gateways-and-servers listing carries the object with its interface
-        # list and topology (measured on the R81.20 MDS lab), show-object the
+        # list and topology (measured on an R81.20 MDS), show-object the
         # common fields only, show-generic-object the object as stored
         try:
             obj = _find_gateway_object(base_url, sid, gateway_uid)
@@ -4871,7 +4963,7 @@ def _check_tp_blade(
     Two shapes: a simple gateway or cluster carries the blades as flat flags
     of its object, a virtual system (read from the gateways-and-servers
     listing) carries its enabled blades in ``network-security-blades``
-    under the same names (docs/VSX_TARGET_PLAN.md, D4).
+    under the same names.
     """
     try:
         cfg = json.loads(device.get("config") or "{}")
@@ -5064,7 +5156,7 @@ class CheckpointDriver(DeployDriver):
 
     # The push stages into a web_api session of its own and discards it when
     # anything fails mid-way, so taking a broken-off push back touches exactly
-    # its own changes (docs/PUSH_ROLLBACK_PLAN.md).
+    # its own changes.
     rollback_kind = "session"
 
     def default_settings(self) -> list[dict]:
@@ -5115,7 +5207,7 @@ class CheckpointDriver(DeployDriver):
 
     def strand_unavailable(self, *, device: dict, strand: str) -> str | None:
         """A virtual system takes the policy strand only: its network is
-        VSX provisioning (docs/VSX_TARGET_PLAN.md, D1 and D2). Every other
+        VSX provisioning. Every other
         Check Point target takes both strands."""
         if strand == "network" and _is_vs_type(_cp_slot(device).get("gateway_type")):
             return VS_NETWORK_DECLARED
@@ -5180,7 +5272,7 @@ class CheckpointDriver(DeployDriver):
         """The target's application-site CATEGORY catalog
         (show-application-site-categories) - the predefined names a decryption
         rule's site-category can reference. Read-only Mgmt-API, sorted + deduped.
-        Feeds the URL-category mapping (project_cp_url_category_map_plan)."""
+        Feeds the URL-category mapping."""
         sid, base_url = _login(device)
         try:
             resp = _call(base_url, sid, "show-application-site-categories",
@@ -5215,7 +5307,7 @@ class CheckpointDriver(DeployDriver):
         gw_uid = ((cfg.get("cp") or {}).get("gateway_uid"))
         if gw_uid:
             return self._list_target_interfaces_via_mgmt(device, cfg)
-        sid, base_url = _gaia_login(device)
+        sid, base_url = _gaia_login(_gaia_reader_device(device))
         try:
             out: list[dict] = []
             seen: set[str] = set()
@@ -5263,8 +5355,8 @@ class CheckpointDriver(DeployDriver):
                     # Gaia exposes admin-state as `enabled` (boolean) at the
                     # iface level. Missing field = True (Gaia's default for a
                     # configured iface). Mgmt-API path (_list_target_interfaces_via_mgmt)
-                    # has no equivalent, so the gap is documented in the plan
-                    # - only the Gaia-direct path tracks admin-state in V1.
+                    # has no equivalent: only the Gaia-direct path tracks the
+                    # admin state.
                     cp_enabled = bool(it.get("enabled", True))
                     row: dict = {
                         "name": name,
@@ -5316,7 +5408,7 @@ class CheckpointDriver(DeployDriver):
         gaia_ok = True
         if device.get("gaia_user") and device.get("gaia_password"):
             try:
-                _psid, _pburl = _gaia_login(device, retries=0)
+                _psid, _pburl = _gaia_login(_gaia_reader_device(device), retries=0)
             except Exception:
                 gaia_ok = False
                 self.warn_discover(
@@ -5468,7 +5560,7 @@ class CheckpointDriver(DeployDriver):
         gw_uid = ((cfg.get("cp") or {}).get("gateway_uid"))
         if gw_uid:
             return self._list_target_routes_via_mgmt(device, cfg)
-        sid, base_url = _gaia_login(device)
+        sid, base_url = _gaia_login(_gaia_reader_device(device))
         try:
             out: list[dict] = []
             seen: set[str] = set()
@@ -5587,7 +5679,7 @@ class CheckpointDriver(DeployDriver):
     def _list_static_routes_via_gaia(self, device: dict) -> list[dict]:
         """Pull static routes via Gaia ``show-static-routes`` - used as
         fallback by both the gateway-as-device path and the legacy path."""
-        sid, base_url = _gaia_login(device)
+        sid, base_url = _gaia_login(_gaia_reader_device(device))
         try:
             out: list[dict] = []
             seen: set[tuple] = set()
@@ -5663,8 +5755,7 @@ class CheckpointDriver(DeployDriver):
         not a VS, and gets dropped. R82 VSNext lists each VS as a regular
         ``simple-gateway`` / ``simple-cluster`` and there's no flag we can
         rely on to distinguish "this gateway is a VS"; we keep the strict
-        ``"Vs"`` substring match for V1 - VSNext support is V2 territory
-        once the lab has it.
+        ``"Vs"`` substring match for V1. VSNext support is V2 territory.
 
         On a non-VSX Mgmt-Server the call returns no Vs* objects: the method
         legitimately returns ``[]`` (no error). The VRF tab then renders
@@ -5774,10 +5865,9 @@ class CheckpointDriver(DeployDriver):
 
     # ── Threat-Prevention catalog (Mgmt-API) ───────────────────────
     #
-    # CP TP is a separate rulebase per TP-Layer (see
-    # project_cp_tp_separate_rulebase). Gateshift stores ONE strategy + params
-    # per (device, layer) and the generator produces TP-rules
-    # deterministically - Preview + Push call the same code.
+    # CP TP is a separate rulebase per TP-Layer. Gateshift stores ONE
+    # strategy + params per (device, layer) and the generator produces
+    # TP-rules deterministically: Preview + Push call the same code.
 
     def list_threat_layers(self, *, device: dict) -> list[dict]:
         """Pull all TP-Layers on the Mgmt-Server.
@@ -6208,7 +6298,7 @@ class CheckpointDriver(DeployDriver):
         # could synthesise a rule from (properties.vip_ref names the one it
         # did), so its translation does not travel - only the external address
         # above does. Said out loud: on a FortiGate source these were invisible
-        # in both directions, present on the box and absent here (matrix 0.9.4).
+        # in both directions, present on the box and absent here.
         _wired_vips = {str(((_n.get("properties") or {}).get("vip_ref") or "")).strip()
                        for _n in (nat_rules or [])}
         for _vip in (nat_vips or []):
@@ -6241,8 +6331,8 @@ class CheckpointDriver(DeployDriver):
                                             target="Check Point")
 
         # Policy-Based Forwarding is Gaia-OS tier on Check Point (route-policy),
-        # not a Mgmt-API rulebase - deferred per project_phase_3_pbf (CP source
-        # AND target out of scope). Accept the kwarg so the shared
+        # not a Mgmt-API rulebase, so it is deferred (CP source AND target out
+        # of scope). Accept the kwarg so the shared
         # driver.generate() call signature holds, and emit a drop-warn per PBF
         # rule so the non-migration is visible rather than a silent loss.
         for _pbf in (pbf_rules or []):
@@ -6268,8 +6358,7 @@ class CheckpointDriver(DeployDriver):
         # to object names (symmetry with security-rule rendering below).
         addr_lookup = _build_addr_lookup(address_objects, address_groups)
         svc_lookup = _build_svc_lookup(service_objects, service_groups)
-        # A rule side of one family ('any4', 'any6', D5 of docs/IPV6_PLAN.md,
-        # phase 4): 'any4' is the predefined All_Internet (0.0.0.0 to
+        # A rule side of one family ('any4', 'any6'): 'any4' is the predefined All_Internet (0.0.0.0 to
         # 255.255.255.255), 'any6' an address range of the whole family,
         # created below and declared (the management refuses a /0 network)
         _toks = used_catch_all_tokens(rules, nat_rules, ssl_rules)
@@ -6293,8 +6382,7 @@ class CheckpointDriver(DeployDriver):
 
         # ── Address objects + groups ────────────────────────────
         # the IPv6 objects this push declares and the groups that lose them:
-        # the rules referencing either are declared too (docs/IPV6_PLAN.md,
-        # phase 1, D6 and D7)
+        # the rules referencing either are declared too
         ipv6_names: set[str] = set()
         hosts, networks, ranges, domains = _render_address_objects(address_objects, dropped,
                                                                    ipv6_out=ipv6_names)
@@ -6441,7 +6529,7 @@ class CheckpointDriver(DeployDriver):
         )
 
         # ── Decryption (HTTPS-Inspection) rules (Phase 5) ──
-        # Cross-vendor URL-category resolution (project_cp_url_category_map_plan):
+        # Cross-vendor URL-category resolution:
         #   custom category  → itself (migrated as an application-site, same name)
         #   else  → operator manual map  >  live name-match vs the target catalog
         #   else  → None (unmapped → the rule is dropped + warned)
@@ -6687,7 +6775,11 @@ class CheckpointDriver(DeployDriver):
             return
 
         try:
-            sid, base_url = _login(device)
+            # The push stages in a session of its own (backlog 33): publish and
+            # discard then close exactly this session. The shared read session
+            # is closed first, so the pre-flight below does not count it.
+            _close_cached_session(device)
+            sid, base_url = _login(device, fresh=True)
         except Exception as e:
             yield StepResult(step="auth", success=False, detail=str(e))
             return
@@ -6695,16 +6787,16 @@ class CheckpointDriver(DeployDriver):
         yield StepResult(step="auth", success=True,
                          detail="session established")
 
-        # Pre-flight: discard any orphan sessions our user still holds
-        # (prior pushes that crashed before publish/discard). Assumes Gateshift
-        # runs under its own dedicated CP API user per device, so wiping
-        # all other sessions of that user is safe.
-        discarded, derr = _discard_orphan_sessions(base_url, sid)
-        if discarded > 0 or derr:
-            detail = f"discarded {discarded} orphan session(s)"
+        # Pre-flight: close the sessions our user still holds from an earlier
+        # push that ended before publish or discard (a crash, a disconnect).
+        # Assumes Gateshift runs under its own dedicated CP API user per
+        # device, so taking over all other sessions of that user is safe.
+        closed, derr = _discard_orphan_sessions(base_url, sid)
+        if closed > 0 or derr:
+            detail = f"closed {closed} session(s) left by an earlier push"
             if derr:
-                detail += f"; last error: {derr}"
-            yield StepResult(step="cleanup orphan sessions",
+                detail += f", last error: {derr}"
+            yield StepResult(step="earlier sessions",
                              success=True, detail=detail)
 
         # Reserved-name collisions (BUG-023): rename custom objects/services
@@ -7195,7 +7287,7 @@ class CheckpointDriver(DeployDriver):
                                 mgmt_override=mgmt_override,
                                 deferred_out=deferred_mgmt):
                             yield step
-                            if not step.success:
+                            if not step.success and step.step != _IPV6_PREFLIGHT_STEP:
                                 ok = False
                                 break
                         if not ok:
@@ -7206,7 +7298,7 @@ class CheckpointDriver(DeployDriver):
                             for step in _push_cluster_routes(
                                     device, cluster_members, cmds):
                                 yield step
-                                if not step.success:
+                                if not step.success and step.step != _IPV6_PREFLIGHT_STEP:
                                     ok = False
                                     break
                             if not ok:
@@ -7221,7 +7313,7 @@ class CheckpointDriver(DeployDriver):
                         for step in _gaia_push_static_routes(
                                 gaia_base, gaia_sid, cmds):
                             yield step
-                            if not step.success:
+                            if not step.success and step.step != _IPV6_PREFLIGHT_STEP:
                                 ok = False
                                 break
                         if not ok:
@@ -7384,6 +7476,16 @@ class CheckpointDriver(DeployDriver):
                                      detail=str(e))
                     ok = False
 
+            # The gateway OBJECT learns the gateway's interfaces and the
+            # project's zone bindings,
+            # standalone gateways only, declared on failure (D5)
+            if ok and strand == "network" and not is_cluster and gaia_committed:
+                for step in _refresh_gateway_object(
+                        base_url, sid, _cp_cfg.get("gateway_uid"),
+                        _cp_cfg.get("gateway_type") or "simple-gateway",
+                        config.get("Interfaces") or []):
+                    yield step
+
             # Force-reconfigure the mgmt iface dead-last (opt-in) - after
             # save-config so everything else is persisted; this set drops our
             # Gaia session so it can't be saved from here (re-attach + manual
@@ -7441,7 +7543,8 @@ class CheckpointDriver(DeployDriver):
         """Publish a session previously returned by push().
 
         Polls publish-task to completion before yielding success. Logs out
-        the session at the end (whether publish succeeded or not).
+        the session at the end (whether publish succeeded or not): the push
+        opened it for itself, nothing else holds it (backlog 33).
         """
         sid = handle["sid"]
         base_url = handle["base_url"]
@@ -7630,12 +7733,11 @@ def _pinned_package(device: dict | None) -> str | None:
 
 
 def _nat_wipe_package(config: dict, access_package: str | None, device: dict | None) -> str:
-    """The package whose NAT rulebase the policy push wipes (product finding 4,
-    2026-11-15): the one the NAT section names, else the one the access rules
+    """The package whose NAT rulebase the policy push wipes: the one the NAT section names, else the one the access rules
     resolved, else the package pinned on the Device, else Standard. The wipe
     runs for every policy push that keeps NAT in scope, also when the source
     carries no NAT: the NAT rules of an earlier push do not survive a project
-    without any (an Azure source left two seeded rules standing)."""
+    without any (an Azure source left two earlier rules standing)."""
     raw = config.get("NAT Rules")
     if raw:
         try:
@@ -7925,7 +8027,7 @@ def _wipe_tp_layer(
     try:
         while True:
             # ``show-threat-rulebase`` (no hyphen - sibling spelling
-            # ``show-threat-rule-base`` 404s; see project_cp_tp_rulebase_api).
+            # ``show-threat-rule-base`` 404s).
             resp = _call(base_url, sid, "show-threat-rulebase", {
                 "name": layer, "limit": page, "offset": offset,
                 "details-level": "uid",
@@ -8234,7 +8336,7 @@ def _push_cluster_routes(
                     return
             for step in _gaia_push_static_routes(g_base, g_sid, route_cmds):
                 yield step
-                if not step.success:
+                if not step.success and step.step != _IPV6_PREFLIGHT_STEP:
                     return
             _gaia_save_config(g_base, g_sid)
             yield StepResult(step=f"Push Static Routes [{who}]", success=True,
@@ -8244,6 +8346,94 @@ def _push_cluster_routes(
                 _gaia_logout(g_base, g_sid)
             except Exception:
                 pass
+
+
+_TOPOLOGY_WORKAROUND = ("the gateway object keeps its interface list: run Get Interfaces with "
+                        "topology on the gateway object in SmartConsole, then install the policy")
+
+
+def _refresh_gateway_object(base_url: str, sid: str, gateway_uid: str | None,
+                            gateway_type: str, iface_records: list[dict]) -> Iterator[StepResult]:
+    """After the Gaia writes the gateway OBJECT learns the gateway's interfaces
+    (`get-interfaces` with topology, what the SmartConsole button does) and
+    the project's zone bindings land on it with one `set-simple-gateway`. Standalone gateways only.
+    A failure here is declared, never fatal: the Gaia changes are live and
+    have no rollback, the operator publishes and runs Get Interfaces by hand
+    (D5). The object may lag the task by a moment, so the write waits until
+    the object lists the fetched interfaces (D8, measured 2026-11-19)."""
+    step = "topology: get-interfaces"
+    total = 0
+    ifaces: list[dict] = []
+    try:
+        gw = _fetch_gateway_topology(base_url, sid, gateway_uid or "", gateway_type or "simple-gateway")
+        name = str(gw.get("name") or "")
+        if not name:
+            raise RuntimeError("the gateway object has no name")
+        t = _call(base_url, sid, "get-interfaces",
+                  {"target-name": name, "with-topology": True, "use-defined-by-routes": True})
+        task = _wait_task(base_url, sid, str(t.get("task-id") or ""), timeout=300)
+        if (task.get("status") or "") != "succeeded":
+            errs = "; ".join(str(x) for d in (task.get("task-details") or [])
+                             for x in (d.get("errors") or []))[:200]
+            raise RuntimeError(f"get-interfaces {task.get('status') or 'failed'}: {errs or 'no detail'}")
+        details = (task.get("task-details") or [{}])[0]
+        total = int(details.get("total") or len(details.get("interfaces") or []) or 0)
+        deadline = time.time() + 60
+        while True:
+            obj = _call(base_url, sid, "show-simple-gateway", {"name": name, "details-level": "full"})
+            ifaces = [i for i in (obj.get("interfaces") or []) if isinstance(i, dict)]
+            if len(ifaces) >= total or time.time() >= deadline:
+                break
+            time.sleep(2)
+    except Exception as e:
+        yield StepResult(step=step, success=False, detail=f"{str(e)[:200]}. {_TOPOLOGY_WORKAROUND}")
+        return
+    yield StepResult(step=step, success=True,
+                     detail=f"{len(ifaces)} interface(s) read from the gateway, topology from its routes")
+    step = "topology: zone bindings"
+    if total and len(ifaces) < total:
+        yield StepResult(step=step, success=False,
+                         detail=(f"the object lists {len(ifaces)} of the {total} fetched interface(s), "
+                                 f"the zone bindings are not written. {_TOPOLOGY_WORKAROUND}"))
+        return
+    # the artefact stores a section as its JSON text, the push hands it on as is
+    recs: Any = iface_records
+    if isinstance(recs, str):
+        try:
+            recs = json.loads(recs)
+        except ValueError:
+            recs = []
+    zone_of = {str(r.get("name") or ""): str(r.get("zone") or "") for r in (recs or [])
+               if isinstance(r, dict) and r.get("name") and r.get("zone")}
+    keep = ("name", "ipv4-address", "ipv4-mask-length", "ipv6-address", "ipv6-mask-length",
+            "topology", "topology-settings", "anti-spoofing", "anti-spoofing-settings",
+            "security-zone", "security-zone-settings")
+    entries: list[dict] = []
+    bound: list[str] = []
+    for i in ifaces:
+        e = {k: i[k] for k in keep if k in i and i[k] not in (None, "", {})}
+        szs = e.get("security-zone-settings")
+        if isinstance(szs, dict) and isinstance(szs.get("specific-zone"), dict):
+            # details-level full inlines the zone object, the write takes its name
+            e["security-zone-settings"] = dict(szs, **{"specific-zone": szs["specific-zone"].get("name") or ""})
+        z = zone_of.get(str(e.get("name") or ""))
+        if z:
+            e["security-zone"] = True
+            e["security-zone-settings"] = {"auto-calculated": False, "specific-zone": z}
+            bound.append(f"{e['name']}={z}")
+        entries.append(e)
+    if not bound:
+        yield StepResult(step=step, success=True,
+                         detail="no zone bindings in this project, the management's calculation stays")
+        return
+    try:
+        _call(base_url, sid, "set-simple-gateway", {"name": name, "interfaces": entries, "ignore-warnings": True})
+    except Exception as e:
+        yield StepResult(step=step, success=False, detail=f"{str(e)[:200]}. {_TOPOLOGY_WORKAROUND}")
+        return
+    yield StepResult(step=step, success=True,
+                     detail=(f"{len(bound)} interface(s) bound to their zones: " + ", ".join(bound[:8])
+                             + (f" (+{len(bound) - 8} more)" if len(bound) > 8 else "")))
 
 
 def _push_cluster_interfaces(
@@ -8462,18 +8652,22 @@ def _gaia_push_interfaces(
     for r in by_type["bond"]:
         for m in r.get("members") or []:
             declared_members.add(str(m))
-    # the IPv6 preflight (docs/IPV6_PLAN.md, section 16): one read, and the
-    # v6 addresses of this push are skipped, loudly, while IPv6 is disabled
-    if any(r.get("ipv6") for r in records) and _gaia_ipv6_enabled(base_url, sid) is False:
-        yield StepResult(step="gaia: ipv6 preflight", success=False, detail=_IPV6_PREFLIGHT_DETAIL)
+    # the IPv6 preflight: one read, and the
+    # v6 addresses of this push are skipped, loudly, while IPv6 is disabled.
+    # The same read tells the physical writes whether the IPv6 clear of an
+    # undeclared family may go out.
+    _v6_state = _gaia_ipv6_enabled(base_url, sid) if by_type["physical"] or any(r.get("ipv6") for r in records) else None
+    ipv6_enabled = _v6_state is True
+    if any(r.get("ipv6") for r in records) and _v6_state is False:
+        yield StepResult(step=_IPV6_PREFLIGHT_STEP, success=False, detail=_IPV6_PREFLIGHT_DETAIL)
         for r in records:
             r["ipv6"], r["ipv6_mask_len"] = "", None
 
     # ── Pre-clear: release desired IPs held by OTHER physicals ──
     # Gaia rejects set-physical-interface when the address is "already in
     # use as the local address of <other-if>" - which is exactly what an
-    # IP that MOVES between interfaces looks like (fgt2cp finding
-    # 2026-08-31: the wiped box still carried the old estate addressing).
+    # IP that MOVES between interfaces looks like (for example on a wiped
+    # gateway that still carries the old addressing).
     # Clear the current holder first (set ipv4-address:'' - live-verified);
     # its own desired address, if any, lands in the normal loop below.
     # The mgmt interface is never cleared.
@@ -8483,19 +8677,21 @@ def _gaia_push_interfaces(
         _cur_items = (_cur_resp.get("objects")
                       or _cur_resp.get("physical-interfaces")
                       or _cur_resp.get("interfaces") or [])
+        # the current holder of every address, both families: an IPv6 address that moves
+        # between ports is released like an IPv4 one
         _holder: dict[str, str] = {}
         for _it in (_cur_items if isinstance(_cur_items, list) else []):
-            _ip = str(_it.get("ipv4-address") or "").strip()
             _nm = str(_it.get("name") or "").strip()
-            if _nm and _ip and _ip[0].isdigit():
-                _holder[_ip] = _nm
+            for _key in ("ipv4-address", "ipv6-address"):
+                _ip = str(_it.get(_key) or "").strip()
+                if _nm and _ip and _ip != "Not-Configured" and (_ip[0].isdigit() or ":" in _ip):
+                    _holder[_ip] = _nm
         # ── Preflight: every physical interface of this push must exist on
         # the gateway, Gaia creates none (set-physical-interface answers
-        # "Failed to find interface"; 0.9.4 matrix, 2026-10-18: a cloud
-        # source's subnet names pushed as physical interfaces, six written
-        # before the seventh failed). Refused before the first write, with
-        # the names, because a Gaia change takes effect at once and nothing
-        # takes it back.
+        # "Failed to find interface", and a cloud source's subnet names
+        # pushed as physical interfaces had six written before the seventh
+        # failed). Refused before the first write, with the names, because
+        # a Gaia change takes effect at once and nothing takes it back.
         _present = {str(_it.get("name") or "").strip()
                     for _it in (_cur_items if isinstance(_cur_items, list) else [])}
         _present.discard("")
@@ -8510,22 +8706,29 @@ def _gaia_push_interfaces(
                         "Interfaces lists them), make it a VLAN on a port, or mark it skip, then build "
                         "and push again."))
             return
+        # every address this push writes, a VLAN's, bond's or loopback's
+        # too: an address that moves from a port to a VLAN is held by the
+        # port until it is released (eth5 held the address eth3.110 wanted,
+        # add-vlan-interface answered "already in use as the local address
+        # of eth5")
         _cleared = []
-        for _r in by_type["physical"]:
-            _want_ip = str(_r.get("ipv4") or "").strip()
+        for _r in (by_type["physical"] + by_type["bond"]
+                   + by_type["loopback"] + by_type["vlan"]):
             _want_nm = str(_r.get("name") or "").strip()
-            if not _want_ip or _want_ip == mgmt_ip:
-                continue
-            _own = _holder.get(_want_ip)
-            if (_own and _own != _want_nm and _own != mgmt_iface_name
-                    and _own not in _cleared):
-                _gaia_call(base_url, sid, "set-physical-interface",
-                           {"name": _own, "ipv4-address": ""})
-                _cleared.append(_own)
+            for _fam_key, _want_ip in (("ipv4-address", str(_r.get("ipv4") or "").strip()),
+                                       ("ipv6-address", str(_r.get("ipv6") or "").strip())):
+                if not _want_ip or _want_ip == mgmt_ip:
+                    continue
+                _own = _holder.get(_want_ip)
+                if (_own and _own != _want_nm and _own != mgmt_iface_name
+                        and (_own, _fam_key) not in _cleared):
+                    _gaia_call(base_url, sid, "set-physical-interface",
+                               {"name": _own, _fam_key: ""})
+                    _cleared.append((_own, _fam_key))
         if _cleared:
             yield StepResult(
                 step="gaia: pre-clear moved addresses", success=True,
-                detail=("released " + ", ".join(_cleared)
+                detail=("released " + ", ".join(f"{n} ({'IPv6' if k.startswith('ipv6') else 'IPv4'})" for n, k in _cleared)
                         + " (address moves to another interface)"),
             )
     except Exception as e:
@@ -8543,7 +8746,7 @@ def _gaia_push_interfaces(
         skipped = 0
         first_err: str | None = None
         # VLAN adds fail on an admin-down parent ("Interface ethX is down",
-        # matrix finding M-4: fresh Gaia ships data ports down). Pushing
+        # and a fresh Gaia ships its data ports down). Pushing
         # subinterfaces IS the intent that the parent carries traffic, so
         # bring only the actually-used parents up, declared. Other ifaces
         # keep their prior state (the existing no-toggle contract).
@@ -8600,10 +8803,17 @@ def _gaia_push_interfaces(
             ):
                 skipped += 1
                 continue
-            # Admin-state: explicit True/False on disable, None otherwise so
-            # we don't toggle the field on every push (Gaia keeps prior state).
+            # Admin state of a physical port: the project's declaration is
+            # written, up or down.
+            # Gaia ships data ports down, and a port that gets an address but
+            # stays down carries no traffic and is missing from the
+            # management's interface fetch (measured 2026-11-19, eth2 of a
+            # fresh gateway). A VLAN, bond or loopback is created up, and
+            # add-vlan-interface with `enabled: true` answers HTTP 500
+            # "setState() missing 1 required positional argument" (R81.20,
+            # 2026-11-19), so a created interface gets the field only to go down.
             en = r.get("enabled", True)
-            en_arg: bool | None = False if en is False else None
+            en_arg: bool | None = bool(en) if itype == "physical" else (False if en is False else None)
             try:
                 if itype == "physical":
                     if r.get("dhcp_enabled"):
@@ -8613,7 +8823,8 @@ def _gaia_push_interfaces(
                     else:
                         _gaia_set_physical(base_url, sid, name=name, ipv4=ipv4,
                                            mask_len=mask, comment=comment,
-                                           enabled=en_arg, ipv6=ipv6, ipv6_mask_len=mask6)
+                                           enabled=en_arg, ipv6=ipv6, ipv6_mask_len=mask6,
+                                           ipv6_enabled=ipv6_enabled)
                 elif itype == "bond":
                     _gaia_add_bond(base_url, sid, name=name,
                                    members=r.get("members") or [],
@@ -8676,7 +8887,7 @@ def _gaia_force_mgmt_iface(
                                         retries=0)
             else:
                 # Short timeout: we EXPECT the IP change to hang+drop the
-                # session (lab-measured: the full 120s read-timeout otherwise),
+                # session (measured: the full 120s read-timeout otherwise),
                 # so cap the wait at 20s instead of blocking the push for 2 min.
                 _gaia_set_physical(base_url, sid, name=name, ipv4=ipv4,
                                    mask_len=mask, comment=comment, enabled=None,
@@ -8714,7 +8925,7 @@ def _gaia_push_static_routes(
     IPv6 through clish, after the IPv6 preflight."""
     pushed = 0
     if any(":" in (r.get("prefix") or "") for r in records) and _gaia_ipv6_enabled(base_url, sid) is False:
-        yield StepResult(step="gaia: ipv6 preflight", success=False, detail=_IPV6_PREFLIGHT_DETAIL)
+        yield StepResult(step=_IPV6_PREFLIGHT_STEP, success=False, detail=_IPV6_PREFLIGHT_DETAIL)
         records = [r for r in records if ":" not in (r.get("prefix") or "")]
     for r in records:
         prefix = r.get("prefix") or ""

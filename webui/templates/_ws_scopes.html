@@ -87,7 +87,7 @@
             {% if _sp %}<optgroup label="{{ 'Access Policies' if _mgr_is_fmc else 'Policy Packages' }}">
               {% for dg in _sp %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
             </optgroup>{% endif %}
-            {# the instances of a firewall: VDOMs, vsys or virtual systems (docs/VIRTUAL_INSTANCES_PLAN.md) #}
+            {# the instances of a firewall: VDOMs, vsys or virtual systems #}
             {% if _si %}<optgroup label="{{ {'vdom': 'VDOMs', 'vsys': 'Virtual systems (vsys)', 'vs': 'Virtual Systems'}.get(_si[0].type, 'Instances') }}">
               {% for dg in _si %}<option value="{{ dg.id }}" {% if dg.id == device_id %}selected{% endif %}>{{ dg.name }}</option>{% endfor %}
             </optgroup>{% endif %}

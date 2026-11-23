@@ -158,7 +158,7 @@ DANGLING_SKIP_TYPES = frozenset({"schedule"})
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-# the D5 family tokens (docs/IPV6_PLAN.md) are catch-alls, not references
+# the D5 family tokens are catch-alls, not references
 _SENTINELS = {"", "any", "all", "none", "any4", "any6"}
 
 
@@ -217,8 +217,7 @@ def _extract(value, fr: FieldRef):
             yield fr.targets, n
             # trans_src may hold an 'iface|ip' composite (interface-address
             # SNAT). The composite itself is literal_ok; additionally yield
-            # the interface part so renames/deletes see the reference
-            # (asa2pa finding 2026-09-01).
+            # the interface part so renames/deletes see the reference.
             if fr.field == "trans_src" and "interface" in fr.targets and "|" in n:
                 part = _clean(n.split("|", 1)[0])
                 if part:
@@ -305,37 +304,55 @@ def collect_references(conn, device_id: int, *,
         # local_interface / tunnel_interface edits and the soft-delete live
         # in the fw_vpn_tunnel_overrides overlay, never in the raw columns -
         # scanning raw here left interfaces permanently undeletable after
-        # the operator re-pointed or removed the tunnel (pa2fgt finding
-        # 2026-08-31). Raw stays in TABLE_REFERRERS for the WRITE side.
+        # the operator re-pointed or removed the tunnel. Raw stays in
+        # TABLE_REFERRERS for the WRITE side.
         if rr.kind == "vpn_tunnel":
             continue
         # NAT zone slots are override-shadowed (fw_nat_rule_overrides.src_zones/
         # dst_zones, COALESCEd by _load_nat_rules - the deploy renders the
         # override, e.g. auto-derived interface-mode 'portN' instead of the
         # imported zone). Scanning the raw columns kept the imported zone
-        # undeletable forever (pa2fgt finding 2026-08-31, same class as VPN/
-        # PBF). Zone refs come from _nat_zone_references (effective view);
-        # every other NAT field has no overlay and stays raw-scanned here.
+        # undeletable forever (same class as VPN/PBF). Zone refs come from
+        # _nat_zone_references (effective view). Every other NAT field has
+        # no overlay and stays raw-scanned here.
         field_refs = rr.refs
         if rr.kind == "nat_rule":
             field_refs = tuple(fr for fr in rr.refs
                                if fr.field not in ("src_zones", "dst_zones"))
         cols = {rr.id_col, rr.label_col} | {fr.field for fr in field_refs}
+        if rr.kind == "interface":
+            cols.add("deploy_skip")      # a skipped interface is left out of the push: it holds nothing
         if view is not None and rr.kind == "interface":
             cols.add("import_interface_name")
         col_sql = ", ".join(sorted(cols))
-        try:
-            rows = conn.execute(
-                text(f"SELECT {col_sql} FROM {rr.table} WHERE {rr.device_col} = :d"),
-                {"d": device_id},
-            ).mappings().all()
-        except Exception:
-            continue
+        # a project-bound question reads the facts and this project's own rows:
+        # another project's addition (its NAT rule on a shared source) is not
+        # a referrer here. The device-level question keeps every project's rows.
+        _pid = projects[0] if projects and len(projects) == 1 and projects[0] else None
+        rows = None
+        if _pid is not None:
+            try:
+                rows = conn.execute(
+                    text(f"SELECT {col_sql} FROM {rr.table} WHERE {rr.device_col} = :d "
+                         "AND (project_id IS NULL OR project_id = :p)"),
+                    {"d": device_id, "p": int(_pid)},
+                ).mappings().all()
+            except Exception:
+                rows = None      # a referrer table without additions: the plain read below
+        if rows is None:
+            try:
+                rows = conn.execute(
+                    text(f"SELECT {col_sql} FROM {rr.table} WHERE {rr.device_col} = :d"),
+                    {"d": device_id},
+                ).mappings().all()
+            except Exception:
+                continue
         gone_if = set((excluded or {}).get("interface") or ())
         gone_routes = set((excluded or {}).get("route") or ())
         for row in rows:
             rid = row.get(rr.id_col)
             label = str(row.get(rr.label_col) or rid or "")
+            _skipped = bool(row.get("deploy_skip")) if rr.kind == "interface" else False
             if view is not None and rr.kind in ("interface", "route"):
                 row = dict(row)
                 if rr.kind == "interface":
@@ -343,6 +360,8 @@ def collect_references(conn, device_id: int, *,
                     for k in ("zone_name", "vr_name", "parent_iface_name", "member_iface_names"):
                         if k in e:
                             row[k] = json.dumps(e[k]) if isinstance(e[k], list) else e[k]
+                    if "deploy_skip" in e:
+                        _skipped = bool(e["deploy_skip"])
                 else:
                     e = view.route_edits_for(device_id, label, row.get("vr_name"))
                     for k in ("interface_name",):
@@ -352,8 +371,16 @@ def collect_references(conn, device_id: int, *,
             # an excluded interface, an excluded route, a route of an excluded interface
             if rr.kind == "interface" and label in gone_if:
                 continue
+            # a skipped VLAN held its parent, a skipped member its bond: what the push leaves out references nothing
+            if _skipped:
+                continue
             if rr.kind == "route" and (row.get("interface_name") in gone_if
                                        or projview.route_key(label, row.get("vr_name")) in gone_routes):
+                continue
+            # a NAT rule the project left out references nothing either (the
+            # exclusion carries the rule's name as its label): the SNAT a book
+            # deleted still held the management LAN
+            if rr.kind == "nat_rule" and label in set((excluded or {}).get("nat_rule") or ()):
                 continue
             for fr in field_refs:
                 for targets, name in _extract(row.get(fr.field), fr):
@@ -368,7 +395,7 @@ def collect_references(conn, device_id: int, *,
     out.extend(rule_refs)
     imported = _imported_rule_references(conn, device_id)
     if excluded:
-        # the project view (docs/PROJECT_VIEW_DESIGN.md): a rule deleted in the
+        # the project view: a rule deleted in the
         # project references nothing, a deleted member is no reference
         gone_rules = set(excluded.get("rule") or ())
         gone_obj = _excluded_tokens(excluded, "object") | _excluded_tokens(excluded, "service")
@@ -379,9 +406,9 @@ def collect_references(conn, device_id: int, *,
     # its zone/iface columns are authoritative for zone semantics (the
     # deploy renders overrides, not import values) - keeping the import-side
     # zone names as referrers made imported zones permanently undeletable
-    # even after the operator set every rule to any (pa2fgt finding
-    # 2026-08-31). Gate on "the view has RULES", not "the view produced
-    # refs" - a device whose rules all collapsed to any/scalars yields
+    # even after the operator set every rule to any. Gate on "the view has
+    # RULES", not "the view produced refs": a device whose rules all
+    # collapsed to any/scalars yields
     # zero refs yet is fully covered by the effective view. Object/service
     # refs keep the safety-union unchanged.
     if view_has_rules:
@@ -510,7 +537,7 @@ def _vpn_references(conn, device_id: int, projects=None) -> list[Reference]:
     main._load_vpn_tunnels - mirrors _pbf_references. The raw
     fw_vpn_tunnels columns ignore the operator's local-IF re-point and
     the tunnel soft-delete (both live in the overlay), which left
-    interfaces permanently undeletable (pa2fgt finding 2026-08-31)."""
+    interfaces permanently undeletable."""
     refs: list[Reference] = []
     try:
         from main import _load_vpn_tunnels  # lazy (avoids import cycle)
@@ -637,7 +664,7 @@ def _rule_references(conn, device_id: int, projects=None) -> tuple[list[Referenc
     # deploy renders them, not the import values). An overridden side's
     # IMPORT zone names must therefore not count as references - otherwise
     # a zone stays undeletable forever after the operator re-zoned or
-    # any'd every rule (pa2fgt finding 2026-08-31). Presence map per side:
+    # any'd every rule. Presence map per side:
     view_has_rules = False
     seen: set = set()
     inv_cache: dict = {}
@@ -726,7 +753,7 @@ def _imported_rule_references(conn, device_id: int) -> list[Reference]:
                     refs.append(Reference("access_rule", label, label, targets, n))
         # Scalar schedule ref - the consolidated view carries it, but this
         # fallback missed it, so a freshly-imported-not-generated device
-        # flagged every referenced schedule as unused (matrix finding M-2).
+        # flagged every referenced schedule as unused.
         sched = _clean(row.get("schedule"))
         if sched:
             refs.append(Reference("access_rule", label, label,
@@ -838,30 +865,49 @@ def find_unused(conn, device_id: int, target_type: str,
     return referents - used
 
 
-def _valid_names(conn, device_id: int) -> dict[str, set[str]]:
-    """Referent names PLUS valid aliases - the acceptance set for find_dangling.
-    Interface accepts its canonical name AND nameif aliases (ASA routes carry the
-    nameif, which equals the interface's zone_name - see
-    project_asa_route_interface_naming)."""
-    valid = {t: set(s) for t, s in collect_referent_names(conn, device_id).items()}
-    aliases: set[str] = set()
+# the network kinds a manager's policy scope reads from its paired network
+# scope (a Panorama device group from its template stack, a Management Center
+# access policy from its device, an FMG package from its device database)
+NETWORK_REFERENT_TYPES = ("zone", "interface", "vrf")
+
+
+def _iface_zone_aliases(conn, device_id: int) -> set[str]:
+    """The nameif aliases of a device's interfaces (ASA routes carry the nameif,
+    which equals the interface's zone_name)."""
     try:
-        aliases |= {n for (z,) in conn.execute(text(
+        return {n for (z,) in conn.execute(text(
             "SELECT DISTINCT zone_name FROM fw_interfaces WHERE device_id = :d "
             "AND zone_name IS NOT NULL AND zone_name <> ''"
         ), {"d": device_id}) for n in (_clean(z),) if n}
     except Exception:
-        pass
-    valid["interface"] = valid.get("interface", set()) | aliases
+        return set()
+
+
+def _valid_names(conn, device_id: int, net_device_id: int | None = None) -> dict[str, set[str]]:
+    """Referent names PLUS valid aliases - the acceptance set for find_dangling.
+    Interface accepts its canonical name AND nameif aliases. A manager's policy
+    scope keeps its zones, interfaces and VRFs on its paired network scope
+    (`net_device_id`, the caller's `_pano_net_device_id`), so those names count
+    as well: without them every rule of such a scope reported its zones as
+    missing (CE backlog 39, 55 false references on the demo seed)."""
+    valid = {t: set(s) for t, s in collect_referent_names(conn, device_id).items()}
+    valid["interface"] = valid.get("interface", set()) | _iface_zone_aliases(conn, device_id)
+    if net_device_id and int(net_device_id) != int(device_id):
+        net_names = collect_referent_names(conn, int(net_device_id))
+        for ttype in NETWORK_REFERENT_TYPES:
+            valid[ttype] = valid.get(ttype, set()) | net_names.get(ttype, set())
+        valid["interface"] |= _iface_zone_aliases(conn, int(net_device_id))
     return valid
 
 
 def find_dangling(conn, device_id: int,
-                  *, projects: list | None = None) -> list[Reference]:
+                  *, projects: list | None = None,
+                  net_device_id: int | None = None) -> list[Reference]:
     """References whose name exists under NONE of their validatable target types
-    (interface accepts source names + target bindings). `projects` as in
+    (interface accepts source names + target bindings, the network kinds also the
+    paired network scope's names, see _valid_names). `projects` as in
     collect_references - generate passes its own project."""
-    valid = _valid_names(conn, device_id)
+    valid = _valid_names(conn, device_id, net_device_id)
     dangling: list[Reference] = []
     for r in collect_references(conn, device_id,
                                 projects=projects):
@@ -1023,8 +1069,7 @@ def _rewrite_zone_mirrors(conn, device_id: int, old: str, new: str) -> int:
     """A zone name also lives in fw_flows and the consolidated rule tables -
     the mirror the old zone cascade rewrote. Used by reverse_rename
     (migration) only; model A never rewrites it again. The rule tables are
-    keyed on the Device's id, the flows reach it through their sender
-    (docs/DEVICE_IDENTITY_PLAN.md, phases 4 and 5)."""
+    keyed on the Device's id, the flows reach it through their sender."""
     touched = 0
     from main import _CONSOLIDATED_ZONE_TABLES  # lazy (single source of the list)
     for col in ("src_zone", "dst_zone"):
@@ -1170,12 +1215,12 @@ def rehash_and_rekey(conn, device_id: int) -> dict:
     projects_names_v1 runs this once per device after the reverse renames -
     the last time a hash of imported data ever changes. The VPN secrets and
     certificates key on the tunnel's name since phase 3 of
-    docs/DEVICE_IDENTITY_PLAN.md, so no hash move reaches them."""
+    the Device identity rework, so no hash move reaches them."""
     from main import (_write_nat_hash, _write_pbf_hash, _write_ssl_hash,
                       _write_vpn_hash)  # lazy
     out = {}
     # All four configuration hash families. The SSL family was missing here
-    # until phase 2 of docs/DEVICE_IDENTITY_PLAN.md, so its overrides were
+    # until phase 2 of the Device identity rework, so its overrides were
     # orphaned by every re-key that moved an ssl_hash.
     for name, table, col, writer, keyed in (
             ("nat", "fw_nat_rules", "nat_hash", _write_nat_hash, ("fw_nat_rule_overrides",)),

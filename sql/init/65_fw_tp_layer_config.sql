@@ -6,8 +6,7 @@ USE gateshift;
 -- Per-Device, per-TP-Layer generator configuration for CP Threat-
 -- Prevention enrichment.
 --
--- CP TP is a separate rulebase from access-control (see
--- project_cp_tp_separate_rulebase memory). Gateshift generates
+-- CP TP is a separate rulebase from access-control. Gateshift generates
 -- TP-rules deterministically from a Strategy + Params; the generated
 -- rules are NOT persisted here - Preview (frontend) and Push both call
 -- the generator on demand, so there is no drift between what the user
@@ -26,9 +25,8 @@ USE gateshift;
 -- push - that is the explicit Gateshift ownership contract.
 -- Generated rules carry name-prefix "ff-tp-" and a JSON marker in
 -- comments (gateshift:strategy:...) for audit identification only,
--- not as a wipe gate. See project_cp_tp_rulebase_api memory for the
--- Tombstone-Pattern that handles CP's "TP-Layer must have >=1 rule"
--- constraint.
+-- not as a wipe gate. A tombstone pattern handles CP's "TP-Layer must
+-- have >=1 rule" constraint.
 
 CREATE TABLE IF NOT EXISTS fw_tp_layer_config (
   project_id   INT          NOT NULL DEFAULT 0,

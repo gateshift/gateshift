@@ -9,8 +9,8 @@ USE gateshift;
 -- this profile_group over settings.security_profile_group (the device
 -- default emitted uniformly by panw.py _gen_rules).
 --
--- See feedback_rule_identity_hash memory: override tables key on rule_hash,
--- not the legacy (device_host, action, proto, dst_port) natkey.
+-- Override tables key on rule_hash, not the legacy (device_host, action,
+-- proto, dst_port) natkey.
 
 -- profile_group (PA) is now nullable so Forti-only rows (no PA profile-group,
 -- only individual UTM slots) can exist. Same schema-as-superset pattern used

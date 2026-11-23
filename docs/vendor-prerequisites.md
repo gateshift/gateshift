@@ -11,15 +11,11 @@ the host running Gateshift, and self-signed certificates are accepted.
 
 ## Palo Alto Networks (PAN-OS)
 
-**Credential:** API key.
+**Credential:** the API key of an administrator with the permissions
+below. Generate it yourself (see Palo Alto Networks' documentation on API
+key generation), Gateshift never creates credentials.
 
-Generate it yourself, Gateshift never creates credentials:
-
-```
-curl -k "https://<fw>/api/?type=keygen&user=<admin>&password=<pw>"
-```
-
-Paste the `<key>` value. A common mistake is pasting the admin *password*
+Paste the key itself. A common mistake is pasting the admin *password*
 into the API-key field. You get HTTP 403 on every call.
 
 **Permissions** (on a multi-vsys firewall the role must see every vsys the
@@ -45,10 +41,12 @@ command (`show rule-hit-count`) through the same role.
   the administrator-scoped revert until it has had one full commit. A rescued
   push therefore says so in its log, and a second rescue before that commit
   falls back to reverting the whole candidate.
-- **SSL forward proxy** needs a vsys-level forward-trust certificate on
-  the target. Certificates are never migrated (no key material leaves the
+- **SSL forward proxy** needs a forward-trust certificate on the target,
+  set for the vsys or shared (a firewall without multiple virtual systems
+  keeps it shared). Certificates are never migrated (no key material leaves the
   source), so provision it before committing, see Palo Alto's decryption
-  documentation. Gateshift warns at push time when it is absent.
+  documentation. The Review names a missing certificate as a blocker of the
+  policy push (the build reads the firewall), and the push warns once more.
 - **Panorama-managed firewalls** can be connected directly, but you then
   see only the device-local configuration layer. The Panorama itself can be
   discovered here (see Managers below), registering it for the complete
@@ -77,10 +75,10 @@ management port stays protected.
 - **Trusthosts**: an API user usually restricts source IPs. Include the
   address Gateshift connects from, or every call returns HTTP 401.
 - **In an HA cluster, whether the API key works on both members is
-  FortiOS-version-dependent.** Recent releases (observed on 7.6) sync the
-  key with the cluster config. Older releases mint per-member keys that
-  the other member rejects. If a member answers HTTP 401, generate the key
-  on the *current primary* (`execute api-user generate-key <user>`).
+  FortiOS-version-dependent.** Recent releases such as 7.6 sync the key
+  with the cluster config. Older releases mint per-member keys that the
+  other member rejects. If a member answers HTTP 401, generate the key on
+  the *current primary*.
 - Pushes go to the **primary**. Gateshift verifies that and refuses a
   subordinate (its configuration database is replica-only).
 - FortiGate applies configuration **live** (there is no candidate config),
@@ -93,9 +91,9 @@ management port stays protected.
   ports first ("Reset the data ports this push does not address").
   Management and HA ports are never touched by that option.
 - **Cloud HA clusters**: if the heartbeat/management ports get their
-  addresses from DHCP, give them static per-member addresses first. See
-  `KNOWN_LIMITATIONS.md` - a config sync can otherwise propagate the
-  primary's addressing to the secondary.
+  addresses from DHCP, give them static per-member addresses first. A
+  config sync can otherwise propagate the primary's addressing to the
+  secondary (see `KNOWN_LIMITATIONS.md`).
 - FortiManager-managed units can be connected directly, but a direct push
   conflicts with the manager's ownership (the next install overwrites it).
   The FortiManager itself can be discovered here (see Managers below),
@@ -107,9 +105,9 @@ management port stays protected.
   switches it (the switch needs an empty policy set and central NAT, which
   is the operator's step). A push built for the other mode is refused up
   front. Source applications are taken over only where the FortiGuard
-  catalog carries an application of the same name (auto-assign under Profiles &
+  catalogue carries an application of the same name (auto-assign under Profiles &
   Settings > Applications), the rest stays for you to pick from
-  the catalog there, and the push report names what found no match. A
+  the catalogue there, and the push report names what found no match. A
   rule with `application-default` renders service ALL with the
   applications' default ports enforced. As a source, the security
   policies are read as the ruleset (applications by name) and the
@@ -155,7 +153,7 @@ address is never contacted.
 **Notes**
 
 - The IAM API user's password is stored encrypted like every other
-  secret, the user id, region and serial number on the device row.
+  secret, the user id, region and serial number on the Device row.
 - Proxied calls are slower than direct ones. An import or a push that
   takes seconds against a box on the LAN takes a little longer here, the
   content is the same.
@@ -167,9 +165,11 @@ address is never contacted.
 **Credential:** Management API key for a **dedicated** API user on the
 management server (SmartCenter or MDS), not on the gateway.
 
-**Permissions:** read-write on the relevant policy packages. The rule hit
-counters come with the rulebase read (`show-hits` for the pinned gateway,
-cluster or virtual system) and need nothing further.
+**Permissions:** read-write on the relevant policy packages, and for the
+network push onto a standalone gateway the right to edit its gateway
+object. The rule hit counters come with the rulebase read (`show-hits`
+for the pinned gateway, cluster or virtual system) and need nothing
+further.
 
 **Notes**
 
@@ -189,10 +189,19 @@ cluster or virtual system) and need nothing further.
 - **Gaia credentials** (username/password of the gateway) are additionally
   required for the network strand: interfaces and routes live in Gaia, not
   in the management API. In a cluster each member is configured through its
-  own Gaia session.
+  own Gaia session: every member needs the same Gaia credentials and a Gaia
+  API that answers the Gateshift host at the member's own address (the
+  cluster VIP is no Gaia endpoint).
+- **Gateway object refresh** (standalone gateways): after the Gaia writes
+  the network push has the management fetch the gateway's interfaces with
+  topology (what Get Interfaces does) and binds the project's zones on the
+  gateway object. That needs SIC between the management and the gateway
+  and the right to edit the gateway object. When it fails the push
+  declares it and the Gaia changes stay: run Get Interfaces with topology
+  on the gateway object in SmartConsole, then install the policy.
 - **Multi-Domain management**: the wizard takes the domain the gateway
   object lives in. Leave it empty for a SmartCenter.
-- **VSX**: register the VSX gateway or cluster object as the device, with
+- **VSX**: register the VSX gateway or cluster object as the Device, with
   the package the wizard lists for it (its own VSX package). Its virtual
   systems, in whichever domains they live, are imported as source scopes,
   each through the policy installed on it. The network of a virtual system
@@ -206,7 +215,7 @@ cluster or virtual system) and need nothing further.
   routes) is provisioned on the VSX and never pushed: the deploy page
   declares it instead of offering it. The package semantics are unchanged:
   a package installed on every gateway of the domain serves them all.
-- The gateway wizard **pins a policy package** to the device. Import and
+- The gateway wizard **pins a policy package** to the Device. Import and
   push both use exactly that package. The Review & Deploy tab shows the pin and can
   re-check it against the management server (it updates when the gateway
   was moved to another package in SmartConsole).
@@ -277,7 +286,7 @@ dump. It is source-only.
 ## OPNsense
 
 OPNsense is offered in two roles: as a configuration source and as a log
-source, and one firewall may hold both at once on a single device row.
+source, and one firewall may hold both at once on a single Device row.
 
 ### As a configuration source
 
@@ -285,9 +294,14 @@ source, and one firewall may hold both at once on a single device row.
 Configuration > Backups*, then add the firewall with *Devices > +Add Device >
 Firewalls and Clusters > OPNsense*. The hostname comes from the
 file, so nothing has to be typed. The pf counters per rule are read
-through the firewall API when the device also has an API key and secret,
-an upload alone carries none. A device registered with the key pair alone
+through the firewall API when the Device also has an API key and secret,
+an upload alone carries none. A Device registered with the key pair alone
 reads its configuration and its counters through the API.
+
+**Permissions** (a Device with an API key): the key's user needs the
+privilege "Diagnostics: Configuration History" for the configuration
+download, and access to the firewall API's rule statistics
+(`firewall/filter_util/rule_stats`) for the counters.
 
 **Notes**
 
@@ -303,7 +317,7 @@ reads its configuration and its counters through the API.
   pre-shared keys and password hashes. They are stripped before anything
   reaches the database.
 - **To pick up changes made on the firewall,** upload a fresh export. It
-  replaces the stored configuration on the same device row: the device,
+  replaces the stored configuration on the same Device row: the Device,
   its overrides and its curated edits all survive, and *Import* then
   reads the new one in.
 - Interface groups are read as zones. A pf rule binds to a group exactly
@@ -330,15 +344,15 @@ copy it into the receiver's log directory (`syslog-ng/logs/`).
 - Rule candidates build up from observed flows. Let the receiver collect
   during a representative period (include batch windows, backup schedules
   and month-end jobs, not just a quiet afternoon) before generating.
-- Once logs arrive, create the device under +Add Device > Log Sources >
+- Once logs arrive, create the Device under +Add Device > Log Sources >
   OPNsense: the dialog lists the senders the receiver has heard
   (the hostname in the syslog header, the address the packets came from,
-  a serial where the vendor sends one) and the device is created from the
+  a serial where the vendor sends one) and the Device is created from the
   sender or senders that are this firewall. Nothing is registered from the
   stream by itself. The Log Senders page at /devices/senders shows what was
-  heard and lets a sender be attached to a device later.
+  heard and lets a sender be attached to a Device later.
 - A firewall created this way becomes a configuration source simply by
-  being given credentials. It stays one device either way.
+  being given credentials. It stays one Device either way.
 
 ---
 
@@ -469,16 +483,14 @@ What the discovery needs:
   enabled).
 - **FortiManager Cloud**: the instance name
   (`<customer id>.<region>.fortimanager.forticloud.com`) and a FortiCloud
-  IAM API user with its password. Built against the vendor's documentation,
-  see the verification status in KNOWN_LIMITATIONS.md.
+  IAM API user with its password.
 - **Check Point management**: the management address, or the Smart-1 Cloud
   tenant URL (`https://<name>.maas.checkpoint.com/<tenant-id>`), and an
   administrator's API key created in SmartConsole. A SmartCenter is read as
   one context, a Multi-Domain server per domain (the first 50).
 - **Strata Cloud Manager**: the tenant service group id (TSG id) and a
   service account's client id and secret from the tenant's identity and
-  access settings. Built against the vendor's documentation, see the
-  verification status in KNOWN_LIMITATIONS.md.
+  access settings.
 
 ---
 
@@ -490,5 +502,5 @@ look most like tool bugs:
 | Symptom | Cause |
 |---|---|
 | PAN-OS: HTTP 403 on everything | the API-key field holds a password, or the key was revoked |
-| FortiOS: HTTP 401 on everything | trusthost doesn't cover this host, the API user's access profile lacks the object category, or the key belongs to the other cluster member. Repeated 401s can then trip FortiOS admin-lockout, which makes *all* calls 401 until it clears - wait it out rather than retrying into it. |
+| FortiOS: HTTP 401 on everything | trusthost doesn't cover this host, the API user's access profile lacks the object category, or the key belongs to the other cluster member. Repeated 401s can then trip FortiOS admin-lockout, which makes *all* calls 401 until it clears. Wait it out rather than retrying into it. |
 | Check Point: "Expecting value: line 1 column 1" | the API user isn't published, or the API server rejects this client IP |

@@ -202,7 +202,7 @@
   </style>
   {% endif %}
   <style>
-    /* the Box hits / Last hit sort links (docs/HIT_COUNTS_PLAN.md, D7) */
+    /* the Box hits / Last hit sort links */
     th a.box-sort { color: inherit; text-decoration: none; cursor: pointer; }
     th a.box-sort:hover, th a.box-sort.on { color: var(--accent, var(--tx)); }
   </style>
@@ -273,7 +273,7 @@
         {% endif %}
         <th class="num">Hits</th>
         <th>Last Seen</th>
-        {# Hit counts from the box (docs/HIT_COUNTS_PLAN.md, D7): the box's own counter per rule,
+        {# Hit counts from the box: the box's own counter per rule,
            read at import or by Read hit counts, beside the log-derived Hits. Both sort on click. #}
         <th class="num box-col" title="The Device's own counter per rule, read at import or by Read hit counts. Click to sort.">
           <a href="#" hx-get="/rules-fragment?page_size={{ page_size }}&sort={{ 'hits_asc' if box_sort == 'hits_desc' else 'hits_desc' }}" hx-target="#rules-container" hx-swap="outerHTML" hx-include="#device-select, #target-device-select" class="box-sort{% if box_sort in ('hits_desc', 'hits_asc') %} on{% endif %}">Device hits{% if box_sort == 'hits_desc' %} &darr;{% elif box_sort == 'hits_asc' %} &uarr;{% endif %}</a>
@@ -317,7 +317,7 @@
         {% endif %}
         <th></th>
         <th></th>
-        {# the usage filter of the box counters (docs/HIT_COUNTS_PLAN.md, D7): a DOM pass like the other
+        {# the usage filter of the box counters: a DOM pass like the other
            column filters, over the row's data-fusage tokens; the bulk actions work on what it leaves #}
         <th class="box-col" colspan="2">
           <select data-fkey="fusage" title="Narrow to rules by the Device's own counters">
@@ -665,7 +665,7 @@
             </td>
 
             {% if nat_fold_ui %}
-            {% set _nfl = nat_fold_ui.flags.get(rule.rule_name or '') %}
+            {% set _nfl = nat_fold_ui.flags.get(rule.source_rule_name or rule.rule_name or '') %}
             <td class="natflag-col" style="white-space:nowrap;">
               {% if _nfl %}
                 <span class="chip trust" title="Gets 'nat enable'{% if _nfl.pool %} + pool {{ _nfl.pool }}{% endif %} - from source NAT intent{{ 's' if _nfl.intents|length > 1 }} {{ _nfl.intents | join(', ') }}">NAT</span>
@@ -687,9 +687,9 @@
                  - off-flag  → neutral
               #}
               {# Target-driven: show the logging model the SELECTED TARGET
-                 supports, not whichever source field happens to be set
-                 (feedback_enrichment_target_driven). Forti=logtraffic,
-                 PA=log-forwarding, CP=track. Keyed on target_platform so a
+                 supports, not whichever source field happens to be set.
+                 Forti=logtraffic, PA=log-forwarding, CP=track. Keyed on
+                 target_platform so a
                  forti→cp migration shows the editable CP track, not the
                  read-only Forti source logtraffic. #}
               {% if target_platform == 'fortigate' and rule.log_traffic %}
@@ -844,7 +844,7 @@
               {{ rule.last_seen.strftime('%Y-%m-%d %H:%M') if rule.last_seen else '-' }}
             </td>
 
-            {# the box's own counter and its last hit (docs/HIT_COUNTS_PLAN.md, D7); a dash = not read #}
+            {# the box's own counter and its last hit; a dash = not read #}
             <td class="num box-col" style="white-space:nowrap;" title="{{ rule.box_title or 'Not read from the Device' }}">
               {{ rule.box_hits_text or '-' }}
             </td>

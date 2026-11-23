@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS fw_flows (
   extra JSON NULL,
   source_type  VARCHAR(16) NOT NULL DEFAULT 'syslog',
   -- the row's origin: a syslog sender, or a Device's own configuration
-  -- import (fw_log_senders, docs/DEVICE_IDENTITY_PLAN.md phase 4). The
+  -- import (fw_log_senders). The
   -- evidence hangs on the sender, never on a Device: deleting a Device
   -- releases the mapping and keeps what the wire said.
   sender_id INT NOT NULL,

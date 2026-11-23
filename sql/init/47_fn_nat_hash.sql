@@ -6,9 +6,9 @@
 -- (position, name, description, disabled, properties and the timestamps are
 -- excluded: volatile or user-editable). The JSON arrays serialise through
 -- JSON_EXTRACT at $, which depends on the source parsers' stable ordering.
--- Term 1 was the Device's name until phase 6 of docs/DEVICE_IDENTITY_PLAN.md.
+-- Term 1 was the Device's name until phase 6 of the Device identity rework.
 --
--- Until phase 2 of docs/DEVICE_IDENTITY_PLAN.md this expression existed three
+-- Until phase 2 of the Device identity rework this expression existed three
 -- times, once in webui/main.py and once in each of sql/jobs/27 and 28, kept
 -- equal by a comment, with the webapp's copy baked into one image and the
 -- jobs' copies mounted from the checkout. Both halves of the product read it

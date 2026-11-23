@@ -91,7 +91,7 @@ def apply_app_default(rules: list[dict], platform: str, forti_ngfw_mode: str | N
 
     PA resolves the token natively and a FortiGate in policy-based NGFW mode
     carries the applications on its security policy with
-    enforce-default-app-port (docs/FGT_POLICY_MODE_PLAN.md, D4), so both are
+    enforce-default-app-port, so both are
     left alone. Everywhere else a rule whose service is application-default
     gets ``services`` = the default ports of its App-IDs, synthesised as
     ``app-<proto>-<port>`` objects appended to ``service_objects``; the
@@ -100,7 +100,7 @@ def apply_app_default(rules: list[dict], platform: str, forti_ngfw_mode: str | N
     Review's services row.
 
     The per-rule service MODE (``service_override``, the PA switch) is honoured
-    for every target (docs/APPDEF_WIDENING_PLAN.md, D5): ``any`` means the
+    for every target: ``any`` means the
     operator accepts every service, so the rule is left to the drivers' Any
     path untouched and undeclared; ``application-default`` forces this
     resolution even where the source named services.

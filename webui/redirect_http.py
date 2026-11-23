@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Timo Duttine - SPDX-License-Identifier: BUSL-1.1
 """The HTTP side of the web UI: every request is sent to HTTPS on the same
-host (docs/ACCESS_DESIGN.md, L3). Runs next to uvicorn in the web
+host. Runs next to uvicorn in the web
 container, on the port that compose publishes as 80. Nothing is served
 here - not even an error page - so the password never travels in the
 clear by accident.

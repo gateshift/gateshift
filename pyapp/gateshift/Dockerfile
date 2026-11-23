@@ -6,7 +6,7 @@
 # file are baked in beside the collector's code. The collector and the webapp
 # both write the rule pipeline's identity columns; with everything baked, a
 # git pull alone changes nothing at runtime and a rebuild moves both halves
-# together (docs/DEVICE_IDENTITY_PLAN.md, D7).
+# together.
 
 FROM python:3.12-slim
 
